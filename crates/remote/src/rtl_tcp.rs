@@ -10,7 +10,7 @@
 //! settings rather than readings, and the server turns away a second client
 //! for as long as this one holds the socket.
 
-#[cfg(feature = "iqstream")]
+#[cfg(all(feature = "iqstream", not(target_arch = "wasm32")))]
 pub mod serve;
 
 use crate::gaps::Gaps;

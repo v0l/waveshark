@@ -41,6 +41,8 @@ fn air() -> Air {
                 ..Default::default()
             }],
             door: Some(Doors::shared()),
+            webtransport: None,
+            webrtc: false,
         },
     )
     .unwrap();

@@ -35,18 +35,23 @@
 //! and hands decoded buffers over a bounded channel, the same shape the USB
 //! drivers use.
 
-use crate::{CONNECT_TIMEOUT, Probe, Proto, QUEUE_DEPTH};
+use crate::{Probe, Proto};
 use common::device::{
     Device as DeviceTrait, DeviceInfo, DriverKind, GainMode, RxStream, TunerRange,
 };
 use common::{Error, Hz, IqBuf, Result, SampleFormat, Sps};
-use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
-use iqstream::client::{ClientConfig, IqStream};
 use iqstream::proto::Codec;
-use iqstream::{Setting, SettingKind, SettingValue};
+use iqstream::{Block, ClientConfig, Setting, SettingKind, SettingValue};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "iqstream/native.rs"]
+mod link;
+#[cfg(target_arch = "wasm32")]
+#[path = "iqstream/web.rs"]
+mod link;
 
 /// What a tunable server is asked for, and where it says it landed.
 ///
@@ -80,13 +85,6 @@ struct Controls {
 /// Eight is the dongle's own resolution: fewer bits shrink the stream but cost
 /// decodes, and the receiver here is doing more than counting ADS-B messages.
 const BITS: u8 = 8;
-
-fn runtime() -> Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| Error::other(format!("tokio runtime: {e}")))
-}
 
 fn config(name: &str, stream: Option<u16>) -> ClientConfig {
     ClientConfig {
@@ -132,42 +130,33 @@ pub fn probe(addr: &str) -> Result<Probe> {
 pub fn probe_all(addr: &str) -> Result<Vec<Probe>> {
     let addr = Proto::IqStream.parse_addr(addr)?;
     let (host, _) = crate::split_stream(&addr);
-    let host = host.to_string();
-    let rt = runtime()?;
-    rt.block_on(async move {
-        let listing = iqstream::list(host.as_str(), "waveshark probe");
-        let streams = tokio::time::timeout(CONNECT_TIMEOUT, listing)
-            .await
-            .map_err(|_| Error::other(format!("{host} did not answer")))?
-            .map_err(|e| Error::other(format!("{host}: {e}")))?;
-        let named: Vec<Probe> = streams
-            .into_iter()
-            .filter(|s| s.sample_rate > 0)
-            .map(|s| Probe {
-                proto: Proto::IqStream,
-                // The tuner travels with the address, so an entry opened from
-                // the list reaches the one it was made from.
-                addr: format!("{host}#{}", s.id),
-                center: Some(Hz(s.center_hz)),
-                rate: Some(Sps(s.sample_rate as u64)),
-                rates: offered_rates(&s.settings, s.tunable),
-                rate_range: None,
-                gain_db: s.gain_db,
-                name: s.name,
-                settings: s.settings,
-                // The server's own word, and not the same question as whether
-                // the protocol can carry a retune: nothing serving a tuner
-                // somebody else is listening to says yes.
-                tunable: s.tunable,
-                tune_range: s.tune_range_hz.map(|(lo, hi)| Hz(lo)..=Hz(hi)),
-                tuner: "remote".to_string(),
-            })
-            .collect();
-        match named.is_empty() {
-            true => Err(Error::other(format!("{host} did not say what rate it is running at"))),
-            false => Ok(named),
-        }
-    })
+    let named: Vec<Probe> = link::list(host)?
+        .into_iter()
+        .filter(|s| s.sample_rate > 0)
+        .map(|s| Probe {
+            proto: Proto::IqStream,
+            // The tuner travels with the address, so an entry opened from
+            // the list reaches the one it was made from.
+            addr: format!("{host}#{}", s.id),
+            center: Some(Hz(s.center_hz)),
+            rate: Some(Sps(s.sample_rate as u64)),
+            rates: offered_rates(&s.settings, s.tunable),
+            rate_range: None,
+            gain_db: s.gain_db,
+            name: s.name,
+            settings: s.settings,
+            // The server's own word, and not the same question as whether
+            // the protocol can carry a retune: nothing serving a tuner
+            // somebody else is listening to says yes.
+            tunable: s.tunable,
+            tune_range: s.tune_range_hz.map(|(lo, hi)| Hz(lo)..=Hz(hi)),
+            tuner: "remote".to_string(),
+        })
+        .collect();
+    match named.is_empty() {
+        true => Err(Error::other(format!("{host} did not say what rate it is running at"))),
+        false => Ok(named),
+    }
 }
 
 fn offered_rates(settings: &[Setting], tunable: bool) -> Vec<Sps> {
@@ -375,26 +364,8 @@ impl DeviceTrait for Device {
         if !self.settable || !self.info.rates.contains(&r) {
             return Err(Error::RateUnsupported { req: r });
         }
-        let (host, id) = (crate::split_stream(&self.addr).0.to_string(), self.stream.unwrap_or(0));
-        runtime()?.block_on(async {
-            let value = SettingValue::Choice(r.0.to_string());
-            iqstream::set(host.as_str(), "waveshark", id, iqstream::RATE_SETTING, value)
-                .await
-                .map_err(|e| Error::other(format!("{host}: {e}")))?;
-            let started = tokio::time::Instant::now();
-            loop {
-                let listing = iqstream::list(host.as_str(), "waveshark probe");
-                if let Ok(Ok(streams)) = tokio::time::timeout(CONNECT_TIMEOUT, listing).await
-                    && streams.iter().any(|s| s.id == id && s.sample_rate as u64 == r.0)
-                {
-                    return Ok(());
-                }
-                if started.elapsed() >= RATE_SETTLE {
-                    return Err(Error::other(format!("{host} did not move to {} S/s", r.0)));
-                }
-                tokio::time::sleep(common::time::Duration::from_millis(100)).await;
-            }
-        })?;
+        let (host, id) = (crate::split_stream(&self.addr).0, self.stream.unwrap_or(0));
+        link::set_rate(host, id, r)?;
         self.rate = r;
         Ok(())
     }
@@ -538,48 +509,22 @@ impl DeviceTrait for Device {
         if self.streaming.swap(true, Ordering::SeqCst) {
             return Err(Error::Busy);
         }
-        let (tx, rx) = bounded::<IqBuf>(QUEUE_DEPTH);
-        let dropped = Arc::new(AtomicU64::new(0));
-        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-
-        let addr = crate::split_stream(&self.addr).0.to_string();
-        let stream = self.stream;
-        let (center, rate) = (self.center, self.rate);
-        let streaming = self.streaming.clone();
-        let counted = dropped.clone();
-        let dial = self.dial.as_ref().map(|d| (d.want.subscribe(), d.at.clone()));
-        let asks = self.controls.queue.lock().ok().and_then(|mut q| q.take());
-        let settings = self.controls.now.clone();
-        let join = common::thread::Builder::new()
-            .name("iqstream-rx".into())
-            .spawn(move || {
-                match runtime() {
-                    Ok(rt) => {
-                        let f = pump(
-                            Wire { addr, stream, center, rate },
-                            tx,
-                            counted,
-                            stop_rx,
-                            dial,
-                            asks,
-                            settings,
-                        );
-                        if let Err(e) = rt.block_on(f) {
-                            tracing::warn!("iqstream: {e}");
-                        }
-                    }
-                    Err(e) => tracing::error!("{e}"),
-                }
-                streaming.store(false, Ordering::SeqCst);
-            })
-            .map_err(|e| Error::other(format!("spawn rx thread: {e}")))?;
-
-        Ok(Box::new(NetStream { rx, dropped, stop: stop_tx, join: Some(join) }))
+        let wire = Wire {
+            addr: crate::split_stream(&self.addr).0.to_string(),
+            stream: self.stream,
+            center: self.center,
+            rate: self.rate,
+        };
+        let hands = Hands {
+            dial: self.dial.as_ref().map(|d| (d.want.subscribe(), d.at.clone())),
+            asks: self.controls.queue.lock().ok().and_then(|mut q| q.take()),
+            held: self.controls.now.clone(),
+            streaming: self.streaming.clone(),
+        };
+        link::start(wire, hands)
     }
 }
 
-/// Subscribe, decode, and hand blocks over until told to stop.
-#[allow(clippy::too_many_arguments)]
 /// Which tuner on which server, and what it was streaming when it was probed.
 struct Wire {
     addr: String,
@@ -588,88 +533,60 @@ struct Wire {
     rate: Sps,
 }
 
-async fn pump(
-    wire: Wire,
-    tx: Sender<IqBuf>,
-    dropped: Arc<AtomicU64>,
-    mut stop: tokio::sync::watch::Receiver<bool>,
+struct Hands {
     dial: Option<(tokio::sync::watch::Receiver<u64>, Arc<AtomicU64>)>,
-    mut asks: Option<tokio::sync::mpsc::UnboundedReceiver<(String, SettingValue)>>,
+    asks: Option<tokio::sync::mpsc::UnboundedReceiver<(String, SettingValue)>>,
     held: Arc<Mutex<Vec<Setting>>>,
-) -> Result<()> {
-    let Wire { addr, stream: which, center, rate } = wire;
-    let connect = IqStream::connect(addr.as_str(), config("waveshark", which));
-    let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, connect)
-        .await
-        .map_err(|_| Error::other(format!("{addr} did not answer")))?
-        .map_err(|e| Error::other(format!("{addr}: {e}")))?;
+    streaming: Arc<AtomicBool>,
+}
 
-    let (mut want, at) = match dial {
-        Some((w, at)) => (Some(w), Some(at)),
-        None => (None, None),
-    };
-    let mut samples = Vec::new();
-    // What the far end was set to when this subscription started. A change
-    // under a running stream is worth a line in the log: nothing here can set
-    // a remote gain, but a level that moved is why the noise floor did.
-    let mut settings = stream.info().settings.clone();
-    loop {
-        let block = tokio::select! {
-            // next_block is cancellation safe, so losing this branch to the
-            // stop signal loses nothing that had arrived.
-            _ = stop.changed() => break,
-            // Only ever Some where the far end offered its dial, and never
-            // ready otherwise, so a pinned stream never reaches this arm.
-            // A gain, a switch or an antenna port asked of the far end. What
-            // it becomes arrives back as a stream change, which is what the
-            // controls above read.
-            ask = async { asks.as_mut().unwrap().recv().await }, if asks.is_some() => {
-                match ask {
-                    Some((name, value)) => {
-                        if let Err(e) = stream.set_setting(&name, value).await {
-                            tracing::debug!("iqstream: {addr}: {e}");
-                        }
-                    }
-                    // The device was dropped; the samples keep coming until
-                    // whoever holds the stream stops it.
-                    None => asks = None,
-                }
-                continue;
-            }
-            _ = async { want.as_mut().unwrap().changed().await }, if want.is_some() => {
-                let hz = *want.as_mut().unwrap().borrow_and_update();
-                // A refusal is logged and dropped rather than ending the
-                // stream: the samples keep coming from where the tuner is.
-                if let Err(e) = stream.tune(hz).await {
-                    tracing::debug!("iqstream: {e}");
-                }
-                continue;
-            }
-            b = stream.next_block() => match b {
-                Ok(Some(b)) => b,
-                // The server closed the control connection, which is how it
-                // ends a subscription.
-                Ok(None) => break,
-                Err(e) => return Err(Error::other(format!("{addr}: {e}"))),
-            },
-        };
-        if let Some(at) = &at {
+struct Landing {
+    addr: String,
+    center: Hz,
+    rate: Sps,
+    at: Option<Arc<AtomicU64>>,
+    seen: Vec<Setting>,
+    held: Arc<Mutex<Vec<Setting>>>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl Landing {
+    fn new(
+        wire: &Wire,
+        at: Option<Arc<AtomicU64>>,
+        seen: Vec<Setting>,
+        held: Arc<Mutex<Vec<Setting>>>,
+        dropped: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            addr: wire.addr.clone(),
+            center: wire.center,
+            rate: wire.rate,
+            at,
+            seen,
+            held,
+            dropped,
+        }
+    }
+
+    fn land(&mut self, block: Block, settings: &[Setting]) -> IqBuf {
+        if let Some(at) = &self.at {
             at.store(block.center_hz, Ordering::Relaxed);
         }
-        if stream.info().settings != settings {
-            settings = stream.info().settings.clone();
-            for s in &settings {
-                tracing::info!("iqstream: {addr} {} is {}", s.label, describe(&s.value));
+        if settings != self.seen {
+            self.seen = settings.to_vec();
+            for s in &self.seen {
+                tracing::info!("iqstream: {} {} is {}", self.addr, s.label, describe(&s.value));
             }
-            if let Ok(mut now) = held.lock() {
-                *now = settings.clone();
+            if let Ok(mut now) = self.held.lock() {
+                *now = self.seen.clone();
             }
         }
 
-        samples.clear();
+        let mut samples = Vec::new();
         SampleFormat::Cu8.convert(&block.samples, &mut samples);
         if block.padded_before > 0 {
-            dropped.fetch_add(block.padded_before, Ordering::Relaxed);
+            self.dropped.fetch_add(block.padded_before, Ordering::Relaxed);
         }
         // The block's index counts real samples, and padding for a loss was
         // put in front of them, so the buffer starts that much earlier.
@@ -677,24 +594,12 @@ async fn pump(
         // The block's own centre, not the one subscribed at: after a retune
         // the two differ, and everything downstream labels its spectrum and
         // its packets from this.
-        let heard = match at.is_some() {
+        let heard = match self.at.is_some() {
             true => Hz(block.center_hz),
-            false => center,
+            false => self.center,
         };
-        let buf = IqBuf::new(std::mem::take(&mut samples), heard, rate, seq);
-        match tx.try_send(buf) {
-            Ok(()) => {}
-            // A consumer that cannot keep up loses the oldest samples rather
-            // than stalling the socket, which would make the server drop them
-            // for us and take the control connection's keepalive with it.
-            Err(TrySendError::Full(buf)) => {
-                dropped.fetch_add(buf.len() as u64, Ordering::Relaxed);
-            }
-            Err(TrySendError::Disconnected(_)) => break,
-        }
+        IqBuf::new(samples, heard, self.rate, seq)
     }
-    let _ = stream.unsubscribe().await;
-    Ok(())
 }
 
 /// One setting's value, for a log line an operator reads.
@@ -710,39 +615,6 @@ fn describe(v: &iqstream::SettingValue) -> String {
         V::Choice(name) => name.clone(),
         V::Number(v) => format!("{v}"),
         V::Unknown(v) => format!("{v} (a setting this build does not know)"),
-    }
-}
-
-struct NetStream {
-    rx: Receiver<IqBuf>,
-    dropped: Arc<AtomicU64>,
-    stop: tokio::sync::watch::Sender<bool>,
-    join: Option<common::thread::JoinHandle<()>>,
-}
-
-impl RxStream for NetStream {
-    fn read(&mut self) -> Result<IqBuf> {
-        self.rx.recv().map_err(|_| Error::Disconnected)
-    }
-
-    fn dropped(&self) -> u64 {
-        self.dropped.load(Ordering::Relaxed)
-    }
-
-    fn stop(&mut self) {
-        let _ = self.stop.send(true);
-    }
-}
-
-impl Drop for NetStream {
-    fn drop(&mut self) {
-        self.stop();
-        // Drain so the pump's try_send cannot be holding a full channel while
-        // the thread is being waited on.
-        while self.rx.try_recv().is_ok() {}
-        if let Some(j) = self.join.take() {
-            let _ = j.join();
-        }
     }
 }
 

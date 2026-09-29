@@ -45,24 +45,34 @@
 //! asked, because the others are now reading a different piece of spectrum
 //! than the one they subscribed to and nothing else would tell them.
 
-#[cfg(feature = "net")]
+#[cfg(all(feature = "net", not(target_arch = "wasm32")))]
 pub mod client;
 mod config;
 pub mod proto;
-#[cfg(feature = "net")]
+#[cfg(all(feature = "net", not(target_arch = "wasm32")))]
+pub mod rtc;
+#[cfg(all(feature = "net", not(target_arch = "wasm32")))]
 pub mod server;
-#[cfg(not(feature = "net"))]
+#[cfg(not(all(feature = "net", not(target_arch = "wasm32"))))]
 #[path = "server_offline.rs"]
 pub mod server;
-mod url;
 #[cfg(feature = "net")]
+mod subscribe;
+mod url;
+#[cfg(all(feature = "net", target_arch = "wasm32"))]
+pub mod web;
+#[cfg(all(feature = "net", not(target_arch = "wasm32")))]
 pub mod ws;
-#[cfg(not(feature = "net"))]
+#[cfg(not(all(feature = "net", not(target_arch = "wasm32"))))]
 #[path = "ws_offline.rs"]
 pub mod ws;
+#[cfg(all(feature = "net", not(target_arch = "wasm32")))]
+pub mod wt;
 
-#[cfg(feature = "net")]
-pub use client::{Block, ClientConfig, IqStream, Prefer, StreamInfo, list, set};
-pub use config::{Ask, Door, Public, ServerConfig, StreamConfig, Tune};
+#[cfg(all(feature = "net", not(target_arch = "wasm32")))]
+pub use client::{IqStream, list, set};
+pub use config::{Ask, Door, Offered, Public, ServerConfig, StreamConfig, Tune};
 pub use proto::{Codec, RATE_SETTING, Setting, SettingKind, SettingValue, StreamDesc, Transport};
 pub use server::{Server, Stream};
+#[cfg(feature = "net")]
+pub use subscribe::{Block, ClientConfig, Prefer, Stats, StreamInfo, describe_error};

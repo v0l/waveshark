@@ -116,7 +116,19 @@ pub fn heard(
         None if home == Some(l.entry.host.as_str()) => {
             l.entry.also.iter().map(|a| (a.to_string(), Reached::Near(*a))).collect()
         }
-        None => vec![(l.entry.addr(), Reached::Listed)],
+        None => {
+            let browser = cfg!(target_arch = "wasm32");
+            let webtransport = l.entry.webtransport_url().filter(|_| browser);
+            let webrtc = (browser && l.entry.webrtc)
+                .then(|| format!("{}{}", iqstream::ws::WEBRTC, l.author.0));
+            let over_webtransport = webtransport.map(|u| (u, Reached::WebTransport));
+            let over_webrtc = webrtc.map(|u| (u, Reached::WebRtc));
+            over_webtransport
+                .into_iter()
+                .chain(over_webrtc)
+                .chain([(l.entry.addr(), Reached::Listed)])
+                .collect()
+        }
     };
     tries
         .into_iter()
@@ -140,6 +152,8 @@ mod tests {
                 port: 1234,
                 data_port: None,
                 also: Vec::new(),
+                webtransport: None,
+                webrtc: false,
                 station: Station {
                     name: name.into(),
                     description: String::new(),

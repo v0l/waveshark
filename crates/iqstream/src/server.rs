@@ -447,6 +447,7 @@ struct Streams {
     /// which leaves a client naming its own port as a 1.3 one does.
     data_port: u16,
     public: Mutex<Option<Public>>,
+    webtransport: Arc<Mutex<Option<crate::config::Offered>>>,
     /// Where each subscription's punch is expected, by the token it carries.
     /// A pump waits on its entry until a datagram arrives from the address
     /// the client's NAT gave it.
@@ -479,12 +480,18 @@ impl Drop for Punched {
 /// One datagram off the server's data port: a punch, and nothing else is
 /// expected there. Told to the subscription that named the token, which is
 /// how a client behind NAT is reached at all.
-async fn punch_loop(data: Arc<UdpSocket>, shared: Arc<Streams>) {
+async fn punch_loop(data: Arc<UdpSocket>, shared: Arc<Streams>, rtc: Option<crate::rtc::Hub>) {
     let mut buf = [0u8; 2048];
     loop {
         let Ok((n, from)) = data.recv_from(&mut buf).await else {
             continue;
         };
+        if let Some(hub) = &rtc
+            && crate::rtc::is_rtc(&buf[..n])
+        {
+            hub.heard(&buf[..n], from);
+            continue;
+        }
         let Some(token) = decode_punch(&buf[..n]) else {
             continue;
         };
@@ -536,6 +543,8 @@ pub struct Server {
     inner: Arc<Streams>,
     stop: Arc<AtomicBool>,
     join: Option<common::thread::JoinHandle<()>>,
+    rtc: Option<crate::rtc::Hub>,
+    candidates: crate::rtc::Candidates,
 }
 
 impl Server {
@@ -573,6 +582,7 @@ impl Server {
             changed: broadcast::channel(8).0,
             data_port,
             public: Mutex::new(None),
+            webtransport: Arc::new(Mutex::new(None)),
             punches: Mutex::new(HashMap::new()),
             early: Mutex::new(HashMap::new()),
         });
@@ -585,19 +595,50 @@ impl Server {
             .build()
             .map_err(|e| Error::other(format!("tokio runtime: {e}")))?;
 
+        let data = {
+            let _entered = rt.enter();
+            data.and_then(|d| UdpSocket::from_std(d).ok()).map(Arc::new)
+        };
+        let candidates = crate::rtc::Candidates::of(SocketAddr::new(bound.ip(), data_port));
+        let rtc = data.clone().filter(|_| cfg.webrtc).map(|d| {
+            let _entered = rt.enter();
+            let served = inner.clone();
+            let serve: crate::rtc::Serve = Arc::new(move |rd, wr, peer| {
+                let shared = served.clone();
+                tokio::spawn(async move {
+                    tracing::info!("iqstream: {peer} over webrtc");
+                    if let Err(e) = serve_on(Box::new(rd), Box::new(wr), peer, shared, None).await {
+                        tracing::debug!("iqstream: {peer}: {e}");
+                    }
+                });
+            });
+            crate::rtc::Hub::start(d, candidates.clone(), serve)
+        });
+
+        let webtransport = cfg.webtransport.and_then(|port| {
+            let _entered = rt.enter();
+            let at = SocketAddr::new(bound.ip(), port);
+            crate::wt::Listener::bind(at, inner.webtransport.clone())
+                .inspect_err(|e| tracing::warn!("iqstream: no webtransport: {e}"))
+                .ok()
+        });
+
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         let shared = inner.clone();
         let door = cfg.door;
+        let hub = rtc.clone();
         let join = common::thread::Builder::new()
             .name("iqstream-srv".into())
             .spawn(move || {
                 // from_std registers with the reactor, so it has to happen
                 // inside the runtime rather than on the way in.
                 rt.block_on(async move {
-                    let data = data.and_then(|d| UdpSocket::from_std(d).ok()).map(Arc::new);
                     if let Some(d) = data.clone() {
-                        tokio::spawn(punch_loop(d, shared.clone()));
+                        tokio::spawn(punch_loop(d, shared.clone(), hub));
+                    }
+                    if let Some(l) = webtransport {
+                        tokio::spawn(webtransport_loop(Arc::new(l), shared.clone()));
                     }
                     match TcpListener::from_std(listener) {
                         Ok(l) => accept_loop(l, shared, data, stopping, door).await,
@@ -607,17 +648,45 @@ impl Server {
             })
             .map_err(|e| Error::other(format!("spawn server thread: {e}")))?;
 
-        Ok(Arc::new(Server { addr: bound, inner, stop, join: Some(join) }))
+        Ok(Arc::new(Server { addr: bound, inner, stop, join: Some(join), rtc, candidates }))
     }
 
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }
 
+    pub fn webtransport(&self) -> Option<crate::config::Offered> {
+        self.inner.webtransport.lock().ok()?.clone()
+    }
+
     pub fn set_public(&self, public: Option<Public>) {
         if let Ok(mut held) = self.inner.public.lock() {
             *held = public;
         }
+        if let Ok(mut held) = self.candidates.public.lock() {
+            *held = public.and_then(|p| Some(SocketAddr::new(p.addr.ip(), p.data_port?)));
+        }
+    }
+
+    pub fn webrtc(&self) -> bool {
+        self.rtc.is_some()
+    }
+
+    pub fn answer(&self, offer: &str) -> Result<String> {
+        let hub = self.rtc.clone().ok_or_else(|| Error::other("this server offers no webrtc"))?;
+        let offer = offer.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let asking = common::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().build();
+            let answer = match rt {
+                Ok(rt) => rt.block_on(hub.answer(offer)),
+                Err(e) => Err(other(e)),
+            };
+            let _ = tx.send(answer);
+        });
+        let answer = rx.recv().map_err(|_| Error::other("webrtc has stopped"))?;
+        let _ = asking.join();
+        answer
     }
 
     pub fn public(&self) -> Option<Public> {
@@ -787,6 +856,36 @@ async fn serve(
     sock.set_nodelay(true).map_err(other)?;
     let (rd, wr) = sock.into_split();
     serve_on(Box::new(rd), Box::new(wr), peer, shared, data).await
+}
+
+async fn webtransport_loop(listener: Arc<crate::wt::Listener>, shared: Arc<Streams>) {
+    let rotating = listener.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(crate::wt::ROTATE).await;
+            match rotating.rotate() {
+                Ok(()) => tracing::info!("iqstream: webtransport certificate renewed"),
+                Err(e) => tracing::warn!("iqstream: {e}"),
+            }
+        }
+    });
+    tracing::info!("iqstream: webtransport on udp port {}", listener.port());
+    loop {
+        match listener.accept().await {
+            Ok((send, recv, peer)) => {
+                let shared = shared.clone();
+                tokio::spawn(async move {
+                    tracing::info!("iqstream: {peer} over webtransport");
+                    if let Err(e) =
+                        serve_on(Box::new(recv), Box::new(send), peer, shared, None).await
+                    {
+                        tracing::debug!("iqstream: {peer}: {e}");
+                    }
+                });
+            }
+            Err(e) => tracing::debug!("iqstream: webtransport: {e}"),
+        }
+    }
 }
 
 async fn serve_ws(sock: TcpStream, peer: SocketAddr, shared: Arc<Streams>) -> Result<()> {

@@ -139,6 +139,8 @@ pub fn station_card(ui: &mut egui::Ui, f: &sdr_directory::probe::Found, idle: bo
                 Some(Reached::Near(lan)) => {
                     said.push(format!("on this network, reached here at {lan}"))
                 }
+                Some(Reached::WebTransport) => said.push("reached over WebTransport".into()),
+                Some(Reached::WebRtc) => said.push("reached over WebRTC".into()),
                 Some(Reached::Listed) => {}
                 None => said.push("not yet checked".into()),
             }

@@ -183,6 +183,7 @@ pub fn entry<C>(
     port: u16,
     data_port: Option<u16>,
     also: Vec<SocketAddr>,
+    webtransport: Option<u16>,
     server: &iqstream::Server,
 ) -> Entry {
     let streams = server.streams();
@@ -202,6 +203,10 @@ pub fn entry<C>(
         port,
         data_port,
         also,
+        webtransport: webtransport
+            .zip(server.webtransport())
+            .map(|(port, offered)| crate::WebTransport { port, hashes: offered.hex() }),
+        webrtc: server.webrtc(),
         station: Station {
             name: listing.name.clone(),
             description: listing.description.clone(),
@@ -220,26 +225,38 @@ struct Reach {
     port: u16,
     data_port: Option<u16>,
     also: Vec<SocketAddr>,
+    webtransport: Option<u16>,
 }
 
 impl Reach {
     fn entry<C>(&self, listing: &Offer<C>, server: &iqstream::Server) -> Entry {
-        entry(listing, &self.host, self.port, self.data_port, self.also.clone(), server)
+        let (host, port, data_port) = (&self.host, self.port, self.data_port);
+        entry(listing, host, port, data_port, self.also.clone(), self.webtransport, server)
     }
 }
 
 fn reach<C>(
     listing: &Offer<C>,
     server: &iqstream::Server,
-    map: &mut Option<PortMap>,
+    maps: &mut Maps,
     state: &Mutex<ListingState>,
     open: &impl Fn(NonZeroU16) -> Result<PortMap, String>,
 ) -> Result<Reach, String> {
     let local = server.addr().port();
     let (host, port, data_port) = match &listing.public_host {
         Some(host) => (host.clone(), local, Some(local)),
-        None => mapped(map, local, state, open)?,
+        None => mapped(&mut maps.iq, local, state, open)?,
     };
+    let webtransport = server.webtransport().and_then(|o| match &listing.public_host {
+        Some(_) => Some(o.port),
+        None => match mapped(&mut maps.webtransport, o.port, state, open) {
+            Ok((_, _, udp)) => udp,
+            Err(e) => {
+                tracing::debug!("iqstream directory: webtransport port {}: {e}", o.port);
+                None
+            }
+        },
+    });
     server.set_public(listing.public_host.is_none().then(|| iqstream::Public {
         addr: SocketAddr::new(host.parse().unwrap_or(server.addr().ip()), port),
         data_port,
@@ -248,7 +265,7 @@ fn reach<C>(
         Some(_) => Vec::new(),
         None => lan_addr(server.addr()).into_iter().collect(),
     };
-    Ok(Reach { host, port, data_port, also })
+    Ok(Reach { host, port, data_port, also, webtransport })
 }
 
 fn run<D: SdrDirectory>(
@@ -259,7 +276,7 @@ fn run<D: SdrDirectory>(
     open: &impl Fn(NonZeroU16) -> Result<PortMap, String>,
 ) {
     let Some(server) = wait_for_server(&find, wanted) else { return };
-    let mut map: Option<PortMap> = None;
+    let mut maps = Maps::default();
     let mut dir: Option<(D::Config, D)> = None;
     let mut announced = false;
     let mut listed: Option<(Reach, Entry)> = None;
@@ -281,7 +298,7 @@ fn run<D: SdrDirectory>(
         let drift = settled && last.elapsed() >= pace.apart;
         if tried != Some(seen) || drift || Instant::now() >= due {
             (tried, moved, last) = (Some(seen), None, Instant::now());
-            let now = match reach(&listing, &server, &mut map, state, open) {
+            let now = match reach(&listing, &server, &mut maps, state, open) {
                 Err(why) => {
                     listed = None;
                     if let Some((_, d)) = &dir {
@@ -301,7 +318,7 @@ fn run<D: SdrDirectory>(
                 (Some(_), None) => Duration::from_secs(ANNOUNCE_EVERY_SECS),
                 (None, _) => RETRY,
             };
-            if let Some(renew) = map.as_ref().and_then(PortMap::renew_in) {
+            for renew in maps.renew_in() {
                 next = next.min(renew);
             }
             due = Instant::now() + next;
@@ -313,7 +330,7 @@ fn run<D: SdrDirectory>(
     if let Some((_, dir)) = dir {
         close(dir, announced);
     }
-    if let Some(map) = &map {
+    for map in [&maps.iq, &maps.webtransport].into_iter().flatten() {
         map.close();
     }
     server.set_public(None);
@@ -342,6 +359,18 @@ fn wait_for_server<C: Clone + PartialEq>(
             return Some(s);
         }
         wanted.wait(seen, SERVER_POLL);
+    }
+}
+
+#[derive(Default)]
+struct Maps {
+    iq: Option<PortMap>,
+    webtransport: Option<PortMap>,
+}
+
+impl Maps {
+    fn renew_in(&self) -> impl Iterator<Item = Duration> + '_ {
+        [&self.iq, &self.webtransport].into_iter().flatten().filter_map(PortMap::renew_in)
     }
 }
 
@@ -493,7 +522,7 @@ mod tests {
     fn a_retune_is_listed_once_it_settles_and_no_sooner_than_the_pace_allows() {
         let server = iqstream::Server::start(
             "127.0.0.1:0".parse().unwrap(),
-            iqstream::ServerConfig { name: "test".into(), streams: Vec::new(), door: None },
+            iqstream::ServerConfig { name: "test".into(), ..Default::default() },
         )
         .unwrap();
         let stream = server.stream_named(iqstream::StreamConfig {
@@ -540,6 +569,45 @@ mod tests {
         lister.withdraw(Duration::from_secs(2));
     }
 
+    #[test]
+    fn a_server_offering_webtransport_is_listed_with_its_port_and_certificates() {
+        let server = iqstream::Server::start(
+            "127.0.0.1:0".parse().unwrap(),
+            iqstream::ServerConfig { webtransport: Some(0), ..Default::default() },
+        )
+        .unwrap();
+        server.stream_named(iqstream::StreamConfig {
+            name: "span".into(),
+            center_hz: 1_090_000_000,
+            sample_rate: 2_400_000,
+            ..Default::default()
+        });
+        let offered = server.webtransport().unwrap();
+        let log = Log::default();
+        let offer = Offer {
+            name: "G0ABC".into(),
+            description: String::new(),
+            antenna: String::new(),
+            location: None,
+            public_host: Some("198.51.100.7".into()),
+            directory: log.clone(),
+        };
+        let found = server.clone();
+        let lister =
+            Lister::<Recorder>::paced(move || Some(found.clone()), offer, Pace::LIVE).unwrap();
+        until(&log, 1);
+        let listed = log.0.lock().unwrap()[0].1.clone().unwrap();
+        assert_eq!(
+            listed.webtransport,
+            Some(crate::WebTransport { port: offered.port, hashes: offered.hex() })
+        );
+        assert_eq!(
+            listed.webtransport_url().unwrap(),
+            format!("https://198.51.100.7:{}/?cert={}", offered.port, offered.hex().join(","))
+        );
+        lister.withdraw(Duration::from_secs(2));
+    }
+
     type Asked = Arc<Mutex<Vec<(Instant, u8, u16)>>>;
 
     fn fake_nat_pmp(lease_secs: u32, grants: Vec<Option<u16>>) -> (std::net::SocketAddrV4, Asked) {
@@ -582,7 +650,7 @@ mod tests {
     fn a_lease_is_renewed_before_it_lapses_a_moved_port_relisted_and_a_refusal_withdrawn() {
         let server = iqstream::Server::start(
             "127.0.0.1:0".parse().unwrap(),
-            iqstream::ServerConfig { name: "test".into(), streams: Vec::new(), door: None },
+            iqstream::ServerConfig { name: "test".into(), ..Default::default() },
         )
         .unwrap();
         server.stream_named(iqstream::StreamConfig {

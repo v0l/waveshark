@@ -10,7 +10,13 @@ fn main() {
     let listed = dir.list(Duration::from_secs(10)).unwrap();
     println!("{} listings in {:?}", listed.len(), t.elapsed());
     for l in &listed {
-        println!("{} {} {}", l.author, l.entry.addr(), l.entry.station.name);
+        println!(
+            "{} {} {} {:?}",
+            l.author,
+            l.entry.addr(),
+            l.entry.station.name,
+            l.entry.webtransport
+        );
     }
     dir.close();
 }

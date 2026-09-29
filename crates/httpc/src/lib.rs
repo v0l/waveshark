@@ -32,6 +32,10 @@ pub use platform::{Chunks, client};
 pub use request::{Body, Method, Part, Request, Response, get, post};
 
 mod request;
+#[cfg(target_arch = "wasm32")]
+pub mod rtc;
+#[cfg(target_arch = "wasm32")]
+pub mod ws;
 
 #[cfg(test)]
 mod tests {

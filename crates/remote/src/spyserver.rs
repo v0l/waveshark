@@ -1,4 +1,4 @@
-#[cfg(feature = "iqstream")]
+#[cfg(all(feature = "iqstream", not(target_arch = "wasm32")))]
 pub mod serve;
 
 use crate::{CONNECT_TIMEOUT, Probe, Proto, QUEUE_DEPTH};

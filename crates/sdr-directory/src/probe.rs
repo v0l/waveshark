@@ -15,6 +15,8 @@ pub const SILENT_FOR: u64 = 4 * 60 * 60;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Reached {
     Listed,
+    WebTransport,
+    WebRtc,
     Ours(SocketAddr),
     Near(SocketAddr),
 }
@@ -139,17 +141,10 @@ pub fn sweep(
         held.due(listings, now)
     };
     let next = AtomicUsize::new(0);
-    std::thread::scope(|scope| {
-        for _ in 0..workers.min(due.len()) {
-            scope.spawn(|| {
-                while let Some(l) = due.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    let heard = probe(l);
-                    probes
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(l, Probed { at: now, heard });
-                }
-            });
+    common::thread::on_each(workers.min(due.len()), || {
+        while let Some(l) = due.get(next.fetch_add(1, Ordering::Relaxed)) {
+            let heard = probe(l);
+            probes.lock().unwrap_or_else(|e| e.into_inner()).insert(l, Probed { at: now, heard });
         }
     });
     due.len()
@@ -195,6 +190,10 @@ impl Found {
     pub fn addr(&self) -> String {
         match self.said().map(|s| s.reached) {
             Some(Reached::Ours(at) | Reached::Near(at)) => at.to_string(),
+            Some(Reached::WebTransport) => {
+                self.listing.entry.webtransport_url().unwrap_or_default()
+            }
+            Some(Reached::WebRtc) => format!("{}{}", iqstream::ws::WEBRTC, self.listing.author.0),
             Some(Reached::Listed) | None => self.listing.entry.addr(),
         }
     }
@@ -203,7 +202,7 @@ impl Found {
         match (&self.heard, self.said().map(|s| s.reached)) {
             (_, Some(Reached::Ours(_))) => 0,
             (_, Some(Reached::Near(_))) => 1,
-            (_, Some(Reached::Listed)) => 2,
+            (_, Some(Reached::Listed | Reached::WebTransport | Reached::WebRtc)) => 2,
             (None, None) => 3,
             (Some(_), None) => 4,
         }

@@ -292,6 +292,8 @@ mod tests {
             port: port.parse().unwrap(),
             data_port: None,
             also: Vec::new(),
+            webtransport: None,
+            webrtc: false,
             station: Station {
                 name: name.into(),
                 description: String::new(),

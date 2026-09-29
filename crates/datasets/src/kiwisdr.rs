@@ -73,6 +73,8 @@ fn listing(row: &Row, now: u64) -> Option<Listing> {
         port,
         data_port: None,
         also: Vec::new(),
+        webtransport: None,
+        webrtc: false,
         station: Station {
             name: status.name,
             description: field("loc").unwrap_or_default().trim().to_string(),

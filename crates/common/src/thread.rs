@@ -32,3 +32,21 @@ pub fn wait<T>(work: impl std::future::Future<Output = T>) -> T {
         std::thread::park();
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn on_each(threads: usize, work: impl Fn() + Sync) {
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(&work);
+        }
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn on_each(threads: usize, work: impl Fn() + Sync) {
+    rayon::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|_| work());
+        }
+    });
+}

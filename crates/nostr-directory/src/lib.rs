@@ -7,11 +7,19 @@ pub mod event;
 pub mod keys;
 #[cfg(all(feature = "relay", any(test, feature = "mock-relay")))]
 pub mod mock;
+pub mod nip44;
 #[cfg(feature = "relay")]
 pub mod relays;
 #[cfg(feature = "relay")]
+pub mod signal;
+#[cfg(all(feature = "relay", not(target_arch = "wasm32")))]
+mod socket;
+#[cfg(all(feature = "relay", target_arch = "wasm32"))]
+#[path = "socket_web.rs"]
 mod socket;
 pub mod tags;
+#[cfg(feature = "relay")]
+mod url;
 
 pub use directory::NostrDirectory;
 pub use event::{Event, KIND, Refused};

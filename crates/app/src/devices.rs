@@ -65,6 +65,7 @@ pub struct Entry {
     /// The radios this entry is made of, for a receiver that is several
     /// tuners stitched into one span. Empty for a single radio.
     pub parts: Vec<Entry>,
+    pub unanswered: bool,
 }
 
 impl Entry {
@@ -85,6 +86,7 @@ impl Entry {
             path: None,
             pinned: None,
             parts: Vec::new(),
+            unanswered: false,
         }
     }
 }
@@ -344,6 +346,7 @@ fn stream_entries(index: usize, r: &Remote) -> Vec<Entry> {
             vec![Entry {
                 addr: Some(r.addr.clone()),
                 proto: Some(r.proto),
+                unanswered: true,
                 ..Entry::new(DriverKind::Network, index, format!("{name} (offline)"), RTL_RATES)
             }]
         }
@@ -377,6 +380,7 @@ fn answered(index: usize, name: &str, proto: remote::Proto, p: remote::Probe) ->
         path: None,
         pinned: p.center.filter(|_| !p.tunable),
         parts: Vec::new(),
+        unanswered: false,
     }
 }
 

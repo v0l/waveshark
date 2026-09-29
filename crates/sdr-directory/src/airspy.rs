@@ -143,6 +143,8 @@ mod tests {
             port: 5555,
             data_port: Some(5555),
             also: Vec::new(),
+            webtransport: None,
+            webrtc: false,
             station: Station {
                 name: "EI0ABC".into(),
                 description: "Loft\nNavan".into(),

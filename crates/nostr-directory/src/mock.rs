@@ -11,6 +11,13 @@ use tungstenite::{Message, WebSocket};
 struct Store {
     events: Vec<Event>,
     deleted: Vec<(String, u64)>,
+    live: Vec<Live>,
+}
+
+struct Live {
+    sub: Value,
+    filter: Value,
+    to: std::sync::mpsc::Sender<String>,
 }
 
 impl Store {
@@ -46,26 +53,33 @@ impl Store {
     }
 
     fn matching(&self, filter: &Value) -> Vec<Event> {
-        let kinds: Option<Vec<u64>> =
-            filter["kinds"].as_array().map(|k| k.iter().filter_map(Value::as_u64).collect());
-        let since = filter["since"].as_u64().unwrap_or(0);
-        let cells: Option<Vec<&str>> =
-            filter["#g"].as_array().map(|g| g.iter().filter_map(Value::as_str).collect());
-        self.events
-            .iter()
-            .filter(|e| kinds.as_ref().is_none_or(|k| k.contains(&(e.kind as u64))))
-            .filter(|e| e.created_at >= since)
-            .filter(|e| {
-                cells.as_ref().is_none_or(|c| {
-                    e.tags.iter().any(|t| {
-                        t.first().is_some_and(|k| k == "g")
-                            && t.get(1).is_some_and(|v| c.contains(&v.as_str()))
-                    })
-                })
-            })
-            .cloned()
-            .collect()
+        self.events.iter().filter(|e| matches(filter, e)).cloned().collect()
     }
+
+    fn tell(&mut self, e: &Event) {
+        self.live.retain(|l| {
+            !matches(&l.filter, e)
+                || l.to.send(json!(["EVENT", l.sub, e.to_json()]).to_string()).is_ok()
+        });
+    }
+}
+
+fn matches(filter: &Value, e: &Event) -> bool {
+    let kinds: Option<Vec<u64>> =
+        filter["kinds"].as_array().map(|k| k.iter().filter_map(Value::as_u64).collect());
+    let tagged = |key: &str| {
+        filter[format!("#{key}")].as_array().is_none_or(|want| {
+            e.tags.iter().any(|t| {
+                t.first().is_some_and(|k| k == key)
+                    && t.get(1).is_some_and(|v| want.iter().any(|w| w.as_str() == Some(v)))
+            })
+        })
+    };
+    kinds.as_ref().is_none_or(|k| k.contains(&(e.kind as u64)))
+        && e.created_at >= filter["since"].as_u64().unwrap_or(0)
+        && tagged("g")
+        && tagged("p")
+        && tagged("e")
 }
 
 fn address_of(e: &Event) -> String {
@@ -121,7 +135,13 @@ fn serve(sock: TcpStream, store: Arc<Mutex<Store>>, stopped: Arc<AtomicBool>) {
     let _ = sock.set_nonblocking(false);
     let _ = sock.set_read_timeout(Some(Duration::from_millis(50)));
     let Ok(mut ws) = accept(sock) else { return };
+    let (to, told) = std::sync::mpsc::channel::<String>();
     while !stopped.load(Ordering::Relaxed) {
+        for said in told.try_iter() {
+            if ws.send(Message::text(said)).is_err() {
+                return;
+            }
+        }
         let text = match ws.read() {
             Ok(Message::Text(t)) => t,
             Ok(Message::Close(_)) => return,
@@ -138,14 +158,23 @@ fn serve(sock: TcpStream, store: Arc<Mutex<Store>>, stopped: Arc<AtomicBool>) {
             Some("EVENT") => match Event::from_json(&v[1]) {
                 Some(e) => {
                     let id = e.id_hex();
-                    let took = store.lock().unwrap().take(e);
+                    let mut held = store.lock().unwrap();
+                    held.tell(&e);
+                    let took = match (20_000..30_000).contains(&e.kind) {
+                        true => Ok(()),
+                        false => held.take(e),
+                    };
+                    drop(held);
                     vec![json!(["OK", id, took.is_ok(), took.err().unwrap_or_default()])]
                 }
                 None => vec![json!(["NOTICE", "invalid: not an event"])],
             },
             Some("REQ") => {
                 let sub = v[1].clone();
-                let held = store.lock().unwrap();
+                let mut held = store.lock().unwrap();
+                for f in v.as_array().into_iter().flatten().skip(2) {
+                    held.live.push(Live { sub: sub.clone(), filter: f.clone(), to: to.clone() });
+                }
                 let mut out: Vec<Value> = v
                     .as_array()
                     .into_iter()

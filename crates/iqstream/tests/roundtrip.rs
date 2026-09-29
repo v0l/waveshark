@@ -296,6 +296,8 @@ async fn two_tuners_on_one_port_are_read_apart() {
             name: "test".into(),
             streams: vec![tuner("mast", 1_090_000_000, false), tuner("loft", 433_920_000, true)],
             door: None,
+            webtransport: None,
+            webrtc: false,
         },
     )
     .expect("a free port");
@@ -379,6 +381,8 @@ async fn a_tune_moves_the_dial_it_named_and_no_other() {
             name: "test".into(),
             streams: vec![tuner("mast", 1_090_000_000, true), tuner("loft", 433_920_000, true)],
             door: None,
+            webtransport: None,
+            webrtc: false,
         },
     )
     .expect("a free port");
@@ -532,6 +536,8 @@ async fn a_setting_on_another_tuner_reaches_a_reader_of_the_first() {
             name: "test".into(),
             streams: vec![tuner("mast", 1_090_000_000, false), tuner("loft", 433_920_000, true)],
             door: None,
+            webtransport: None,
+            webrtc: false,
         },
     )
     .expect("a free port");
@@ -723,6 +729,8 @@ async fn a_reader_of_a_tuner_that_is_taken_away_is_ended() {
             name: "test".into(),
             streams: vec![tuner("mast", 1_090_000_000, false), tuner("loft", 433_920_000, false)],
             door: None,
+            webtransport: None,
+            webrtc: false,
         },
     )
     .expect("a free port");
@@ -754,4 +762,42 @@ async fn a_reader_of_a_tuner_that_is_taken_away_is_ended() {
     assert!(ending.is_some(), "the reader was left waiting on a tuner that is gone");
     assert_eq!(loft.subscribers(), 0);
     assert_eq!(srv.streams().len(), 1, "and the other tuner is still there");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn webtransport_carries_the_samples_to_a_client_holding_the_certificate_hash() {
+    let srv = Server::start(
+        "127.0.0.1:0".parse().unwrap(),
+        ServerConfig {
+            webtransport: Some(0),
+            ..ServerConfig::single("test", tuner("span", 1_090_000_000, false))
+        },
+    )
+    .unwrap();
+    let offered = srv.webtransport().expect("a webtransport port");
+    assert_eq!(offered.hashes.len(), 2, "the certificate served and the next one");
+    let url =
+        iqstream::ws::webtransport_url(&format!("127.0.0.1:{}", offered.port), &offered.hex());
+    let mut stream = IqStream::connect(
+        url.as_str(),
+        ClientConfig { name: "test".into(), bits: 8, codec: Codec::Zstd, ..Default::default() },
+    )
+    .await
+    .unwrap();
+    assert_eq!(stream.transport(), iqstream::Transport::Tcp);
+    let block = ramp(4096);
+    let got = collect(&mut stream, &only(&srv), &block, 3).await;
+    assert_eq!(got.len(), 3);
+    for b in &got {
+        assert_eq!(b.samples, block, "a byte changed in flight");
+        assert_eq!(b.padded_before, 0);
+    }
+    assert_eq!(got[2].sample_index, 8192);
+
+    let wrong =
+        iqstream::ws::webtransport_url(&format!("127.0.0.1:{}", offered.port), &["00".repeat(32)]);
+    assert!(
+        iqstream::list(wrong.as_str(), "test").await.is_err(),
+        "an unknown certificate is refused"
+    );
 }

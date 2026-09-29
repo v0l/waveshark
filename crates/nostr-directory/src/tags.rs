@@ -1,5 +1,7 @@
 use common::geohash;
-use sdr_directory::{Dial, Entry, Hardware, Location, Protocol, Station, Tuner, Version};
+use sdr_directory::{
+    Dial, Entry, Hardware, Location, Protocol, Station, Tuner, Version, WebTransport,
+};
 
 pub const SCHEME: &str = "iqstream://";
 pub const GEOHASH_LADDER: usize = 5;
@@ -29,6 +31,13 @@ pub fn encode(entry: &Entry) -> Vec<Tag> {
     tags.extend(entry.also.iter().map(|a| tag("r", [format!("{SCHEME}{a}")])));
     if let Some(p) = entry.data_port {
         tags.push(tag("data_port", [p.to_string()]));
+    }
+    if let Some(wt) = &entry.webtransport {
+        let values = std::iter::once(wt.port.to_string()).chain(wt.hashes.iter().cloned());
+        tags.push(tag("webtransport", values));
+    }
+    if entry.webrtc {
+        tags.push(tag("webrtc", [crate::event::SIGNAL.to_string()]));
     }
     if let Protocol::IqStream(v) = s.protocol {
         tags.push(tag("version", [format!("{}.{}", v.major, v.minor)]));
@@ -113,6 +122,8 @@ pub fn decode<'a>(tags: impl Iterator<Item = &'a Tag> + Clone) -> Result<Entry, 
         port,
         data_port: number("data_port")?.map(|p| p as u16),
         also,
+        webtransport: tags.clone().find(|t| key(t) == "webtransport").and_then(webtransport),
+        webrtc: tags.clone().any(|t| key(t) == "webrtc"),
         station: Station {
             name: first("name").unwrap_or_default().to_string(),
             description: first("description").unwrap_or_default().to_string(),
@@ -124,6 +135,16 @@ pub fn decode<'a>(tags: impl Iterator<Item = &'a Tag> + Clone) -> Result<Entry, 
             tuners,
         },
     })
+}
+
+fn webtransport(t: &Tag) -> Option<WebTransport> {
+    let port = value(t)?.trim().parse().ok()?;
+    let hashes: Vec<String> = t[2..]
+        .iter()
+        .map(|h| h.trim().to_ascii_lowercase())
+        .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+        .collect();
+    (!hashes.is_empty()).then_some(WebTransport { port, hashes })
 }
 
 fn host_port(addr: &str) -> Option<(String, u16)> {
@@ -234,6 +255,11 @@ mod tests {
         let e = Entry {
             data_port: Some(40_001),
             also: vec!["[fd00::7]:1234".parse().unwrap(), "10.0.0.7:1234".parse().unwrap()],
+            webtransport: Some(WebTransport {
+                port: 40_002,
+                hashes: vec!["ab".repeat(32), "cd".repeat(32)],
+            }),
+            webrtc: true,
             ..entry("2001:db8::7", vec![airband(), hf()])
         };
         let back = decode(encode(&e).iter()).unwrap();
@@ -305,6 +331,31 @@ mod tests {
             ["10.100.2.249:1234".parse().unwrap(), "[fd00::7]:1234".parse().unwrap()],
             "a name that is not an address is skipped rather than resolved"
         );
+    }
+
+    #[test]
+    fn a_webtransport_tag_names_its_port_and_the_certificates_it_may_serve() {
+        let base: [&[&str]; 2] = [&["r", "iqstream://a.example:5557"], &["version", "1.4"]];
+        let with = |extra: &[&str]| {
+            let mut tags: Vec<&[&str]> = base.to_vec();
+            tags.push(extra);
+            parsed(&tags).unwrap()
+        };
+        let (a, b) = ("AB".repeat(32), "cd".repeat(32));
+        let wt = with(&["webtransport", "5558", &a, &b]);
+        assert_eq!(
+            wt.webtransport,
+            Some(WebTransport { port: 5558, hashes: vec!["ab".repeat(32), b.clone()] })
+        );
+        assert_eq!(
+            wt.webtransport_url().unwrap(),
+            format!("https://a.example:5558/?cert={},{b}", "ab".repeat(32))
+        );
+        assert_eq!(with(&["webtransport", "5558", "short"]).webtransport, None);
+        assert_eq!(with(&["webtransport", "port", &b]).webtransport, None);
+        assert_eq!(parsed(&base).unwrap().webtransport, None);
+        assert!(with(&["webrtc", "20690"]).webrtc);
+        assert!(!parsed(&base).unwrap().webrtc);
     }
 
     #[test]

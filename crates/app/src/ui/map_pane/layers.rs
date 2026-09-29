@@ -1772,6 +1772,8 @@ mod tests {
             port: 8075,
             data_port: None,
             also: Vec::new(),
+            webtransport: None,
+            webrtc: false,
             station: Station {
                 name: "80m Dipole".into(),
                 description: "Chichester UK".into(),

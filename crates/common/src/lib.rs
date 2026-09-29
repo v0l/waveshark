@@ -26,6 +26,8 @@ pub mod thread;
 pub mod time;
 pub mod units;
 pub mod value;
+#[cfg(target_arch = "wasm32")]
+pub mod worker;
 
 pub use decode::{
     Airtime, CONTROL_CHANNELS, ChannelPlan, ChannelUse, Cpr, Decoded, Identity, Link, Party,

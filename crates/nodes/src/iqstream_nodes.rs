@@ -97,6 +97,8 @@ pub fn server(addr: SocketAddr) -> Result<Arc<iqstream::Server>> {
         name: "waveshark".into(),
         streams: Vec::new(),
         door: door(),
+        webtransport: addr.port().checked_add(1).filter(|_| addr.port() != 0),
+        webrtc: true,
     };
     let s = iqstream::Server::start(addr, cfg)?;
     if addr.port() != 0

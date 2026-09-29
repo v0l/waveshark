@@ -40,6 +40,9 @@ the code is in the commit log.
 - SpyServer and rtl_tcp clients on the IQ server's port, each tuning anywhere inside the span.
 - Airspy SpyServer directory listing of the IQ server, with its owner email.
 - IQStream over WebSocket: `ws://` and `wss://` remote tuners, and served on the IQ server's port.
+- WebTransport for IQStream: `https://` remote tuners pinned by a certificate hash the directory lists.
+- WebRTC for IQStream: `webrtc://` remote tuners, offered and answered over nostr, no certificate needed.
+- Browser version at waveshark-app.pages.dev: RTL-SDR, HackRF and Airspy over WebUSB, IQStream servers over WebSocket and their public list, transmit,
   speaker, microphone, replayed captures, and settings and datasets kept between visits.
 
 ### Changed

@@ -32,6 +32,8 @@ pub struct ServerConfig {
     /// [`Server::add_stream`] while it runs.
     pub streams: Vec<StreamConfig>,
     pub door: Option<Arc<dyn Door>>,
+    pub webtransport: Option<u16>,
+    pub webrtc: bool,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -40,20 +42,28 @@ impl std::fmt::Debug for ServerConfig {
             .field("name", &self.name)
             .field("streams", &self.streams)
             .field("door", &self.door.is_some())
+            .field("webtransport", &self.webtransport)
+            .field("webrtc", &self.webrtc)
             .finish()
     }
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        ServerConfig { name: "waveshark".into(), streams: Vec::new(), door: None }
+        ServerConfig {
+            name: "waveshark".into(),
+            streams: Vec::new(),
+            door: None,
+            webtransport: None,
+            webrtc: false,
+        }
     }
 }
 
 impl ServerConfig {
     /// One tuner and nothing else, which is what a 1.1 server was.
     pub fn single(name: &str, stream: StreamConfig) -> Self {
-        ServerConfig { name: name.into(), streams: vec![stream], door: None }
+        ServerConfig { name: name.into(), streams: vec![stream], ..Default::default() }
     }
 }
 
@@ -87,4 +97,20 @@ pub struct Ask {
 pub struct Public {
     pub addr: SocketAddr,
     pub data_port: Option<u16>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Offered {
+    pub port: u16,
+    pub hashes: Vec<[u8; 32]>,
+}
+
+impl Offered {
+    pub fn hex(&self) -> Vec<String> {
+        self.hashes.iter().map(hex).collect()
+    }
+}
+
+pub fn hex(hash: &[u8; 32]) -> String {
+    hash.iter().map(|b| format!("{b:02x}")).collect()
 }

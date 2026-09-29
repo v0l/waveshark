@@ -15,13 +15,18 @@ common.workspace = true
 getrandom = "0.4"
 hex = "0.4"
 httpc = { workspace = true, optional = true }
-rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"], optional = true }
 sdr-directory.workspace = true
 secp256k1 = { version = "0.33", default-features = false, features = ["std"] }
 serde_json.workspace = true
 sha2.workspace = true
+hmac.workspace = true
+chacha20 = "0.10"
+base64 = "0.22"
 thiserror.workspace = true
 tracing.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"], optional = true }
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"], optional = true }
 webpki-roots = { version = "1", optional = true }
 

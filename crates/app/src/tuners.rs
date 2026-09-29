@@ -839,6 +839,7 @@ mod tests {
             path: None,
             pinned: None,
             parts: Vec::new(),
+            unanswered: false,
         }
     }
 
@@ -860,7 +861,7 @@ mod tests {
     fn a_served_radio_is_not_read_until_somebody_subscribes() {
         let server = iqstream::Server::start(
             "127.0.0.1:0".parse().unwrap(),
-            iqstream::ServerConfig { name: "test".into(), streams: Vec::new(), door: None },
+            iqstream::ServerConfig { name: "test".into(), ..Default::default() },
         )
         .unwrap();
         let tuner = server.stream_named(iqstream::StreamConfig {

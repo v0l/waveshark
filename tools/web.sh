@@ -14,7 +14,7 @@ export RUSTFLAGS="--cfg=web_sys_unstable_apis -C target-feature=+atomics,+bulk-m
 -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base"
 
 cargo_web() {
-    rustup run nightly cargo "$1" -p app --no-default-features --features rtlsdr,hackrf,airspy \
+    rustup run nightly cargo "$1" -p app --no-default-features --features rtlsdr,hackrf,airspy,iqstream_client \
         --target wasm32-unknown-unknown --profile "$profile" -Z build-std=panic_abort,std "${@:2}"
 }
 

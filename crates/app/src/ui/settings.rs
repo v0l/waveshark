@@ -1585,7 +1585,15 @@ impl App {
                 (false, _, _) => panel::status(ui, false, "off: nothing is served"),
                 (true, Err(e), _) => panel::status(ui, false, &e.to_string()),
                 (true, _, Some(s)) => {
-                    panel::status(ui, true, &format!("listening on {}", s.addr()))
+                    let said = match s.webtransport() {
+                        Some(wt) => format!(
+                            "listening on {}, and WebTransport on udp {}",
+                            s.addr(),
+                            wt.port
+                        ),
+                        None => format!("listening on {}", s.addr()),
+                    };
+                    panel::status(ui, true, &said)
                 }
                 (true, Ok(a), None) => {
                     panel::status(ui, false, &format!("{a} is not being served yet"))
@@ -3318,8 +3326,12 @@ impl App {
             self.radio = None;
         }
         if self.device.is_none() {
-            self.device = self.devices.first().cloned();
+            self.device = match &self.awaited {
+                Some(saved) => self.devices.iter().find(|d| d.label == *saved).cloned(),
+                None => self.devices.first().cloned(),
+            };
             if self.device.is_some() {
+                self.awaited = None;
                 self.connect(ctx);
             }
         }

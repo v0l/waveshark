@@ -16,6 +16,10 @@ impl PublicKey {
         hex::encode(self.0)
     }
 
+    pub(crate) fn bytes(&self) -> [u8; 32] {
+        self.0
+    }
+
     pub fn to_bech32(&self) -> String {
         bech32::encode::<Bech32>(Hrp::parse_unchecked("npub"), &self.0)
             .expect("32 bytes always encode")
@@ -90,6 +94,10 @@ impl Keys {
     pub fn nsec(&self) -> String {
         bech32::encode::<Bech32>(Hrp::parse_unchecked("nsec"), &self.pair.to_secret_bytes())
             .expect("32 bytes always encode")
+    }
+
+    pub(crate) fn secret(&self) -> secp256k1::SecretKey {
+        self.pair.secret_key()
     }
 
     pub(crate) fn sign(&self, digest: &[u8; 32]) -> [u8; 64] {

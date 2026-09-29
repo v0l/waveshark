@@ -111,6 +111,8 @@ pub fn parse(name: &str, raw: &[u8], now: u64) -> Result<Vec<Listing>, Error> {
                 port: r.streaming_port,
                 data_port: None,
                 also: Vec::new(),
+                webtransport: None,
+                webrtc: false,
                 station: Station {
                     name: description,
                     description: String::new(),

@@ -1,10 +1,11 @@
 use common::time::Duration;
 use nostr_directory::mock::MockRelay;
-use nostr_directory::{Config, NostrDirectory, new_identity};
+use nostr_directory::{Config, Keys, NostrDirectory, new_identity};
 use sdr_directory::{
     Accuracy, Author, Dial, Entry, Hardware, Location, Protocol, Query, SdrDirectory, Station,
     Tuner, Version, now,
 };
+use std::sync::Arc;
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -14,6 +15,8 @@ fn entry(host: &str, center_hz: u64) -> Entry {
         port: 5557,
         data_port: None,
         also: Vec::new(),
+        webtransport: None,
+        webrtc: false,
         station: Station {
             name: host.into(),
             description: String::new(),
@@ -84,4 +87,19 @@ fn two_stations_announce_one_moves_one_withdraws_and_a_reader_sees_each_step() {
     for d in [as_a, as_b, reader] {
         d.close();
     }
+}
+
+#[test]
+fn a_webrtc_offer_reaches_the_listed_key_and_its_answer_comes_back() {
+    use nostr_directory::signal::{Answer, Answerer, ask};
+    let relays = [MockRelay::run().unwrap(), MockRelay::run().unwrap()];
+    let urls: Vec<&str> = relays.iter().map(|r| r.url()).collect();
+    let server = Keys::generate();
+    let answer: Answer = Arc::new(|offer: &str| Ok(format!("{offer} answered")));
+    let _answering = Answerer::start(server.clone(), &urls, answer);
+    std::thread::sleep(Duration::from_millis(300));
+    let got = ask(&server.public_key(), "v=0 offer", &urls, Duration::from_secs(5)).unwrap();
+    assert_eq!(got, "v=0 offer answered");
+    let nobody = ask(&Keys::generate().public_key(), "v=0", &urls, Duration::from_millis(500));
+    assert!(nobody.is_err(), "an offer to a key nobody holds goes unanswered");
 }

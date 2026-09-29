@@ -10,9 +10,18 @@
 //! accepts a retune, and the name of the program that serves it, which is
 //! what an operator has to install at the far end.
 
-#[cfg(all(feature = "iqstream", any(feature = "rtl_tcp", feature = "spyserver")))]
+#[cfg(all(
+    feature = "iqstream",
+    any(feature = "rtl_tcp", feature = "spyserver"),
+    not(target_arch = "wasm32")
+))]
 mod cut;
-#[cfg(all(feature = "iqstream", feature = "rtl_tcp", feature = "spyserver"))]
+#[cfg(all(
+    feature = "iqstream",
+    feature = "rtl_tcp",
+    feature = "spyserver",
+    not(target_arch = "wasm32")
+))]
 pub mod door;
 pub mod gaps;
 #[cfg(feature = "pluto")]
@@ -30,6 +39,7 @@ pub mod spyserver;
 use common::addr::{AddrError, HostPort};
 use common::time::Duration;
 use common::{Error, Hz, Result, Sps};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// How long to wait for a server to answer before calling it unreachable.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -37,6 +47,17 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Blocks queued for the consumer. A block is tens of milliseconds, so this is
 /// a couple of seconds of slack before the oldest are dropped.
 pub const QUEUE_DEPTH: usize = 64;
+
+static ANSWERED: AtomicBool = AtomicBool::new(false);
+
+pub fn answered() -> bool {
+    ANSWERED.swap(false, Ordering::AcqRel)
+}
+
+#[cfg_attr(not(all(feature = "iqstream", target_arch = "wasm32")), allow(dead_code))]
+fn answered_now() {
+    ANSWERED.store(true, Ordering::Release);
+}
 
 trait Protocol: Sync {
     fn proto(&self) -> Proto;
@@ -180,7 +201,7 @@ impl Proto {
 
     pub fn placeholder(self) -> &'static str {
         match self {
-            Self::IqStream => "host, host:port (1234), or a ws:// or wss:// address",
+            Self::IqStream => "host, host:port (1234), or a ws://, wss:// or https:// address",
             Self::RtlTcp => "host, or host:port (1234)",
             Self::SpyServer => "host, or host:port (5555)",
             Self::KiwiSdr => "host, host:port (8073), or its http:// address",
@@ -392,6 +413,12 @@ mod tests {
             "a websocket is iqstream, and keeps its path"
         );
         assert_eq!(parse_spec("ws://"), None);
+        let cert = "ab".repeat(32);
+        assert_eq!(
+            parse_spec(&format!("https://radarpi:1235/?cert={cert}#1")),
+            Some((Proto::IqStream, format!("https://radarpi:1235/?cert={cert}#1"))),
+            "webtransport is iqstream, and keeps the certificate it pins"
+        );
         assert_eq!(
             parse_spec("pluto://192.168.2.1"),
             Some((Proto::Pluto, "192.168.2.1:30431".to_string()))

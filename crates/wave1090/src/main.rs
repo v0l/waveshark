@@ -122,6 +122,18 @@ struct Args {
     #[arg(long, value_name = "ADDR")]
     iqstream_listen: Option<String>,
 
+    /// Serve iqstream over WebTransport on this UDP port as well, for a
+    /// browser on an https page. The certificate is made here and renewed
+    /// every six days, and the directory listing carries its hash
+    #[arg(long, value_name = "PORT", requires = "iqstream_listen")]
+    iqstream_webtransport: Option<u16>,
+
+    /// Answer WebRTC offers sent to the directory key over nostr, so a
+    /// browser can read the samples on the iqstream UDP port without any
+    /// certificate at all
+    #[arg(long, requires = "iqstream_list")]
+    iqstream_webrtc: bool,
+
     /// List the iqstream server in the public directory on nostr, so another
     /// receiver can find it. Published at start and every 24 hours, and
     /// withdrawn on SIGINT or SIGTERM
@@ -297,24 +309,49 @@ fn listen(args: &Args, center_hz: u64, rate: f64, hardware: &str) -> Result<Opti
             Err(_) => bail!("--iqstream-listen wants addr:port or a port, not {spec:?}"),
         },
     };
-    let cfg = iqstream::ServerConfig::single(
-        "wave1090",
-        iqstream::StreamConfig {
-            name: "span".into(),
-            center_hz,
-            sample_rate: rate as u32,
-            gain_db: Some(args.gain),
-            tunable: false,
-            tune_range_hz: None,
-            settings: Vec::new(),
-        },
-    );
+    let cfg = iqstream::ServerConfig {
+        webtransport: args.iqstream_webtransport,
+        webrtc: args.iqstream_webrtc,
+        ..iqstream::ServerConfig::single(
+            "wave1090",
+            iqstream::StreamConfig {
+                name: "span".into(),
+                center_hz,
+                sample_rate: rate as u32,
+                gain_db: Some(args.gain),
+                tunable: false,
+                tune_range_hz: None,
+                settings: Vec::new(),
+            },
+        )
+    };
     let server = iqstream::Server::start(addr, cfg).context("cannot serve iqstream")?;
     tracing::info!("iqstream on {}", server.addr());
+    if let Some(wt) = server.webtransport() {
+        let at = format!("{}:{}", server.addr().ip(), wt.port);
+        tracing::info!(
+            "iqstream over webtransport at {}",
+            iqstream::ws::webtransport_url(&at, &wt.hex())
+        );
+    }
     let tuner = server.default_stream().context("the server kept no tuner")?;
     tuner.set_hardware(hardware);
+    let mut answerer = None;
     if args.iqstream_list {
         let listing = listing(args)?;
+        if server.webrtc()
+            && let Some(keys) =
+                listing.directory.nsec.as_deref().and_then(nostr_directory::identity)
+        {
+            let answering = server.clone();
+            let answer: nostr_directory::signal::Answer =
+                std::sync::Arc::new(move |offer: &str| {
+                    answering.answer(offer).map_err(|e| e.to_string())
+                });
+            let relays = &listing.directory.relays;
+            answerer = Some(nostr_directory::signal::Answerer::start(keys, relays, answer));
+            tracing::info!("iqstream answers webrtc offers on {} relays", relays.len());
+        }
         let shared = server.clone();
         let lister = sdr_directory::lister::Lister::<nostr_directory::NostrDirectory>::start(
             move || Some(shared.clone()),
@@ -323,7 +360,7 @@ fn listen(args: &Args, center_hz: u64, rate: f64, hardware: &str) -> Result<Opti
         .context("cannot start the directory listing")?;
         withdraw_on_signal(lister)?;
     }
-    Ok(Some(Fanned { server, tuner }))
+    Ok(Some(Fanned { server, tuner, answerer }))
 }
 
 fn key_path(args: &Args) -> Result<std::path::PathBuf> {
@@ -402,6 +439,8 @@ struct Fanned {
     #[allow(dead_code)]
     server: std::sync::Arc<iqstream::Server>,
     tuner: std::sync::Arc<iqstream::Stream>,
+    #[allow(dead_code)]
+    answerer: Option<nostr_directory::signal::Answerer>,
 }
 
 /// How long a radio may deliver nothing before it is treated as stopped.

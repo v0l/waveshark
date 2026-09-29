@@ -55,6 +55,7 @@ pub async fn start_app() {
     }
     crate::protocols::fetch().await;
     usbio::start("./waveshark.js");
+    httpc::ws::start("./waveshark.js").await;
     usbio::refresh().await;
     if let Some(dir) = common::platform::config_dir() {
         common::store::preload(&dir, |_| true).await;

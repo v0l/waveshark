@@ -231,7 +231,15 @@ pub struct Entry {
     pub port: u16,
     pub data_port: Option<u16>,
     pub also: Vec<std::net::SocketAddr>,
+    pub webtransport: Option<WebTransport>,
+    pub webrtc: bool,
     pub station: Station,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebTransport {
+    pub port: u16,
+    pub hashes: Vec<String>,
 }
 
 pub fn private(ip: std::net::IpAddr) -> bool {
@@ -243,9 +251,18 @@ pub fn private(ip: std::net::IpAddr) -> bool {
 
 impl Entry {
     pub fn addr(&self) -> String {
+        self.at(self.port)
+    }
+
+    pub fn webtransport_url(&self) -> Option<String> {
+        let wt = self.webtransport.as_ref()?;
+        Some(iqstream::ws::webtransport_url(&self.at(wt.port), &wt.hashes))
+    }
+
+    fn at(&self, port: u16) -> String {
         match self.host.contains(':') {
-            true => format!("[{}]:{}", self.host, self.port),
-            false => format!("{}:{}", self.host, self.port),
+            true => format!("[{}]:{}", self.host, port),
+            false => format!("{}:{}", self.host, port),
         }
     }
 }
@@ -297,6 +314,8 @@ pub mod fixtures {
             port: 5557,
             data_port: None,
             also: Vec::new(),
+            webtransport: None,
+            webrtc: false,
             station: station(tuners),
         }
     }

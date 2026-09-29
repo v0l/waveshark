@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 pub const KIND: u16 = 10_690;
+pub const SIGNAL: u16 = 20_690;
 pub const DELETION: u16 = 5;
 
 pub const EXPIRES_AFTER_SECS: u64 = STALE_AFTER_SECS;

@@ -131,12 +131,8 @@ mcp = ["dep:rmcp", "dep:axum"]
 limesdr = ["dep:limesdr"]
 native = ["usb", "iqstream", "rtl_tcp", "spyserver", "kiwisdr", "homeassistant", "gps", "update", "survey", "artemis", "feeds"]
 usb = ["rtlsdr", "hackrf", "airspy", "pluto"]
-iqstream = [
-    "remote/iqstream",
-    "nodes/iqstream",
-    "iqstream/net",
-    "nostr-directory/relay",
-]
+iqstream = ["iqstream_client", "nodes/iqstream"]
+iqstream_client = ["remote/iqstream", "iqstream/net", "nostr-directory/relay"]
 rtl_tcp = ["remote/rtl_tcp"]
 spyserver = ["remote/spyserver"]
 kiwisdr = ["remote/kiwisdr"]

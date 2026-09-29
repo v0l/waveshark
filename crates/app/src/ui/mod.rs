@@ -146,6 +146,7 @@ pub struct App {
     /// Which half of the setup dialog is showing.
     setup_tab: SetupTab,
     devices: Vec<crate::devices::Entry>,
+    awaited: Option<String>,
     /// The open-a-capture dialog, while it is up. It runs on its own thread
     /// so the receiver keeps painting behind it.
     picking: Option<
@@ -759,6 +760,7 @@ impl Default for App {
             dial: Dial::new(),
             open: None,
             devices: Vec::new(),
+            awaited: None,
             picking: None,
             trim: Default::default(),
             trimming: None,
@@ -831,10 +833,20 @@ impl App {
             crate::devices::add_stream(r.proto, &r.addr, &r.label);
         }
         let devices = crate::devices::list();
-        let device = choose_device(&devices, asked, s.device.as_deref());
+        let mut device = choose_device(&devices, asked, s.device.as_deref());
+        let awaited = s.device.clone().filter(|saved| {
+            cfg!(target_arch = "wasm32")
+                && asked.is_none()
+                && device.as_ref().is_none_or(|d| d.label != *saved)
+                && devices.iter().any(|d| d.unanswered)
+        });
+        if awaited.is_some() {
+            device = None;
+        }
         let radio_settings = s.radio(device.as_ref().map(|d| d.label.as_str()));
         let mut app = Self {
             devices,
+            awaited,
             center: s.center,
             // The file holds the device's own rate; the app works in the
             // effective one, which zoom divides.
@@ -909,7 +921,7 @@ impl App {
     /// operator's switches.
     fn sync_settings(&mut self) {
         let rs = self.radio_settings.clone();
-        let device = self.device.as_ref().map(|d| d.label.clone());
+        let device = self.device.as_ref().map(|d| d.label.clone()).or_else(|| self.awaited.clone());
         let (center, rate, zoom, fft) = (self.center, self.rate, self.zoom, self.scope.fft);
         let prefs = self.scope.prefs();
         let layers = self.map.map.layers.saved();
@@ -3236,7 +3248,7 @@ impl eframe::App for App {
         // is open. Both used to be read only under --soak, so the call list
         // and the transcript filled in a soak run and stayed empty in use.
         self.poll_capture(ui.ctx());
-        if crate::webusb::granted() {
+        if crate::webusb::granted() || remote::answered() {
             let c = ui.ctx().clone();
             self.rescan(&c);
         }
@@ -4550,6 +4562,7 @@ mod tests {
             path: None,
             pinned: None,
             parts: Vec::new(),
+            unanswered: false,
         };
         a.adopt_device(spy);
         assert_eq!(
@@ -4573,6 +4586,7 @@ mod tests {
             path: None,
             pinned: None,
             parts: Vec::new(),
+            unanswered: false,
         };
         a.adopt_device(kiwi.clone());
         assert_eq!(a.spans.iter().map(|s| s.effective()).collect::<Vec<_>>(), vec![12_000.0]);

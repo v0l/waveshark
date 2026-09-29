@@ -1,4 +1,4 @@
-use crate::config::{Ask, Public, ServerConfig, StreamConfig, Tune};
+use crate::config::{Ask, Offered, Public, ServerConfig, StreamConfig, Tune};
 use crate::proto::{Setting, SettingValue, StreamDesc};
 use common::{Error, Result};
 use std::convert::Infallible;
@@ -117,6 +117,18 @@ impl Server {
     }
 
     pub fn addr(&self) -> SocketAddr {
+        match self.0 {}
+    }
+
+    pub fn webtransport(&self) -> Option<Offered> {
+        match self.0 {}
+    }
+
+    pub fn webrtc(&self) -> bool {
+        match self.0 {}
+    }
+
+    pub fn answer(&self, _: &str) -> Result<String> {
         match self.0 {}
     }
 

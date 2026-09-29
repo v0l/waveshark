@@ -84,7 +84,33 @@ pub fn list(addr: SocketAddr, listing: Option<Listing>) {
 
 pub fn follow(was: Option<(SocketAddr, Listing)>, now: Option<(SocketAddr, Listing)>) {
     nodes::iqstream_nodes::describe_listing_with(|addr| state(addr).map(|s| s.describe()));
+    answer_webrtc(now.as_ref().map(|(addr, l)| (*addr, l.directory.clone())));
     nostr().follow(was, now);
+}
+
+#[cfg(feature = "iqstream")]
+type Answering = (SocketAddr, Config, nostr_directory::signal::Answerer);
+
+#[cfg(not(feature = "iqstream"))]
+fn answer_webrtc(_: Option<(SocketAddr, Config)>) {}
+
+#[cfg(feature = "iqstream")]
+fn answer_webrtc(now: Option<(SocketAddr, Config)>) {
+    static HELD: Mutex<Option<Answering>> = Mutex::new(None);
+    let Ok(mut held) = HELD.lock() else { return };
+    let same = matches!((&*held, &now), (Some((a, c, _)), Some((addr, config))) if a == addr && c == config);
+    if same {
+        return;
+    }
+    *held = now.and_then(|(addr, config)| {
+        let keys = config.nsec.as_deref().and_then(nostr_directory::identity)?;
+        let answer: nostr_directory::signal::Answer = std::sync::Arc::new(move |offer: &str| {
+            let server = nodes::iqstream_nodes::running(addr).ok_or("nothing is being served")?;
+            server.answer(offer).map_err(|e| e.to_string())
+        });
+        let answerer = nostr_directory::signal::Answerer::start(keys, &config.relays, answer);
+        Some((addr, config, answerer))
+    });
 }
 
 pub fn follow_airspy(
@@ -95,6 +121,7 @@ pub fn follow_airspy(
 }
 
 pub fn withdraw_all(within: Duration) {
+    answer_webrtc(None);
     sdr_directory::lister::withdraw_all(airspy().drain(), Duration::ZERO);
     sdr_directory::lister::withdraw_all(nostr().drain(), within);
 }

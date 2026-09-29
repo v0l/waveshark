@@ -26,17 +26,19 @@
 //! the socket it already has.
 
 use crate::proto::{
-    BitDepth, Codec, DATA_HEADER_LEN, DataHeader, Frame, INLINE_MAGIC, MAX_FRAME_PAYLOAD,
-    MAX_INLINE_RECORD, PREAMBLE_LEN, Setting, SettingValue, StreamDesc, Tlvs, Transport,
-    VERSION_MAJOR, VERSION_MINOR, decode_preamble, decode_probe, encode_preamble, encode_punch,
-    msg, now_ns, read_streams, tag, unpack,
+    BitDepth, Frame, PREAMBLE_LEN, SettingValue, StreamDesc, Tlvs, Transport, decode_probe,
+    encode_preamble, encode_punch, msg, now_ns, tag,
 };
+use crate::subscribe::{
+    Answer, Assembler, Head, Inbound, greeted, head, heard, hello, inline_len, offered, set_frame,
+    setting_frame, subscribe_frame, subscribed, take_datagram, token, tune_frame,
+    unsubscribe_frame, wanted, welcomed,
+};
+pub use crate::subscribe::{Block, ClientConfig, Prefer, Stats, StreamInfo, describe_error};
 use crate::ws;
 use common::time::Duration;
 use common::{Error, Result};
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
@@ -45,117 +47,14 @@ fn other(e: impl std::fmt::Display) -> Error {
     Error::other(e.to_string())
 }
 
-#[derive(Debug, Clone)]
-pub struct ClientConfig {
-    /// Reported to the server for logging.
-    pub name: String,
-    /// Bits per I or Q value, 3 to 8. Below 8 is lossy.
-    pub bits: u8,
-    pub codec: Codec,
-    /// zstd level. Above 1 costs server CPU for almost no ratio.
-    pub level: i8,
-    /// Which tuner to read, of the ones the server offers. None takes the
-    /// first, which is the only one a 1.1 server has.
-    pub stream: Option<u16>,
-    /// Local UDP port. 0 picks a free one.
-    pub local_port: u16,
-    /// Report lost samples in [`Block::padded_before`] and fill them with mid
-    /// scale, so the output keeps real time alignment.
-    pub pad_gaps: bool,
-    pub ping_interval: Duration,
-    /// What the samples should travel on.
-    pub transport: Prefer,
-    /// How long [`Prefer::Auto`] waits for a datagram before asking for the
-    /// samples on the control connection instead. A punch is one round trip
-    /// and is sent six times inside this, so a path that carries datagrams
-    /// at all has delivered one by then.
-    pub udp_timeout: Duration,
+fn data_port(welcome: &Frame) -> Option<u16> {
+    welcome.tlvs().ok()?.u16(tag::DATA_PORT)
 }
 
-/// What an operator wants the samples carried on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Prefer {
-    /// UDP, and the control connection where no datagram arrives. What a
-    /// client over the internet wants, since it cannot know in advance
-    /// whether the path carries datagrams at all.
-    #[default]
-    Auto,
-    /// UDP only. A stream that cannot be got through is no stream, which is
-    /// what a reader wanting the live edge or nothing asks for.
-    Udp,
-    /// The control connection from the start, for a path already known to
-    /// drop datagrams.
-    Tcp,
-}
-
-impl Default for ClientConfig {
-    fn default() -> Self {
-        ClientConfig {
-            name: "iqstream".into(),
-            bits: 8,
-            codec: Codec::None,
-            level: 1,
-            stream: None,
-            local_port: 0,
-            pad_gaps: true,
-            ping_interval: Duration::from_secs(10),
-            transport: Prefer::Auto,
-            udp_timeout: Duration::from_secs(3),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct StreamInfo {
-    /// Which tuner of the server's this is reading.
-    pub id: u16,
-    /// What the far end calls that tuner. Empty from a 1.1 server, which has
-    /// one stream and never names it.
-    pub name: String,
-    pub center_hz: u64,
-    pub sample_rate: u32,
-    pub gain_db: Option<f32>,
-    /// Whether the server will accept [`IqStream::tune`]. False for one
-    /// sharing a tuner somebody else owns.
-    pub tunable: bool,
-    /// How far the far end's tuner reaches. None from a server that takes a
-    /// tune but did not say where it may go, which is every 1.0 server: ask
-    /// and find out is all that is left.
-    pub tune_range_hz: Option<(u64, u64)>,
-    /// What else the far end is set to: gain stages, switches, antenna port.
-    /// Kept up to date from [`msg::STREAM_CHANGED`], so this is what the
-    /// block last taken was heard at.
-    pub settings: Vec<Setting>,
-    pub bit_depth: u8,
-    pub codec: Codec,
-    pub block_samples: u32,
-}
-
-/// One decoded block of interleaved UC8 samples.
-#[derive(Debug, Clone)]
-pub struct Block {
-    /// Index of the first complex sample since stream start.
-    pub sample_index: u64,
-    pub samples: Vec<u8>,
-    /// Complex samples lost before this block. Already prepended as mid scale
-    /// when `pad_gaps` is set.
-    pub padded_before: u64,
-    /// The centre the server was on when this block was sent, which is the
-    /// last [`msg::TUNED`] seen. Every block carries it so a caller labelling
-    /// a spectrum does not have to track the retunes itself.
-    pub center_hz: u64,
-    /// Which tuner these samples are of, which is the one subscribed to: a
-    /// datagram of anything else is dropped before it reaches here.
-    pub stream_id: u16,
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct Stats {
-    pub datagrams: u64,
-    pub blocks: u64,
-    pub incomplete_blocks: u64,
-    pub padded_samples: u64,
-    pub rtt_ms: Option<f64>,
+fn ping_frame() -> Frame {
+    let mut t = Tlvs::new();
+    t.u64(tag::TIMESTAMP_NS, now_ns());
+    Frame::new(msg::PING, &t)
 }
 
 pub struct IqStream {
@@ -210,19 +109,9 @@ struct Greeting {
     over_ws: bool,
 }
 
-/// A token no other subscription on this server will be using.
-///
-/// The clock and a counter, mixed, which is enough: it is not a secret and
-/// nothing turns on guessing it, only on two subscriptions of one client not
-/// colliding.
-fn token() -> u64 {
-    static COUNT: AtomicU64 = AtomicU64::new(0);
-    let mut v =
-        now_ns() ^ (COUNT.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9e37_79b9_7f4a_7c15));
-    v ^= v >> 30;
-    v = v.wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    v ^= v >> 27;
-    v.wrapping_mul(0x94d0_49bb_1331_11eb)
+enum Pipe<'a> {
+    Named(&'a str),
+    Open(ws::Read, ws::Write),
 }
 
 /// Connect, say hello, and take the welcome.
@@ -232,9 +121,12 @@ fn token() -> u64 {
 /// of tuners whatever the far end's version.
 async fn greet(server: &str, name: &str) -> Result<Greeting> {
     let over_ws = ws::is_url(server);
-    let (mut read_half, mut write_half, peer) = match over_ws {
+    let (read_half, write_half, peer) = match over_ws {
         true => {
-            let (r, w) = ws::connect(server).await?;
+            let (r, w) = match ws::is_webtransport(server) {
+                true => crate::wt::connect(server).await?,
+                false => ws::connect(server).await?,
+            };
             (r, w, None)
         }
         false => {
@@ -245,71 +137,30 @@ async fn greet(server: &str, name: &str) -> Result<Greeting> {
             (Box::new(r) as ws::Read, Box::new(w) as ws::Write, Some(peer))
         }
     };
+    greet_on(read_half, write_half, peer, name).await
+}
 
+async fn greet_on(
+    mut read_half: ws::Read,
+    mut write_half: ws::Write,
+    peer: Option<SocketAddr>,
+    name: &str,
+) -> Result<Greeting> {
+    let over_ws = peer.is_none();
     write_half.write_all(&encode_preamble()).await.map_err(other)?;
     let mut preamble = [0u8; PREAMBLE_LEN];
     read_half.read_exact(&mut preamble).await.map_err(other)?;
-    let (major, minor) = decode_preamble(&preamble)?;
-    if major != VERSION_MAJOR {
-        return Err(Error::other(format!(
-            "server speaks version {major}.{minor}, this speaks {VERSION_MAJOR}.{VERSION_MINOR}"
-        )));
-    }
-
-    let mut hello = Tlvs::new();
-    hello.str(tag::CLIENT_NAME, name);
-    write_half.write_all(&Frame::new(msg::HELLO, &hello).encode()).await.map_err(other)?;
+    greeted(&preamble)?;
+    write_half.write_all(&hello(name).encode()).await.map_err(other)?;
     let welcome = read_frame(&mut read_half)
         .await?
         .ok_or_else(|| Error::other("server closed before welcome"))?;
-    if welcome.msg_type != msg::WELCOME {
-        return Err(Error::other(describe_error(&welcome)));
-    }
-    let w = welcome.tlvs()?;
-    let mut streams = read_streams(&w);
-    if streams.is_empty() {
-        streams.push(StreamDesc {
-            id: 0,
-            name: w.str(tag::SERVER_NAME).unwrap_or_default(),
-            center_hz: w.u64(tag::CENTER_HZ).unwrap_or(0),
-            sample_rate: w.u32(tag::SAMPLE_RATE).unwrap_or(0),
-            gain_db: w.i16(tag::GAIN_DDB).map(|g| g as f32 / 10.0),
-            tunable: w.u8(tag::TUNABLE).unwrap_or(0) != 0,
-            tune_range_hz: w.u64(tag::TUNE_MIN_HZ).zip(w.u64(tag::TUNE_MAX_HZ)),
-            settings: Vec::new(),
-        });
-    }
-    let punch_to = peer.zip(w.u16(tag::DATA_PORT)).map(|(mut to, port)| {
+    let streams = welcomed(&welcome)?;
+    let punch_to = peer.zip(data_port(&welcome)).map(|(mut to, port)| {
         to.set_port(port);
         to
     });
-    drop(w);
     Ok(Greeting { read_half, write_half, welcome, streams, punch_to, over_ws })
-}
-
-/// One subscribe, which says the same things whichever transport it asks for.
-fn subscribe_frame(
-    config: &ClientConfig,
-    bits: BitDepth,
-    stream_id: u16,
-    transport: Transport,
-    token: u64,
-    udp_port: Option<u16>,
-) -> Frame {
-    let mut sub = Tlvs::new();
-    sub.u16(tag::STREAM_ID, stream_id)
-        .u8(tag::BIT_DEPTH, bits.0)
-        .u8(tag::CODEC, config.codec.code())
-        .u8(tag::CODEC_LEVEL, config.level as u8)
-        .u16(tag::DECIMATION, 1)
-        .u8(tag::TRANSPORT, transport.code());
-    if transport == Transport::Udp {
-        sub.u64(tag::PUNCH_TOKEN, token);
-    }
-    if let Some(port) = udp_port {
-        sub.u16(tag::UDP_PORT, port);
-    }
-    Frame::new(msg::SUBSCRIBE, &sub)
 }
 
 /// What tuners a server has, without subscribing to any of them.
@@ -324,11 +175,8 @@ pub async fn set(
     value: SettingValue,
 ) -> Result<()> {
     let mut g = greet(server, name).await?;
-    let mut t = Tlvs::new();
-    t.u16(tag::STREAM_ID, stream)
-        .str(tag::SETTING_NAME, setting)
-        .str(tag::SETTING_VALUE, &value.text());
-    g.write_half.write_all(&Frame::new(msg::SET_SETTING, &t).encode()).await.map_err(other)?;
+    let set = set_frame(stream, setting, &value);
+    g.write_half.write_all(&set.encode()).await.map_err(other)?;
     g.write_half.shutdown().await.map_err(other)?;
     let mut rest = Vec::new();
     let _ = g.read_half.read_to_end(&mut rest).await;
@@ -340,9 +188,21 @@ pub async fn list(server: &str, name: &str) -> Result<Vec<StreamDesc>> {
 }
 
 impl IqStream {
-    pub async fn connect(server: &str, mut config: ClientConfig) -> Result<Self> {
+    pub async fn connect(server: &str, config: ClientConfig) -> Result<Self> {
+        Self::subscribe(Pipe::Named(server), config).await
+    }
+
+    pub async fn connect_over(
+        read: ws::Read,
+        write: ws::Write,
+        config: ClientConfig,
+    ) -> Result<Self> {
+        Self::subscribe(Pipe::Open(read, write), config).await
+    }
+
+    async fn subscribe(pipe: Pipe<'_>, mut config: ClientConfig) -> Result<Self> {
         let bit_depth = BitDepth::new(config.bits)?;
-        if ws::is_url(server) {
+        if !matches!(pipe, Pipe::Named(server) if !ws::is_url(server)) {
             config.transport = Prefer::Tcp;
         }
 
@@ -354,27 +214,14 @@ impl IqStream {
             _ => UdpSocket::bind(("0.0.0.0", config.local_port)).await.ok(),
         };
 
+        let greeting = match pipe {
+            Pipe::Named(server) => greet(server, &config.name).await?,
+            Pipe::Open(read, write) => greet_on(read, write, None, &config.name).await?,
+        };
         let Greeting { mut read_half, mut write_half, welcome, streams, punch_to, over_ws } =
-            greet(server, &config.name).await?;
-        let w = welcome.tlvs()?;
-        if let Some(depths) = w.get(tag::SUPPORTED_BIT_DEPTHS)
-            && !depths.contains(&bit_depth.0)
-        {
-            return Err(Error::other(format!("server does not offer {} bit samples", bit_depth.0)));
-        }
-        if let Some(codecs) = w.get(tag::SUPPORTED_CODECS)
-            && !codecs.contains(&config.codec.code())
-        {
-            return Err(Error::other(format!("server does not offer codec {:?}", config.codec)));
-        }
-        let wanted = match config.stream {
-            Some(id) => streams
-                .iter()
-                .find(|s| s.id == id)
-                .ok_or_else(|| Error::other(format!("server has no tuner {id}")))?,
-            None => streams.first().ok_or_else(|| Error::other("server offers no tuner"))?,
-        }
-        .clone();
+            greeting;
+        offered(&welcome, &config, bit_depth)?;
+        let wanted = wanted(&streams, &config)?;
 
         // A server that can be punched is told nothing about this client's
         // own port: behind a NAT it is not the port anything arrives on, and
@@ -398,24 +245,7 @@ impl IqStream {
         let reply = read_frame(&mut read_half)
             .await?
             .ok_or_else(|| Error::other("server closed during subscribe"))?;
-        if reply.msg_type != msg::SUBSCRIBED {
-            return Err(Error::other(format!("subscribe refused: {}", describe_error(&reply))));
-        }
-        let r = reply.tlvs()?;
-
-        let info = StreamInfo {
-            id: wanted.id,
-            name: wanted.name.clone(),
-            center_hz: wanted.center_hz,
-            sample_rate: wanted.sample_rate,
-            gain_db: wanted.gain_db,
-            tunable: wanted.tunable,
-            tune_range_hz: wanted.tune_range_hz,
-            settings: wanted.settings.clone(),
-            bit_depth: r.u8(tag::BIT_DEPTH).unwrap_or(bit_depth.0),
-            codec: Codec::from_code(r.u8(tag::CODEC).unwrap_or(config.codec.code()))?,
-            block_samples: r.u32(tag::BLOCK_SAMPLES).unwrap_or(0),
-        };
+        let info = subscribed(&reply, &wanted, &config, bit_depth)?;
 
         // read_exact is not cancellation safe, so the socket is read by its
         // own task and what comes off it is handed over channels that select!
@@ -536,22 +366,8 @@ impl IqStream {
     /// and [`StreamInfo::center_hz`], because a dongle steps in units of its
     /// own and the answer is not always what was asked for.
     pub async fn tune(&mut self, center_hz: u64) -> Result<()> {
-        if !self.info.tunable {
-            return Err(Error::other("this server will not be tuned from here"));
-        }
-        if let Some((lo, hi)) = self.info.tune_range_hz
-            && !(lo..=hi).contains(&center_hz)
-        {
-            return Err(Error::other(format!(
-                "{:.4} MHz is outside the far end's {:.4} to {:.4} MHz",
-                center_hz as f64 / 1e6,
-                lo as f64 / 1e6,
-                hi as f64 / 1e6
-            )));
-        }
-        let mut t = Tlvs::new();
-        t.u16(tag::STREAM_ID, self.info.id).u64(tag::CENTER_HZ, center_hz);
-        self.control.write_all(&Frame::new(msg::TUNE, &t).encode()).await.map_err(other)
+        let tune = tune_frame(&self.info, center_hz)?;
+        self.control.write_all(&tune.encode()).await.map_err(other)
     }
 
     /// Ask the far end to set one of this tuner's settings.
@@ -561,17 +377,8 @@ impl IqStream {
     /// a [`msg::STREAM_CHANGED`] and shows up in [`StreamInfo::settings`],
     /// because a driver snaps a gain to its own step.
     pub async fn set_setting(&mut self, name: &str, value: SettingValue) -> Result<()> {
-        if !self.info.tunable {
-            return Err(Error::other("this server will not be set from here"));
-        }
-        if !self.info.settings.iter().any(|s| s.name == name) {
-            return Err(Error::other(format!("that tuner has no setting called {name:?}")));
-        }
-        let mut t = Tlvs::new();
-        t.u16(tag::STREAM_ID, self.info.id)
-            .str(tag::SETTING_NAME, name)
-            .str(tag::SETTING_VALUE, &value.text());
-        self.control.write_all(&Frame::new(msg::SET_SETTING, &t).encode()).await.map_err(other)
+        let set = setting_frame(&self.info, name, &value)?;
+        self.control.write_all(&set.encode()).await.map_err(other)
     }
 
     /// Next complete block, or `None` when the server closes the control
@@ -583,9 +390,7 @@ impl IqStream {
             }
             tokio::select! {
                 _ = self.ping.tick() => {
-                    let mut t = Tlvs::new();
-                    t.u64(tag::TIMESTAMP_NS, now_ns());
-                    self.control.write_all(&Frame::new(msg::PING, &t).encode()).await.map_err(other)?;
+                    self.control.write_all(&ping_frame().encode()).await.map_err(other)?;
                     // The mapping the punch opened closes on a NAT that has
                     // seen nothing go out of it for a minute or two.
                     self.punch().await;
@@ -652,73 +457,10 @@ impl IqStream {
     }
 
     async fn handle_control(&mut self, frame: Frame) -> Result<()> {
-        match frame.msg_type {
-            // Answer the server's keepalive, otherwise it drops the stream.
-            msg::PING => {
-                let mut t = Tlvs::new();
-                if let Some(ts) = frame.tlvs()?.u64(tag::TIMESTAMP_NS) {
-                    t.u64(tag::TIMESTAMP_NS, ts);
-                }
-                self.control.write_all(&Frame::new(msg::PONG, &t).encode()).await.map_err(other)?;
-            }
-            msg::PONG => {
-                if let Some(ts) = frame.tlvs()?.u64(tag::TIMESTAMP_NS) {
-                    self.stats.rtt_ms = Some(now_ns().saturating_sub(ts) as f64 / 1e6);
-                }
-            }
-            // Somebody moved the tuner, possibly not us. From here on the
-            // samples are of somewhere else, so the reading changes before the
-            // next block leaves rather than after.
-            msg::TUNED => {
-                let t = frame.tlvs()?;
-                let mine = t.u16(tag::STREAM_ID).is_none_or(|id| id == self.info.id);
-                if let (true, Some(hz)) = (mine, t.u64(tag::CENTER_HZ)) {
-                    self.info.center_hz = hz;
-                }
-                for s in &mut self.available {
-                    if t.u16(tag::STREAM_ID).is_none_or(|id| id == s.id)
-                        && let Some(hz) = t.u64(tag::CENTER_HZ)
-                    {
-                        s.center_hz = hz;
-                    }
-                }
-            }
-            // The set of tuners changed: one was plugged in, or the receiver
-            // at the far end stopped serving one.
-            msg::STREAMS => self.available = read_streams(&frame.tlvs()?),
-            // One tuner is set differently than it was: a gain moved, a bias
-            // tee went off, the antenna port changed. What it says about the
-            // one being read replaces what the welcome said, because from
-            // here on the samples were taken at the new setting.
-            msg::STREAM_CHANGED => {
-                for desc in read_streams(&frame.tlvs()?) {
-                    if desc.id == self.info.id {
-                        self.info.center_hz = desc.center_hz;
-                        self.info.sample_rate = desc.sample_rate;
-                        self.info.gain_db = desc.gain_db;
-                        self.info.tunable = desc.tunable;
-                        self.info.tune_range_hz = desc.tune_range_hz;
-                        self.info.settings = desc.settings.clone();
-                    }
-                    match self.available.iter_mut().find(|s| s.id == desc.id) {
-                        Some(known) => *known = desc,
-                        None => self.available.push(desc),
-                    }
-                }
-            }
-            // The subscription is over: asked for, or the tuner taken off
-            // the server by whoever owns it. Either way no more samples of
-            // it will arrive, and a reader waiting for them would wait for
-            // ever, because the connection itself is still up.
-            msg::UNSUBSCRIBED => {
-                if frame.tlvs()?.u16(tag::STREAM_ID).is_none_or(|id| id == self.info.id) {
-                    self.ended = true;
-                }
-            }
-            // A refused tune is not a dead subscription: the samples keep
-            // coming from wherever the tuner already was.
-            msg::ERROR => tracing::warn!("iqstream: {}", describe_error(&frame)),
-            _ => {}
+        match heard(&frame, &mut self.info, &mut self.available, &mut self.stats)? {
+            Answer::Reply(reply) => self.control.write_all(&reply.encode()).await.map_err(other)?,
+            Answer::Ended => self.ended = true,
+            Answer::Nothing => {}
         }
         Ok(())
     }
@@ -726,54 +468,9 @@ impl IqStream {
     /// Stop the stream cleanly. Dropping the client also works, but this tells
     /// the server immediately instead of leaving it to the keepalive.
     pub async fn unsubscribe(&mut self) -> Result<()> {
-        let mut t = Tlvs::new();
-        t.u16(tag::STREAM_ID, self.info.id);
-        self.control.write_all(&Frame::new(msg::UNSUBSCRIBE, &t).encode()).await.map_err(other)
+        let unsubscribe = unsubscribe_frame(&self.info);
+        self.control.write_all(&unsubscribe.encode()).await.map_err(other)
     }
-}
-
-/// A datagram, however it arrived: one block of samples once every fragment
-/// of it is in, and nothing until then.
-fn take_datagram(
-    datagram: &[u8],
-    info: &StreamInfo,
-    config: &ClientConfig,
-    assembler: &mut Assembler,
-    stats: &mut Stats,
-    decoded: &mut Vec<u8>,
-) -> Result<Option<Block>> {
-    let Ok((header, payload)) = DataHeader::decode(datagram) else {
-        return Ok(None);
-    };
-    // Another tuner on the same server, reaching this port because a
-    // subscription was replaced and the old pump had a datagram already in
-    // flight.
-    if header.stream_id != info.id {
-        return Ok(None);
-    }
-    let Some(body) = assembler.push(&header, payload, stats) else {
-        return Ok(None);
-    };
-    decode_block(&header, &body, decoded)?;
-    stats.blocks += 1;
-
-    let padded = assembler.take_pending_gap().unwrap_or(0);
-    let pad = config.pad_gaps && padded > 0;
-    let mut samples = Vec::with_capacity(decoded.len() + if pad { padded as usize * 2 } else { 0 });
-    if pad {
-        stats.padded_samples += padded;
-        // 0x80 is mid scale for UC8: silence, not a full scale step that a
-        // demodulator would see as a pulse.
-        samples.resize(padded as usize * 2, 0x80);
-    }
-    samples.extend_from_slice(decoded);
-    Ok(Some(Block {
-        sample_index: header.sample_index,
-        samples,
-        padded_before: padded,
-        center_hz: info.center_hz,
-        stream_id: header.stream_id,
-    }))
 }
 
 async fn recv(sock: Option<&UdpSocket>, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -790,131 +487,27 @@ async fn sleep_until(at: Option<tokio::time::Instant>) {
     }
 }
 
-/// Reassembles fragmented blocks. A block is emitted once every fragment has
-/// arrived; a block still missing fragments when a newer one completes is
-/// abandoned, because a late block is worthless to a decoder.
-#[derive(Default)]
-struct Assembler {
-    blocks: BTreeMap<u32, Partial>,
-    next_sample: Option<u64>,
-    pending_gap: Option<u64>,
-}
-
-struct Partial {
-    fragments: BTreeMap<u16, Vec<u8>>,
-    frag_count: u16,
-    sample_index: u64,
-    block_samples: u32,
-}
-
-impl Assembler {
-    fn push(&mut self, header: &DataHeader, payload: &[u8], stats: &mut Stats) -> Option<Vec<u8>> {
-        let entry = self.blocks.entry(header.block_seq).or_insert_with(|| Partial {
-            fragments: BTreeMap::new(),
-            frag_count: header.frag_count,
-            sample_index: header.sample_index,
-            block_samples: header.block_samples,
-        });
-        entry.fragments.insert(header.frag_index, payload.to_vec());
-        if entry.fragments.len() < entry.frag_count as usize {
-            return None;
-        }
-
-        let done = self.blocks.remove(&header.block_seq)?;
-        // Anything older than the block just completed will never complete.
-        let stale: Vec<u32> = self
-            .blocks
-            .keys()
-            .copied()
-            .filter(|seq| header.block_seq.wrapping_sub(*seq) < u32::MAX / 2)
-            .collect();
-        for seq in stale {
-            self.blocks.remove(&seq);
-            stats.incomplete_blocks += 1;
-        }
-
-        if let Some(expected) = self.next_sample
-            && done.sample_index > expected
-        {
-            self.pending_gap = Some(done.sample_index - expected);
-        }
-        self.next_sample = Some(done.sample_index + done.block_samples as u64);
-
-        let mut body = Vec::new();
-        for (_, frag) in done.fragments {
-            body.extend_from_slice(&frag);
-        }
-        Some(body)
-    }
-
-    fn take_pending_gap(&mut self) -> Option<u64> {
-        self.pending_gap.take()
-    }
-}
-
-fn decode_block(header: &DataHeader, body: &[u8], out: &mut Vec<u8>) -> Result<()> {
-    let values = header.block_samples as usize * 2;
-    let packed_len = BitDepth::new(header.bit_depth)?.packed_len(header.block_samples as usize);
-    let decompressed;
-    let packed = match header.codec {
-        Codec::None => body,
-        Codec::Zstd => {
-            decompressed = zstd::bulk::decompress(body, packed_len + 1024).map_err(other)?;
-            &decompressed
-        }
-    };
-    unpack(packed, header.bit_depth, values, out);
-    Ok(())
-}
-
-pub fn describe_error(frame: &Frame) -> String {
-    if frame.msg_type != msg::ERROR {
-        return format!("unexpected message type {:#04x}", frame.msg_type);
-    }
-    match frame.tlvs() {
-        Ok(t) => format!(
-            "server error {}: {}",
-            t.u16(tag::ERROR_CODE).unwrap_or(0),
-            t.str(tag::ERROR_MESSAGE).unwrap_or_default()
-        ),
-        Err(e) => format!("undecodable error frame: {e}"),
-    }
-}
-
-/// What comes off the control connection: a frame, or a whole datagram where
-/// the samples are travelling on it.
-enum Inbound {
-    Control(Frame),
-    Data(Vec<u8>),
-}
-
-/// One frame or one inline record, told apart by the first four bytes: a
-/// frame opens with a protocol version, which the magic cannot be.
 async fn read_inbound(sock: &mut ws::Read) -> Result<Option<Inbound>> {
-    let mut head = [0u8; 4];
-    match sock.read_exact(&mut head).await {
+    let mut first = [0u8; 4];
+    match sock.read_exact(&mut first).await {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(other(e)),
     }
-    if head == INLINE_MAGIC {
-        let mut len = [0u8; 4];
-        sock.read_exact(&mut len).await.map_err(other)?;
-        let len = u32::from_le_bytes(len) as usize;
-        if !(DATA_HEADER_LEN..=MAX_INLINE_RECORD).contains(&len) {
-            return Err(Error::other(format!("inline record of {len} bytes")));
+    match head(first)? {
+        Head::Inline => {
+            let mut len = [0u8; 4];
+            sock.read_exact(&mut len).await.map_err(other)?;
+            let mut datagram = vec![0u8; inline_len(len)?];
+            sock.read_exact(&mut datagram).await.map_err(other)?;
+            Ok(Some(Inbound::Data(datagram)))
         }
-        let mut datagram = vec![0u8; len];
-        sock.read_exact(&mut datagram).await.map_err(other)?;
-        return Ok(Some(Inbound::Data(datagram)));
+        Head::Frame { version, msg_type, len } => {
+            let mut payload = vec![0u8; len];
+            sock.read_exact(&mut payload).await.map_err(other)?;
+            Ok(Some(Inbound::Control(Frame { version, msg_type, payload })))
+        }
     }
-    let len = u16::from_le_bytes([head[2], head[3]]) as usize;
-    if len > MAX_FRAME_PAYLOAD {
-        return Err(Error::other(format!("control frame too large: {len}")));
-    }
-    let mut payload = vec![0u8; len];
-    sock.read_exact(&mut payload).await.map_err(other)?;
-    Ok(Some(Inbound::Control(Frame { version: head[0], msg_type: head[1], payload })))
 }
 
 pub async fn read_frame(sock: &mut ws::Read) -> Result<Option<Frame>> {
