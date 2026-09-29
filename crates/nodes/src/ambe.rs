@@ -66,4 +66,12 @@ impl Vocoder {
         }
         out
     }
+
+    pub(crate) fn decode_parameters(&mut self, frames: &[[bool; 49]]) -> Vec<f32> {
+        let mut out = Vec::with_capacity(frames.len() * SAMPLES_PER_FRAME);
+        for f in frames {
+            out.extend_from_slice(&self.synth.decode_parameters(f));
+        }
+        out
+    }
 }

@@ -17,6 +17,8 @@ pub const FRAME_DIBITS: usize = FRAME_BITS / 2;
 
 pub const CALLSIGN: usize = 10;
 
+pub const FRAME_SECONDS: f64 = 0.1;
+
 const CODE: conv::Code = conv::M17;
 
 const WHITENING: [u8; 20] = [
@@ -186,6 +188,56 @@ pub fn vd2_data(payload: &[bool]) -> Option<[u8; CALLSIGN]> {
     bytes[..10].try_into().ok()
 }
 
+pub const VCH_BITS: usize = 104;
+
+pub const VOICE_PARAMETERS: usize = 49;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Voice {
+    pub parameters: [bool; VOICE_PARAMETERS],
+    pub corrected: u32,
+}
+
+fn vch_position(i: usize) -> usize {
+    (i % 26) * 4 + i / 26
+}
+
+fn whitening_bit(i: usize) -> bool {
+    WHITENING[i / 8] >> (7 - i % 8) & 1 == 1
+}
+
+pub fn vd2_voice(payload: &[bool]) -> Option<[Voice; 5]> {
+    let payload = payload.get(..720)?;
+    let mut out = [Voice { parameters: [false; VOICE_PARAMETERS], corrected: 0 }; 5];
+    for (j, v) in out.iter_mut().enumerate() {
+        let at = 144 * j + 40;
+        let vch: Vec<bool> =
+            (0..VCH_BITS).map(|i| payload[at + vch_position(i)] ^ whitening_bit(i)).collect();
+        for k in 0..27 {
+            let votes = vch[3 * k..3 * k + 3].iter().filter(|b| **b).count();
+            v.parameters[k] = votes >= 2;
+            v.corrected += u32::from(votes == 1 || votes == 2);
+        }
+        v.parameters[27..].copy_from_slice(&vch[81..103]);
+    }
+    Some(out)
+}
+
+pub fn vd2_voice_payload(voice: &[[bool; VOICE_PARAMETERS]; 5], dch_field: &str) -> Vec<bool> {
+    let mut payload = vd2_payload(dch_field);
+    for (j, p) in voice.iter().enumerate() {
+        let mut vch = [false; VCH_BITS];
+        for k in 0..27 {
+            vch[3 * k..3 * k + 3].fill(p[k]);
+        }
+        vch[81..103].copy_from_slice(&p[27..]);
+        for (i, b) in vch.iter().enumerate() {
+            payload[144 * j + 40 + vch_position(i)] = b ^ whitening_bit(i);
+        }
+    }
+    payload
+}
+
 pub fn header_payload(dest: &str, source: &str) -> Vec<bool> {
     let mut data = [b' '; 20];
     for (d, s) in data[..10].iter_mut().zip(dest.bytes()) {
@@ -226,6 +278,7 @@ pub struct Frame {
     pub fich: Fich,
     pub dest: Option<String>,
     pub source: Option<String>,
+    pub voice: Option<[Voice; 5]>,
 }
 
 fn field(bytes: &[u8]) -> Option<String> {
@@ -238,6 +291,10 @@ pub fn read_frame(air: &[bool], at: usize) -> Option<Frame> {
     let fich = fich(air.get(SYNC_BITS..SYNC_BITS + FICH_BITS)?)?;
     let payload = air.get(SYNC_BITS + FICH_BITS..FRAME_BITS)?;
     let (mut dest, mut source) = (None, None);
+    let voice = match (fich.kind, fich.mode) {
+        (Kind::Communications, Mode::VoiceData2) => vd2_voice(payload),
+        _ => None,
+    };
     match (fich.kind, fich.mode) {
         (Kind::Header | Kind::Terminator, _) => {
             if let Some((d, s)) = header_callsigns(payload) {
@@ -252,7 +309,7 @@ pub fn read_frame(air: &[bool], at: usize) -> Option<Frame> {
         },
         _ => {}
     }
-    Some(Frame { at, fich, dest, source })
+    Some(Frame { at, fich, dest, source, voice })
 }
 
 pub const TAG: [u8; 2] = *b"YF";
@@ -407,6 +464,24 @@ mod tests {
         air[7] = !air[7];
         air[100] = !air[100];
         assert_eq!(fich(&air).map(|f| f.raw), Some(raw));
+    }
+
+    #[test]
+    fn speech_comes_back_through_its_triplets() {
+        let mut voice = [[false; VOICE_PARAMETERS]; 5];
+        for (j, v) in voice.iter_mut().enumerate() {
+            for (k, b) in v.iter_mut().enumerate() {
+                *b = (j * 7 + k * 3) % 5 < 2;
+            }
+        }
+        let mut payload = vd2_voice_payload(&voice, "G1RCE");
+        payload[40] = !payload[40];
+        let got = vd2_voice(&payload).expect("five voice channels");
+        for (g, v) in got.iter().zip(&voice) {
+            assert_eq!(&g.parameters, v);
+        }
+        assert_eq!(got.iter().map(|v| v.corrected).sum::<u32>(), 1);
+        assert_eq!(vd2_data(&payload).as_ref().map(|d| &d[..5]), Some(&b"G1RCE"[..]));
     }
 
     #[test]

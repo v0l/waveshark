@@ -568,6 +568,35 @@ impl AmbeFrame {
             }
         }
 
+        Self::from_vectors(&c0, &c1, &c2, &c3, errors)
+    }
+
+    pub fn from_parameters(bits: &[bool; 49]) -> Self {
+        let mut vectors = [
+            BitFrame::new(VECTOR_C0.len()),
+            BitFrame::new(VECTOR_C1.len()),
+            BitFrame::new(VECTOR_C2.len()),
+            BitFrame::new(VECTOR_C3.len()),
+        ];
+        let mut k = bits.iter();
+        for (v, n) in vectors.iter_mut().zip([12, 12, 11, 14]) {
+            for i in 0..n {
+                if *k.next().unwrap_or(&false) {
+                    v.set(i);
+                }
+            }
+        }
+        let [c0, c1, c2, c3] = vectors;
+        Self::from_vectors(&c0, &c1, &c2, &c3, [0, 0])
+    }
+
+    fn from_vectors(
+        c0: &BitFrame,
+        c1: &BitFrame,
+        c2: &BitFrame,
+        c3: &BitFrame,
+        errors: [u32; 2],
+    ) -> Self {
         let b0 = (c0.get_int(&VECTOR_U0_B0_HIGH) << 3) + c3.get_int(&VECTOR_U3_B0_LOW);
         let error_count = errors[0] + errors[1];
 
@@ -742,6 +771,10 @@ impl AmbeSynthesizer {
         self.decode_frame(&AmbeFrame::from_bit_frame(&BitFrame::from_bits(bits)))
     }
 
+    pub fn decode_parameters(&mut self, bits: &[bool; 49]) -> [f32; SAMPLES_PER_FRAME] {
+        self.decode_frame(&AmbeFrame::from_parameters(bits))
+    }
+
     /// Port of `AMBESynthesizer.getAudio(AMBEFrame)`.
     pub fn decode_frame(&mut self, frame: &AmbeFrame) -> [f32; SAMPLES_PER_FRAME] {
         if frame.is_tone_frame() {
@@ -836,6 +869,31 @@ mod tests {
     fn assert_valid_audio(audio: &[f32; SAMPLES_PER_FRAME]) {
         assert!(audio.iter().all(|s| s.is_finite()));
         assert!(audio.iter().all(|s| s.abs() <= 0.95));
+    }
+
+    #[test]
+    fn parameters_read_without_the_dmr_code_are_the_parameters_read_through_it() {
+        for (u0, u1, u2, u3) in
+            [(0x5a3u32, 0x2c1u32, 0x5a5u32, 0x2a5bu32), (0x0f0, 0xabc, 0x123, 0x1fff)]
+        {
+            let frame = build_frame(
+                golay24_codeword(u0),
+                golay23_codeword(u1) ^ modulation_vector(u0),
+                u2,
+                u3,
+            );
+            let mut bits = [false; 49];
+            let mut at = 0;
+            for (value, width) in [(u0, 12), (u1, 12), (u2, 11), (u3, 14)] {
+                for i in 0..width {
+                    bits[at] = value >> (width - 1 - i) & 1 == 1;
+                    at += 1;
+                }
+            }
+            let through = AmbeFrame::new(&frame);
+            assert_eq!(through.errors(), [0, 0]);
+            assert_eq!(format!("{:?}", AmbeFrame::from_parameters(&bits)), format!("{through:?}"));
+        }
     }
 
     #[test]

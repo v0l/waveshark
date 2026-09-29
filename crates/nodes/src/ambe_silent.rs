@@ -15,4 +15,7 @@ impl Vocoder {
     pub(crate) fn decode_channels(&mut self, _channels: &[[bool; 72]]) -> Vec<f32> {
         Vec::new()
     }
+    pub(crate) fn decode_parameters(&mut self, _frames: &[[bool; 49]]) -> Vec<f32> {
+        Vec::new()
+    }
 }

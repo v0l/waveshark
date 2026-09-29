@@ -610,7 +610,10 @@ channel both name; the radio IDs the Yaesu sets beside them are in there too.
 
 76 frames of 100 ms from header to terminator, each behind its frame
 information channel's CRC. A System Fusion channel tuned to it reads all 76;
-an auto block reads 71.
+an auto block reads 71. The 74 frames between them carry 7.4 seconds of
+AMBE+2 speech whose repeated bits all agree, and Qwen3-ASR 0.6B hears it as
+"CQ or CQ or CQ. This is Golf Number One Radio, Radio Golf. Calling CQ,
+listening": G1RCE calling CQ, as the data channel says.
 """
 
 scanners = """
