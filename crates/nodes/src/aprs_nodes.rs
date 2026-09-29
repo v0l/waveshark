@@ -124,11 +124,10 @@ impl Simple for AprsNode {
         self.afsk.process(&audio, &mut self.frames);
         self.audio = audio;
 
-        let out = o.packets_mut();
-        for f in &self.frames {
-            self.accepted += 1;
-            out.push(self.meter.packet_now(f.clone()));
-        }
+        self.accepted += self.frames.len() as u64;
+        let read = self.meter.packets(self.frames.drain(..), common::packet::now_us());
+        o.packets_mut()
+            .extend(read.into_iter().map(|p| p.checked(common::packet::Integrity::Passed)));
         Ok(())
     }
 

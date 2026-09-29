@@ -161,6 +161,23 @@ impl History {
         self.head = 0;
     }
 
+    pub(super) fn capacity(&self) -> usize {
+        self.buf.len()
+    }
+
+    pub(super) fn hold_at_least(&mut self, cap: usize) {
+        if cap <= self.buf.len() {
+            return;
+        }
+        let (a, b) = self.parts(self.first(), self.end());
+        let mut buf = Vec::with_capacity(cap);
+        buf.extend_from_slice(a);
+        buf.extend_from_slice(b);
+        self.head = buf.len() % cap;
+        buf.resize(cap, C32::default());
+        self.buf = buf;
+    }
+
     pub(super) fn push(&mut self, input: &[C32]) {
         let cap = self.buf.len();
         // A block longer than the whole history: only the newest `cap` of it
@@ -212,6 +229,7 @@ pub struct SourceExtractor {
     rate: f64,
     center_hz: f64,
     ring: History,
+    keep: usize,
     lead: u64,
     tail: u64,
     chans: Vec<Chan>,
@@ -257,6 +275,7 @@ impl SourceExtractor {
             // of it got between one and two of them. A ring that held one
             // lost a decode of the source corpus.
             ring: History::new(2 * keep),
+            keep,
             lead,
             tail,
             chans: Vec::new(),
@@ -436,6 +455,9 @@ impl SourceExtractor {
     /// reasons of its own goes through [`Self::open_channel`] and
     /// [`Self::close`], which take effect here too.
     pub fn process(&mut self, input: &[C32], events: &[SourceEvent], out: &mut Vec<SourceBlock>) {
+        if input.len() + self.keep > self.ring.capacity() {
+            self.ring.hold_at_least(2 * (input.len() + self.keep));
+        }
         self.ring.push(input);
         let end = self.ring.end();
         if let Some(b) = &mut self.bank
@@ -712,6 +734,21 @@ mod history_tests {
         let (a, b) = h.parts(h.end() - 10, h.end());
         let got: Vec<f32> = a.iter().chain(b).map(|c| c.re).collect();
         assert_eq!(got, ((written - 10)..written).map(|i| i as f32).collect::<Vec<_>>());
+        // Grown, it holds what it held and goes on from there.
+        h.hold_at_least(3 * cap);
+        let (a, b) = h.parts(h.first(), h.end());
+        let got: Vec<f32> = a.iter().chain(b).map(|c| c.re).collect();
+        assert_eq!(got, (h.first()..h.end()).map(|i| i as f32).collect::<Vec<_>>());
+        h.push(&run(written, 250));
+        written += 250;
+        assert_eq!(h.first(), written - 3 * cap as u64);
+        let (a, b) = h.parts(h.first(), h.end());
+        let got: Vec<f32> = a.iter().chain(b).map(|c| c.re).collect();
+        assert_eq!(got, (h.first()..h.end()).map(|i| i as f32).collect::<Vec<_>>());
+        let mut h = History::new(cap);
+        h.push(&run(0, 60));
+        h.push(&run(60, 60));
+        written = 120;
         // And a block longer than the whole ring keeps its newest `cap`.
         h.push(&run(written, 250));
         written += 250;

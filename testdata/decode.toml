@@ -498,9 +498,14 @@ description = """
 positions in it are the amateur stations that went through the satellite on
 that pass.
 
-About nine bursts at 15 to 20 dB, moving with the pass's Doppler. The
-identify crate reads four frames from IU3MEY, PSAT, DL6AP-7 and 2E0SUD; the
-receiver, finding the bursts with an auto block, reads one.
+Ten bursts at 15 to 20 dB, moving from 1.5 to 2.3 kHz below the centre
+with the pass's Doppler. The identify crate reads the same four frames the
+receiver does, from IU3MEY, PSAT, DL6AP-7 and 2E0SUD, each through its
+FCS.
+
+The receiver read only the first until the auto node's history held a whole
+block: at 24 kS/s a block of the span was longer than the ring the channel
+kept for the session was cut from, so every block lost its first eighth.
 """
 
 scanners = """
@@ -509,12 +514,13 @@ range = 145.81 - 145.84 MHz
 front = auto
 """
 
-rows = 1
+rows = 4
 
 [[capture.read]]
 protocol = "aprs"
-rows = 1
-subjects = ["IU3MEY"]
+rows = 4
+checked = true
+subjects = ["2E0SUD", "DL6AP-7", "IU3MEY", "PSAT"]
 
 [[capture]]
 name = "rtty_dwd_11.039M_2k.cs16"
@@ -558,7 +564,7 @@ on 21 February 2023, SDRangel's NAVTEX example whole. SITOR-B, 100 baud with
 a 170 Hz shift. The WAV carries no centre, so the 518 kHz here is the NAVTEX
 channel the tones sit either side of.
 
-There is no NAVTEX decoder, so the receiver reads it as one unknown carrier.
+There is no NAVTEX decoder, and the receiver reads nothing.
 """
 
 scanners = """
@@ -567,7 +573,7 @@ range = 517 - 519 kHz
 front = auto
 """
 
-rows = 1
+rows = 0
 
 [[capture]]
 name = "ysf_145.6875M_74.999k.cs16"

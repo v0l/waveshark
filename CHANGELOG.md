@@ -85,6 +85,8 @@ the code is in the commit log.
 - DAB ensembles and stations and DRM services missing from the packet list.
 - M17 packets read out of Mode S replies and other frames another front end keyed.
 - ICAO addresses and other hex identifiers shown without their leading zero.
+- Auto channels on spans under about 50 kS/s losing part of every block after the first decode.
+- APRS frames shown as unchecked though every one passed its FCS.
 - Spectrum on a half duplex radio dropping the last fifth of a second of its own over.
 - Roger beep cut short at the end of an over, and the source heard again after it.
 - Survey device locations landing on the receiver from GPS wander while parked.
