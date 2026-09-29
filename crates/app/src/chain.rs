@@ -9983,6 +9983,10 @@ vectors:
     /// `cargo test --release -p app what_a_television_transmission_costs -- --nocapture`
     #[test]
     fn what_a_television_transmission_costs() {
+        if cfg!(debug_assertions) {
+            eprintln!("skipping: timing the graph needs a release build");
+            return;
+        }
         // A multiplex is encoded across every core there is: 3.0x real time on
         // 48 of them and 0.38x on a four core CI runner, which measures the
         // machine rather than the graph.
