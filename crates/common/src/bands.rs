@@ -1008,6 +1008,9 @@ mod tests {
             (Europe, 8.992e6, "Aero HF"),
             (Europe, 11.175e6, "Aero HF"),
             (Europe, 8.414e6, "Marine HF"),
+            (Europe, 11.039e6, "Fixed HF"),
+            (Europe, 7.646e6, "Fixed HF"),
+            (Americas, 14.4673e6, "Fixed HF"),
             (Europe, 5.0e6, "Time signal"),
             (Europe, 10.0e6, "Time signal"),
             (Europe, 27.185e6, "CB"),
@@ -1124,9 +1127,9 @@ mod tests {
     /// than a quieter ribbon.
     #[test]
     fn the_file_holds_every_plan_whole() {
-        assert_eq!(Plan::Europe.bands().len(), 107);
-        assert_eq!(Plan::Americas.bands().len(), 100);
-        assert_eq!(Plan::AsiaPacific.bands().len(), 94);
+        assert_eq!(Plan::Europe.bands().len(), 131);
+        assert_eq!(Plan::Americas.bands().len(), 124);
+        assert_eq!(Plan::AsiaPacific.bands().len(), 118);
     }
 
     #[test]

@@ -47,6 +47,7 @@ the code is in the commit log.
 
 ### Changed
 
+- RTTY speed, shift and tuning found on their own, and RTTY read on the HF fixed service bands.
 - Channel strip cards fold their settings away, and the channel list scrolls.
 - DVB-T and DVB-S2 pictures decoded on the graphics card where FFmpeg can, and colour converted there.
 - Video pane programme table across every multiplex, with scrambling, codecs and now and next, only the watched one decoded.
@@ -87,6 +88,8 @@ the code is in the commit log.
 - ICAO addresses and other hex identifiers shown without their leading zero.
 - Auto channels on spans under about 50 kS/s losing part of every block after the first decode.
 - APRS frames shown as unchecked though every one passed its FCS.
+- RTTY stations with a stop of one and a half bits, or recorded at a low level, breaking up.
+- Repeated packets dropped as copies when a recording replays faster than the air.
 - Spectrum on a half duplex radio dropping the last fifth of a second of its own over.
 - Roger beep cut short at the end of an over, and the source heard again after it.
 - Survey device locations landing on the receiver from GPS wander while parked.

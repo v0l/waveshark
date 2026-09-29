@@ -509,6 +509,10 @@ pub struct TonePair {
     min_level: f32,
     margin: f32,
     clock_gain: f32,
+    edges: u64,
+    late_sum: f32,
+    decided: u64,
+    contrast_sum: f32,
 }
 
 impl TonePair {
@@ -543,10 +547,22 @@ impl TonePair {
             // Both correlators are normalised by the window, so this is a
             // level in the same units as the input samples rather than a
             // number that changes with the rate.
-            min_level: 1e-5,
+            min_level: 1e-12,
             margin: DEFAULT_MARGIN,
             clock_gain: 0.35,
+            edges: 0,
+            late_sum: 0.0,
+            decided: 0,
+            contrast_sum: 0.0,
         }
+    }
+
+    pub fn contrast(&self) -> f32 {
+        self.contrast_sum / self.decided.max(1) as f32
+    }
+
+    pub fn lateness(&self) -> f32 {
+        self.late_sum / self.edges.max(1) as f32
     }
 
     /// How far apart the two correlators must be to have decided anything.
@@ -579,7 +595,12 @@ impl TonePair {
             let s = self.space.push(x);
             let sign = m > s;
             if sign != self.last_sign {
-                self.since += self.clock_gain * (self.after_edge - self.since);
+                let late = self.after_edge - self.since;
+                self.edges += 1;
+                self.late_sum += late.abs() / self.sps;
+                let gain =
+                    if late.abs() > HALF_BIT_SLIP * self.sps { 1.0 } else { self.clock_gain };
+                self.since += gain * late;
                 self.last_sign = sign;
             }
             self.since += 1.0;
@@ -589,6 +610,10 @@ impl TonePair {
             self.since -= self.sps;
             let sum = m + s;
             let quiet = sum < self.min_level || (m - s).abs() < self.margin * sum;
+            if sum >= self.min_level {
+                self.decided += 1;
+                self.contrast_sum += (m - s).abs() / sum;
+            }
             out.push(crate::afsk::Symbol { mark: sign, quiet });
         }
     }
@@ -604,6 +629,8 @@ impl TonePair {
 /// tone beats the other correlator outright even when the station is
 /// mistuned by a quarter of the shift.
 pub const DEFAULT_MARGIN: f32 = 0.5;
+
+const HALF_BIT_SLIP: f32 = 0.3;
 
 /// One tone correlator over complex baseband: a sliding integration against
 /// a reference at `freq`, whose magnitude says how much of that tone is
@@ -935,9 +962,108 @@ pub fn modulate(bits: &[bool], rate: f64, baud: f64, deviation_hz: f64, amp: f32
     out
 }
 
+pub struct TonePairFinder {
+    rate: f64,
+    fft: std::sync::Arc<dyn rustfft::Fft<f32>>,
+    window: Vec<f32>,
+    frame: Vec<C32>,
+    power: Vec<f32>,
+    frames: usize,
+}
+
+impl TonePairFinder {
+    pub fn new(rate: f64, resolution_hz: f64) -> Self {
+        let n = ((rate / resolution_hz).ceil() as usize).next_power_of_two().max(16);
+        Self {
+            rate,
+            fft: rustfft::FftPlanner::new().plan_fft_forward(n),
+            window: crate::window::blackman_harris(n),
+            frame: Vec::with_capacity(n),
+            power: vec![0.0; n],
+            frames: 0,
+        }
+    }
+
+    pub fn push(&mut self, iq: &[C32]) {
+        let n = self.window.len();
+        for &x in iq {
+            self.frame.push(x);
+            if self.frame.len() < n {
+                continue;
+            }
+            let mut buf: Vec<C32> =
+                self.frame.iter().zip(&self.window).map(|(x, w)| x * *w).collect();
+            self.fft.process(&mut buf);
+            for (p, v) in self.power.iter_mut().zip(&buf) {
+                *p += v.norm_sqr();
+            }
+            self.frames += 1;
+            self.frame.drain(..n / 2);
+        }
+    }
+
+    pub fn seconds(&self) -> f64 {
+        self.frames as f64 * (self.window.len() / 2) as f64 / self.rate
+    }
+
+    fn at(&self, hz: f64) -> f32 {
+        let n = self.window.len() as f64;
+        let bin = (hz / self.rate * n).round().rem_euclid(n) as usize;
+        self.power[bin]
+    }
+
+    pub fn find(&self, shifts: &[f64], reach_hz: f64, over_db: f32) -> Option<(f64, f64)> {
+        if self.frames == 0 {
+            return None;
+        }
+        let mut sorted = self.power.clone();
+        sorted.sort_by(f32::total_cmp);
+        let floor = sorted[sorted.len() / 2].max(f32::MIN_POSITIVE);
+        let need = floor * 10f32.powf(over_db / 10.0);
+        let step = self.rate / self.window.len() as f64;
+        let mut best: Option<(f32, f64, f64)> = None;
+        for &shift in shifts {
+            let mut f = -reach_hz;
+            while f <= reach_hz {
+                let (lo, hi) = (self.at(f - shift / 2.0), self.at(f + shift / 2.0));
+                if lo >= need && hi >= need && best.is_none_or(|(b, _, _)| lo.min(hi) > b) {
+                    best = Some((lo.min(hi), f, shift));
+                }
+                f += step;
+            }
+        }
+        best.map(|(_, f, shift)| (f, shift))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_keyed_pair_is_found_where_it_sits_and_as_wide_as_it_is() {
+        let (rate, baud, shift, off) = (2_000.0, 50.0, 450.0, 169.0);
+        let hold = (rate / baud) as usize;
+        let mut ph = 0.0f64;
+        let mut state = 0x1234_5678u32;
+        let iq: Vec<C32> = (0..rate as usize * 3)
+            .map(|i| {
+                if i % hold == 0 {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                }
+                let tone = if state & 1 == 1 { shift / 2.0 } else { -shift / 2.0 };
+                ph += std::f64::consts::TAU * (off + tone) / rate;
+                C32::new(ph.cos() as f32, ph.sin() as f32)
+            })
+            .collect();
+        let mut f = TonePairFinder::new(rate, 4.0);
+        f.push(&iq);
+        let (at, found) = f.find(&[170.0, 425.0, 450.0, 850.0], 300.0, 10.0).expect("a pair");
+        assert_eq!(found, 450.0);
+        assert!((at - off).abs() <= 2.0, "found at {at}");
+    }
 
     const RATE: f64 = 250_000.0;
 

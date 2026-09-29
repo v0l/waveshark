@@ -75,6 +75,30 @@ world:
   - { name: "Time signal", hz: [24995000, 25005000], mode: am, use: utility }
   - { name: "Marine HF", hz: [25070000, 25210000], mode: usb, use: utility }
   - { name: "SW 11 m", hz: [25670000, 26100000], mode: am, use: broadcast, step_hz: 5000 }
+  - { name: "Fixed HF", hz: [3155000, 3200000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [4438000, 4650000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [5060000, 5450000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [5730000, 5900000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [6765000, 7000000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [7450000, 8100000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [9040000, 9400000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [9900000, 9995000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [10150000, 11175000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [11400000, 11600000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [12100000, 12230000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [13410000, 13570000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [13870000, 14000000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [14350000, 14990000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [15800000, 16360000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [17410000, 17480000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [18168000, 18780000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [19020000, 19680000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [19800000, 19990000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [20010000, 21000000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [21850000, 21924000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [22855000, 23200000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [23350000, 24890000], mode: usb, use: utility }
+  - { name: "Fixed HF", hz: [25210000, 25550000], mode: usb, use: utility }
 
 # ITU Region 1. Long wave carries broadcasting nowhere else, the medium wave
 # carriers are 9 kHz apart from 531 kHz up, 40 m stops at 7.2 MHz with

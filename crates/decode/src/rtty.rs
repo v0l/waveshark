@@ -320,6 +320,8 @@ pub struct Framer {
     down: Vec<u8>,
     since_char: usize,
     undecided: usize,
+    up_tally: Tally,
+    down_tally: Tally,
 }
 
 impl Default for Framer {
@@ -339,14 +341,20 @@ impl Framer {
             down: Vec::new(),
             since_char: 0,
             undecided: 0,
+            up_tally: Tally::default(),
+            down_tally: Tally::default(),
         }
+    }
+
+    pub fn clean(&self) -> i64 {
+        self.up_tally.clean().max(self.down_tally.clean())
     }
 
     /// Feed one symbol, and hand back a run of codes where it ended one.
     pub fn push(&mut self, sym: dsp::afsk::Symbol) -> Option<Vec<u8>> {
         let flipped = dsp::afsk::Symbol { mark: !sym.mark, quiet: sym.quiet };
-        let a = read_into(&mut self.upright, sym, &mut self.up);
-        let b = read_into(&mut self.inverted, flipped, &mut self.down);
+        let a = read_into(&mut self.upright, sym, &mut self.up, &mut self.up_tally);
+        let b = read_into(&mut self.inverted, flipped, &mut self.down, &mut self.down_tally);
         self.since_char = match a || b {
             true => 0,
             false => self.since_char + 1,
@@ -394,15 +402,37 @@ impl Framer {
 }
 
 /// One symbol into one line, keeping the character where it framed.
-fn read_into(line: &mut dsp::slice::Uart, sym: dsp::afsk::Symbol, codes: &mut Vec<u8>) -> bool {
+fn read_into(
+    line: &mut dsp::slice::Uart,
+    sym: dsp::afsk::Symbol,
+    codes: &mut Vec<u8>,
+    tally: &mut Tally,
+) -> bool {
     match line.push(sym) {
         dsp::slice::Read::Byte(code) => {
             if codes.len() < MAX_CHARS {
                 codes.push(code);
             }
+            tally.framed += 1;
             true
         }
-        _ => false,
+        dsp::slice::Read::Slip => {
+            tally.slipped += 1;
+            false
+        }
+        dsp::slice::Read::Idle | dsp::slice::Read::Nothing => false,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Tally {
+    framed: u64,
+    slipped: u64,
+}
+
+impl Tally {
+    fn clean(self) -> i64 {
+        self.framed as i64 - 2 * self.slipped as i64
     }
 }
 

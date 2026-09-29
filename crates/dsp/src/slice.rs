@@ -297,6 +297,7 @@ mod tests {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Read {
     Byte(u8),
+    Slip,
     /// The line has rested long enough to end a transmission.
     Idle,
     Nothing,
@@ -361,7 +362,7 @@ impl Uart {
                 self.partial = None;
                 match ok {
                     true => Read::Byte(byte),
-                    false => Read::Nothing,
+                    false => Read::Slip,
                 }
             }
         }

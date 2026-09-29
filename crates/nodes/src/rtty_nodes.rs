@@ -30,13 +30,14 @@ pub use decode::rtty::read;
 use decode::rtty::{self, Shift, Speed};
 pub use decode::rtty::{IDLE_SYMBOLS, MAX_CHARS, MIN_CHARS, MIN_PRINTABLE, QUIET_SYMBOLS};
 use dsp::afsk::Symbol;
-use dsp::fsk::TonePair;
+use dsp::fsk::{TonePair, TonePairFinder};
 use dsp::{FirDecim, Mixer};
 use identify::Signal;
 pub use identify::rtty::AUDIO_HZ;
 pub use identify::rtty::CHANNEL_WIDTH_HZ;
 pub use identify::rtty::DEFAULT_HZ;
 pub use identify::rtty::Rtty;
+use identify::rtty::{Score, best};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
@@ -44,68 +45,161 @@ use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 
 pub struct RttyNode {
     channel_hz: f64,
-    speed: Speed,
-    shift: Shift,
-    /// The stream as negotiated: its rate and how far it is decimated.
+    speed: Option<Speed>,
+    shift: Option<Shift>,
     rate: f64,
     factor: usize,
     mixer: Mixer,
     decim: FirDecim,
-    tones: TonePair,
+    readers: Vec<Reader>,
+    finder: Option<TonePairFinder>,
+    waiting: Vec<common::C32>,
+    retune: Mixer,
+    offset_hz: f64,
     mixed: Vec<common::C32>,
     narrow: Vec<common::C32>,
+    tuned: Vec<common::C32>,
     symbols: Vec<Symbol>,
-    line: rtty::Framer,
     meter: crate::FrameMeter,
     runs: u64,
 }
 
+struct Reader {
+    speed: Speed,
+    shift: Shift,
+    tones: TonePair,
+    line: rtty::Framer,
+    held: Vec<Vec<u8>>,
+}
+
 impl Default for RttyNode {
     fn default() -> Self {
-        Self::new(DEFAULT_HZ, Speed::default(), Shift::default())
+        Self::new(DEFAULT_HZ, Some(Speed::default()), Some(Shift::default()))
     }
 }
 
 impl RttyNode {
-    pub fn new(channel_hz: f64, speed: Speed, shift: Shift) -> Self {
-        Self {
+    pub fn new(channel_hz: f64, speed: Option<Speed>, shift: Option<Shift>) -> Self {
+        let mut n = Self {
             channel_hz,
             speed,
             shift,
-            // All replaced at negotiation, when the real rate is known.
             rate: AUDIO_HZ,
             factor: 1,
             mixer: Mixer::new(0.0, 1.0),
             decim: FirDecim::design_hz(AUDIO_HZ, 1, CHANNEL_WIDTH_HZ / 2.0, 60.0),
-            tones: TonePair::new(AUDIO_HZ, speed.baud(), shift.hz()),
+            readers: Vec::new(),
+            finder: None,
+            waiting: Vec::new(),
+            retune: Mixer::new(0.0, 1.0),
+            offset_hz: 0.0,
             mixed: Vec::new(),
             narrow: Vec::new(),
+            tuned: Vec::new(),
             symbols: Vec::new(),
-            line: rtty::Framer::new(),
             meter: crate::FrameMeter::new(AUDIO_HZ, channel_hz as u64, 2.0)
                 .keyed_as(common::Modulation::Fsk2),
             runs: 0,
-        }
+        };
+        n.rebuild();
+        n
     }
 
-    /// Runs published since the node was built.
+    pub fn any(channel_hz: f64) -> Self {
+        Self::new(channel_hz, None, None)
+    }
+
     pub fn runs(&self) -> u64 {
         self.runs
     }
 
-    /// How wide the channel filter is kept: the shift plus room for the
-    /// sidebands the keying puts either side of each tone.
+    pub fn reading(&self) -> Option<(Speed, Shift)> {
+        match self.readers.as_slice() {
+            [one] => Some((one.speed, one.shift)),
+            _ => None,
+        }
+    }
+
+    fn speeds(&self) -> Vec<Speed> {
+        self.speed.map_or(Speed::ALL.to_vec(), |s| vec![s])
+    }
+
+    fn shifts(&self) -> Vec<Shift> {
+        self.shift.map_or(Shift::ALL.to_vec(), |s| vec![s])
+    }
+
+    pub fn offset_hz(&self) -> f64 {
+        self.offset_hz
+    }
+
     fn passband_hz(&self) -> f64 {
-        self.shift.hz() / 2.0 + 2.0 * self.speed.baud()
+        let widest = self.shifts().iter().map(|s| s.hz()).fold(0.0, f64::max);
+        let fastest = self.speeds().iter().map(|s| s.baud()).fold(0.0, f64::max);
+        widest / 2.0 + 2.0 * fastest + REACH_HZ
     }
 
     fn rebuild(&mut self) {
         let (rate, factor) = (self.rate, self.factor);
         let audio_rate = rate / factor as f64;
         self.decim = FirDecim::design_hz(rate, factor, self.passband_hz(), 60.0);
-        self.tones = TonePair::new(audio_rate, self.speed.baud(), self.shift.hz());
+        self.readers = self
+            .speeds()
+            .into_iter()
+            .flat_map(|speed| self.shifts().into_iter().map(move |shift| (speed, shift)))
+            .map(|(speed, shift)| Reader {
+                speed,
+                shift,
+                tones: TonePair::new(audio_rate, speed.baud(), shift.hz()),
+                line: rtty::Framer::new(),
+                held: Vec::new(),
+            })
+            .filter(|r| r.tones.usable())
+            .collect();
         self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, 2.0)
             .keyed_as(common::Modulation::Fsk2);
+        self.finder = Some(TonePairFinder::new(audio_rate, FIND_RESOLUTION_HZ));
+        self.waiting.clear();
+        self.offset_hz = 0.0;
+        self.retune = Mixer::new(0.0, audio_rate);
+    }
+
+    fn tune(&mut self) -> bool {
+        let shifts: Vec<f64> = self.shifts().iter().map(|s| s.hz()).collect();
+        let Some(f) = self.finder.as_mut() else { return true };
+        f.push(&self.narrow);
+        self.waiting.extend_from_slice(&self.narrow);
+        let audio_rate = self.rate / self.factor as f64;
+        let keep = (2.0 * FIND_S * audio_rate) as usize;
+        if self.waiting.len() > keep {
+            let drop = self.waiting.len() - keep;
+            self.waiting.drain(..drop);
+        }
+        if f.seconds() < FIND_S {
+            return false;
+        }
+        let Some((offset, _)) = f.find(&shifts, REACH_HZ, FIND_OVER_DB) else {
+            if f.seconds() >= FIND_GIVE_UP_S {
+                self.finder = Some(TonePairFinder::new(audio_rate, FIND_RESOLUTION_HZ));
+            }
+            return false;
+        };
+        self.offset_hz = offset;
+        self.retune = Mixer::new(-offset, audio_rate);
+        self.finder = None;
+        self.narrow = std::mem::take(&mut self.waiting);
+        true
+    }
+
+    fn settle(&mut self) -> Vec<Vec<u8>> {
+        let scores: Vec<Score> =
+            self.readers.iter().map(|r| Score::of(&r.line, &r.tones)).collect();
+        let Some(k) = best(&scores).filter(|k| scores[*k].clean >= SETTLE_CLEAN) else {
+            return Vec::new();
+        };
+        let mut winner = self.readers.swap_remove(k);
+        let held = std::mem::take(&mut winner.held);
+        self.readers = vec![winner];
+        held
     }
 }
 
@@ -126,7 +220,7 @@ impl Simple for RttyNode {
         self.factor = (rate / AUDIO_HZ).round().max(1.0) as usize;
         self.mixer = Mixer::new(center - self.channel_hz, rate);
         self.rebuild();
-        if !self.tones.usable() {
+        if self.readers.is_empty() {
             return Err(common::Error::other("rtty needs four samples a symbol"));
         }
 
@@ -136,66 +230,113 @@ impl Simple for RttyNode {
         Ok(out)
     }
 
-    fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
+    fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
         let Some(iq) = i.as_iq() else { return Ok(()) };
         self.mixed.clear();
         self.mixer.process(iq, &mut self.mixed);
         self.narrow.clear();
         self.decim.process(&self.mixed, &mut self.narrow);
         self.meter.feed(&self.narrow);
+        let searching = self.finder.is_some();
+        if !self.tune() {
+            return Ok(());
+        }
+        if searching && self.offset_hz.abs() > RESHAPE_HZ {
+            let at = self.channel_hz + self.offset_hz;
+            c.request(pipeline::Request::Reshape {
+                lo_hz: at - CHANNEL_WIDTH_HZ / 2.0,
+                hi_hz: at + CHANNEL_WIDTH_HZ / 2.0,
+            });
+        }
+        self.tuned.clear();
+        self.retune.process(&self.narrow, &mut self.tuned);
 
         let mut symbols = std::mem::take(&mut self.symbols);
-        symbols.clear();
-        self.tones.process(&self.narrow, &mut symbols);
-        for sym in &symbols {
-            if let Some(run) = self.line.push(*sym) {
-                self.runs += 1;
-                o.packets_mut().push(self.meter.packet_now(run));
+        for r in self.readers.iter_mut() {
+            symbols.clear();
+            r.tones.process(&self.tuned, &mut symbols);
+            for sym in &symbols {
+                if let Some(run) = r.line.push(*sym) {
+                    r.held.push(run);
+                }
             }
         }
+        let read = match self.readers.len() {
+            1 => std::mem::take(&mut self.readers[0].held),
+            _ => self.settle(),
+        };
         self.symbols = symbols;
+        for run in read {
+            self.runs += 1;
+            o.packets_mut().push(self.meter.packet_now(run));
+        }
         Ok(())
     }
 
     fn reset(&mut self) {
         self.mixer.reset();
         self.decim.reset();
-        self.tones.reset();
-        self.line.reset();
         self.meter.reset();
+        self.rebuild();
     }
 
     fn params(&self) -> Vec<Param> {
-        let speed = Speed::ALL.iter().position(|s| *s == self.speed).unwrap_or(0);
-        let shift = Shift::ALL.iter().position(|s| *s == self.shift).unwrap_or(0);
+        let speed = self
+            .speed
+            .map_or(Speed::ALL.len(), |v| Speed::ALL.iter().position(|s| *s == v).unwrap_or(0));
+        let shift = self
+            .shift
+            .map_or(Shift::ALL.len(), |v| Shift::ALL.iter().position(|s| *s == v).unwrap_or(0));
+        let with_any = |mut v: Vec<String>| {
+            v.push(ANY.into());
+            v
+        };
         vec![
             Param::float(CHANNEL_HZ, self.channel_hz, 1e5..=1e9).unit("Hz").label("Channel"),
-            Param::choice(SPEED, speed, Speed::ALL.iter().map(|s| s.to_string()).collect())
-                .unit("baud")
-                .label("Speed"),
-            Param::choice(SHIFT, shift, Shift::ALL.iter().map(|s| s.to_string()).collect())
-                .unit("Hz")
-                .label("Shift"),
+            Param::choice(
+                SPEED,
+                speed,
+                with_any(Speed::ALL.iter().map(|s| s.to_string()).collect()),
+            )
+            .unit("baud")
+            .label("Speed"),
+            Param::choice(
+                SHIFT,
+                shift,
+                with_any(Shift::ALL.iter().map(|s| s.to_string()).collect()),
+            )
+            .unit("Hz")
+            .label("Shift"),
         ]
     }
 
     fn set_param(&mut self, name: &str, v: ParamValue) -> Result<()> {
         match name {
             CHANNEL_HZ => self.channel_hz = v.as_f64().unwrap_or(self.channel_hz),
-            SPEED => {
-                let k = v.as_i64().unwrap_or(0).clamp(0, Speed::ALL.len() as i64 - 1) as usize;
-                self.speed = Speed::ALL[k];
-            }
-            SHIFT => {
-                let k = v.as_i64().unwrap_or(0).clamp(0, Shift::ALL.len() as i64 - 1) as usize;
-                self.shift = Shift::ALL[k];
-            }
+            SPEED => self.speed = speed_of(&v),
+            SHIFT => self.shift = shift_of(&v),
             _ => return Err(common::Error::other(format!("rtty: unknown parameter {name:?}"))),
         }
         self.rebuild();
         Ok(())
     }
 }
+
+const ANY: &str = "any";
+
+const REACH_HZ: f64 = 250.0;
+
+const FIND_RESOLUTION_HZ: f64 = 4.0;
+
+const FIND_S: f64 = 1.0;
+
+const FIND_GIVE_UP_S: f64 = 10.0;
+
+const FIND_OVER_DB: f32 = 10.0;
+
+const RESHAPE_HZ: f64 = 100.0;
+
+const SETTLE_CLEAN: i64 = 20;
 
 /// Whether a frame off the bus could be a run of Baudot codes. Five bits is
 /// all a code has, so anything with a byte above 31 in it was framed by
@@ -418,8 +559,8 @@ pub const DESC: StageDesc = StageDesc {
 };
 
 pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
-    let speed = s.get(SPEED).and_then(speed_of).unwrap_or_default();
-    let shift = s.get(SHIFT).and_then(shift_of).unwrap_or_default();
+    let speed = s.get(SPEED).and_then(speed_of);
+    let shift = s.get(SHIFT).and_then(shift_of);
     Ok(Box::new(RttyNode::new(s.f64_or(CHANNEL_HZ, DEFAULT_HZ), speed, shift)))
 }
 
@@ -524,7 +665,7 @@ mod tests {
             })
             .collect();
 
-        let mut node = RttyNode::new(channel, Speed::default(), Shift::default());
+        let mut node = RttyNode::new(channel, Some(Speed::default()), Some(Shift::default()));
         node.negotiate(&spec(rate, center)).unwrap();
         let frames = run(&mut node, &iq, rate, center);
 
@@ -587,26 +728,21 @@ mod tests {
         }
     }
 
-    /// How far an operator may leave a station mistuned, measured: a
-    /// 170 Hz shift at 45.45 baud reads whole up to 25 Hz off and loses
-    /// characters beyond that, because the correlator that reads a tone is
-    /// only as wide as two cycles of the shift. Half a shift out reads
-    /// nothing rather than reading something else.
     #[test]
-    fn a_mistuned_station_still_reads() {
+    fn a_mistuned_station_is_found_and_read_whole() {
         let (rate, center) = (8_000.0, 14_083_000.0);
-        let near = keyed(OVER, rate, 25.0, false);
-        let mut node = RttyNode::default();
-        node.negotiate(&spec(rate, center)).unwrap();
-        let frames = run(&mut node, &near, rate, center);
-        assert_eq!(frames.len(), 1);
-        assert_eq!(rtty::text(&frames[0]), OVER);
-
-        let far = keyed(OVER, rate, 85.0, false);
-        let mut node = RttyNode::default();
-        node.negotiate(&spec(rate, center)).unwrap();
-        for f in run(&mut node, &far, rate, center) {
-            assert_ne!(rtty::text(&f), OVER, "a station half a shift off read anyway");
+        for off in [25.0, 85.0, 200.0, -200.0] {
+            let iq = keyed(OVER, rate, off, false);
+            let mut node = RttyNode::default();
+            node.negotiate(&spec(rate, center)).unwrap();
+            let frames = run(&mut node, &iq, rate, center);
+            assert_eq!(frames.len(), 1, "{off} Hz off");
+            assert_eq!(rtty::text(&frames[0]), OVER, "{off} Hz off");
+            assert!(
+                (node.offset_hz() - off).abs() <= 4.0,
+                "{off} Hz off found at {}",
+                node.offset_hz()
+            );
         }
     }
 
@@ -628,6 +764,34 @@ mod tests {
         node.negotiate(&spec(rate, center)).unwrap();
         let frames = run(&mut node, &iq, rate, center);
         assert_eq!(frames.len(), 0, "{} runs out of twenty seconds of noise", frames.len());
+    }
+
+    #[test]
+    fn a_node_told_nothing_finds_the_speed_and_shift_it_reads() {
+        let (rate, center) = (8_000.0, 14_083_000.0);
+        let iq = keyed(OVER, rate, 0.0, false);
+        let mut node = RttyNode::any(center);
+        node.negotiate(&spec(rate, center)).unwrap();
+        let frames = run(&mut node, &iq, rate, center);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(rtty::text(&frames[0]), OVER);
+        assert_eq!(node.reading(), Some((Speed::Baud45, Shift::Narrow)));
+    }
+
+    #[test]
+    fn a_node_told_nothing_reads_nothing_out_of_noise() {
+        let (rate, center) = (8_000.0, 14_083_000.0);
+        let mut seed = 0x0dd_ba11_5eed_cafeu64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / 8_388_608.0 - 1.0
+        };
+        let iq: Vec<C32> = (0..rate as usize * 20).map(|_| C32::new(rng(), rng())).collect();
+        let mut node = RttyNode::any(center);
+        node.negotiate(&spec(rate, center)).unwrap();
+        assert_eq!(run(&mut node, &iq, rate, center).len(), 0);
     }
 
     #[test]

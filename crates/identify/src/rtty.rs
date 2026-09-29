@@ -42,17 +42,40 @@ impl Signal for Rtty {
     /// Both speeds and both shifts, since a station announces neither and
     /// a run read at the wrong pair frames almost nothing.
     fn read(&self, iq: &[C32], rate_hz: f64, center_hz: f64) -> Reading {
-        let mut best = Reading::default();
+        let mut tried: Vec<(Reading, Score)> = Vec::new();
         for speed in Speed::ALL {
             for shift in Shift::ALL {
-                let rows = self.read_at(speed, shift, iq, rate_hz, center_hz);
-                if rows.count() > best.count() {
-                    best = rows;
-                }
+                tried.push(self.read_at(speed, shift, iq, rate_hz, center_hz));
             }
         }
-        best
+        let scores: Vec<Score> = tried.iter().map(|(_, s)| *s).collect();
+        match best(&scores) {
+            Some(k) => tried.swap_remove(k).0,
+            None => Reading::default(),
+        }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Score {
+    pub clean: i64,
+    pub fit: f32,
+}
+
+impl Score {
+    pub fn of(line: &rtty::Framer, tones: &TonePair) -> Self {
+        Self { clean: line.clean(), fit: tones.contrast() - tones.lateness() }
+    }
+}
+
+pub fn best(scores: &[Score]) -> Option<usize> {
+    let most = scores.iter().map(|s| s.clean).max()?;
+    scores
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.clean > 0 && 2 * s.clean >= most)
+        .max_by(|(_, a), (_, b)| a.fit.total_cmp(&b.fit))
+        .map(|(k, _)| k)
 }
 
 impl Rtty {
@@ -63,15 +86,20 @@ impl Rtty {
         iq: &[C32],
         rate_hz: f64,
         center_hz: f64,
-    ) -> Reading {
-        let Some(mut chan) =
-            crate::Channel::new(rate_hz, center_hz, center_hz, CHANNEL_WIDTH_HZ, AUDIO_HZ)
-        else {
-            return Reading::default();
+    ) -> (Reading, Score) {
+        let nothing = (Reading::default(), Score { clean: 0, fit: f32::NEG_INFINITY });
+        let Some(mut chan) = crate::Channel::new(
+            rate_hz,
+            center_hz,
+            center_hz,
+            CHANNEL_WIDTH_HZ,
+            AUDIO_HZ.min(rate_hz),
+        ) else {
+            return nothing;
         };
         let mut tones = TonePair::new(chan.rate_hz, speed.baud(), shift.hz());
         if !tones.usable() {
-            return Reading::default();
+            return nothing;
         }
         let mut framer = rtty::Framer::new();
         let (mut narrow, mut symbols) = (Vec::new(), Vec::new());
@@ -88,6 +116,7 @@ impl Rtty {
                 }
             }
         }
+        let score = Score::of(&framer, &tones);
         // A run still open at the end of a file is a run: the station did
         // not stop, the recording did.
         if let Some(run) = framer.take()
@@ -95,7 +124,7 @@ impl Rtty {
         {
             rows.push(d);
         }
-        Reading::from(rows).at(chan.hz().as_f64())
+        (Reading::from(rows).at(chan.hz().as_f64()), score)
     }
 }
 

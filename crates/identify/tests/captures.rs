@@ -700,3 +700,32 @@ fn the_three_b20_operators_in_estevezs_recording_each_name_their_cell_and_neighb
         ]
     );
 }
+
+#[test]
+fn a_dwd_broadcast_is_read_as_the_baltic_forecast() {
+    let Some(buf) = fixture("rtty_dwd_11.039M_2k.cs16") else { return };
+    let got = identify::identify(&buf.samples, buf.rate.as_f64(), buf.center.as_f64())
+        .expect("a teleprinter");
+    assert_eq!(got.protocol, "rtty");
+    assert_eq!(got.frames, 6);
+    let text: String = got
+        .rows
+        .iter()
+        .flat_map(|r| &r.facts)
+        .filter_map(|f| match f {
+            common::packet::Fact::Message(m) => Some(m.text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    for line in [
+        "CQ CQ CQ DE DDH47 DDH9 DDH8",
+        "FREQUENCIES   147.3 KHZ   11039 KHZ   14467.3 KHZ",
+        "ZCZC 964",
+        "FEBQ52 EDZW 280600",
+        "MITTELFRIST - SEEWETTERBERICHT FUER DIE OSTSEE",
+        "HERAUSGEGEBEN VOM SEEWETTERDIENST HAMBURG",
+    ] {
+        assert!(text.contains(line), "{line:?} missing from {text}");
+    }
+}

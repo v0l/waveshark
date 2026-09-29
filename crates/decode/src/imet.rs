@@ -312,7 +312,7 @@ impl Framer {
                 None
             }
             dsp::slice::Read::Idle => self.take_run(),
-            dsp::slice::Read::Nothing => None,
+            dsp::slice::Read::Nothing | dsp::slice::Read::Slip => None,
         }
     }
 

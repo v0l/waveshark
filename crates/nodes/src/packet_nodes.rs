@@ -233,6 +233,8 @@ pub struct DedupeNode {
     /// neighbouring channels straddle the boundary. Measured on live 868 MHz
     /// traffic, one transmission appeared as four rows 31 kHz apart.
     recent: Vec<Heard>,
+    origin: Option<common::time::Instant>,
+    heard_for: common::time::Duration,
 }
 
 /// A burst that has already been reported.
@@ -409,12 +411,10 @@ impl Simple for DedupeNode {
         Ok(i.spec)
     }
 
-    fn process(&mut self, i: &Payload, o: &mut Payload, _c: &mut NodeCtx<'_>) -> Result<()> {
+    fn process(&mut self, i: &Payload, o: &mut Payload, c: &mut NodeCtx<'_>) -> Result<()> {
         let packets = i.as_packets().unwrap_or(&[]);
-        // Wall clock rather than the stream's: the window is about how a
-        // burst falls across the blocks a radio delivers, and a replay is
-        // driven at whatever speed the machine manages.
-        let now = common::time::Instant::now();
+        let now = *self.origin.get_or_insert_with(common::time::Instant::now) + self.heard_for;
+        self.heard_for += common::time::Duration::from_secs_f64(c.block_seconds.max(0.0));
         let seen: Vec<Seen> = packets.iter().map(Seen::of).collect();
         let first = first_reports(&seen, now);
         for (n, p) in packets.iter().enumerate() {
@@ -855,6 +855,24 @@ mod tests {
         Simple::process(&mut DedupeNode::default(), &Payload::Packets(vec![p]), &mut out, &mut ctx)
             .unwrap();
         assert_eq!(out.as_packets().unwrap_or(&[]).len(), 1);
+    }
+
+    #[test]
+    fn a_replay_faster_than_the_air_keeps_bursts_seconds_apart() {
+        let ins = [spec()];
+        let tags = Vec::new();
+        let mut node = DedupeNode::default();
+        let mut kept = 0;
+        for freq in [868_362_300.0, 868_393_400.0, 868_362_300.0] {
+            let (mut events, mut new_tags) = (Vec::new(), Vec::new());
+            let mut out = Payload::Packets(Vec::new());
+            let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
+            ctx.block_seconds = 2.0;
+            let p = heard(freq, UNKNOWN, -30.0);
+            Simple::process(&mut node, &Payload::Packets(vec![p]), &mut out, &mut ctx).unwrap();
+            kept += out.as_packets().unwrap_or(&[]).len();
+        }
+        assert_eq!(kept, 3);
     }
 
     /// A burst an OOK detector found, which is what the dedupe was written

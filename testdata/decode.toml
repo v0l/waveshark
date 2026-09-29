@@ -532,11 +532,17 @@ license_source = "SDRangel, sdrangel.org/iq-files rtty.zip, converted and re-hos
 description = """
 400 seconds of the Deutscher Wetterdienst's RTTY weather broadcast on
 11.039 MHz, recorded on 28 February 2023, SDRangel's RTTY example whole. 50
-baud with a 450 Hz shift, the tones either side of the centre.
+baud with a 450 Hz shift, a stop of one and a half bits, and mark on the
+lower tone. It is the Hamburg marine forecast for the Baltic, bulletin
+FEBQ52 EDZW 280600, which `crates/identify/tests/captures.rs` reads line for
+line.
 
-The receiver reads no RTTY from it: nothing places a teleprinter at
-11.039 MHz, and 450 Hz is not one of the shifts it tries. The auto block
-finds the signal and names it an unknown.
+Everything about it was new to the receiver: a station outside the amateur
+bands, a speed and shift nobody set, a detector that measures its centre
+300 Hz high, a stop element that puts every character half a bit off the
+last one's grid, and a recording scaled down to a hundredth of full scale.
+The node finds the tone pair and the keying itself, and asks to be moved
+onto the station.
 """
 
 scanners = """
@@ -545,11 +551,11 @@ range = 11.03 - 11.05 MHz
 front = auto
 """
 
-rows = 1
+rows = 7
 
 [[capture.read]]
 protocol = "rtty"
-rows = 0
+rows = 7
 
 [[capture]]
 name = "navtex_niton_0.518M_1.953k.cs16"
