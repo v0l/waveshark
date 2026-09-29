@@ -546,3 +546,70 @@ fn five_london_stations_name_themselves_over_rds() {
         ]
     );
 }
+
+#[test]
+fn a_noaa_pass_paints_its_picture_on_the_video_bus() {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/apt_noaa18_137.912M_62.5k.cs16");
+    if !p.exists() {
+        eprintln!("skipping: apt_noaa18_137.912M_62.5k.cs16 absent, run testdata/fetch.sh");
+        return;
+    }
+    let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
+    let mut plan = replay_plan(&buf, false);
+    plan.fronts.clear();
+    plan.channels = vec![ChannelSpec {
+        mode: ChanMode::Decode("apt".into()),
+        ..strip_channel(1, 137_912_500.0 - buf.center.as_f64())
+    }];
+    let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a receiver");
+    replay_blocks(&mut rx, &buf);
+    let bus = rx.video().expect("a video bus");
+    let pictures: Vec<(String, usize, usize, Option<String>)> = bus
+        .bus()
+        .thumbnails()
+        .map(|(_, f)| (f.system.to_string(), f.lines_seen, f.width, f.label.clone()))
+        .collect();
+    assert_eq!(pictures, [("APT".to_string(), 239, 2080, Some("NOAA 18".to_string()))]);
+}
+
+#[test]
+fn a_pd120_picture_from_the_iss_is_painted_whole() {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/sstv_pd120_iss_145.79544M_250k.cs16");
+    if !p.exists() {
+        eprintln!("skipping: sstv_pd120_iss_145.79544M_250k.cs16 absent, run testdata/fetch.sh");
+        return;
+    }
+    let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
+    let mut plan = replay_plan(&buf, false);
+    plan.fronts.clear();
+    plan.channels = vec![ChannelSpec {
+        mode: ChanMode::Decode("sstv".into()),
+        ..strip_channel(1, 145_800_000.0 - buf.center.as_f64())
+    }];
+    let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a receiver");
+    replay_blocks(&mut rx, &buf);
+    let bus = rx.video().expect("a video bus");
+    let frames: Vec<&common::VideoFrame> = bus.bus().thumbnails().map(|(_, f)| f).collect();
+    let [f] = frames.as_slice() else { panic!("{} pictures", frames.len()) };
+    assert_eq!(
+        (f.system, f.label.as_deref(), f.width, f.height, f.lines_seen),
+        ("SSTV", Some("PD 120"), 640, 496, 496)
+    );
+    let mean = |x0: usize, y0: usize, w: usize, h: usize| {
+        let mut sum = [0u64; 3];
+        for y in y0..y0 + h {
+            for x in x0..x0 + w {
+                for (c, s) in sum.iter_mut().enumerate() {
+                    *s += u64::from(f.samples[(y * f.width + x) * 3 + c]);
+                }
+            }
+        }
+        sum.map(|s| (s / (w * h) as u64) as u8)
+    };
+    let card = mean(400, 60, 80, 40);
+    assert!(card.iter().all(|c| *c > 200), "the card's white background reads {card:?}");
+    let title = mean(20, 420, 300, 40);
+    assert!(title[0] > title[1] + 40 && title[0] > title[2] + 40, "the red title reads {title:?}");
+}

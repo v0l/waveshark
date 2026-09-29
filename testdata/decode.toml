@@ -640,8 +640,12 @@ description = """
 November 2021, from 215 seconds into SDRangel's 549 second example, which is
 the middle of the pass. 240 lines of picture.
 
-The receiver reads no APT from it: the auto block measures the downlink and
-names it an unknown twice.
+A picture rather than packets, so the rows here are only what the auto
+block makes of the downlink, two unknowns. `crates/app/src/radio/tests/captures.rs`
+tunes an APT channel to it and pins the 239 lines it paints on the video
+bus, and `crates/identify/tests/captures.rs` names it one picture with
+nothing else read out of it. NOAA retired the last APT satellites in 2025,
+so no scanner block places the decoder.
 """
 
 scanners = """
@@ -668,8 +672,11 @@ description = """
 145.8 MHz, recorded on 21 September 2022, SDRangel's SSTV example whole: one
 PD120 frame is 126 seconds.
 
-The receiver has no PD modes and reads no picture. The auto block names the
-FM downlink an unknown twice.
+The picture is ARISS card 9 of 12 for the Inter-MAI-75 experiment, RS0ISS,
+December 2021. `crates/app/src/radio/tests/captures.rs` tunes an SSTV
+channel to 145.800 MHz and pins the whole 640 by 496 picture it paints; the
+PD modes were added to read it. What the auto block makes of the FM downlink
+here is two unknowns, since a picture is not a packet.
 """
 
 scanners = """

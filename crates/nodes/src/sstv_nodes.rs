@@ -616,7 +616,10 @@ mod tests {
     fn each_mode_is_keyed_at_the_length_its_timings_say() {
         use pipeline::param::ParamValue;
         let mut n = SstvTxNode::default();
-        let want = [115.20, 58.97, 110.53, 72.00, 269.79, 36.91, 72.91];
+        let want = [
+            115.20, 58.97, 110.53, 72.00, 269.79, 36.91, 72.91, 50.59, 90.90, 127.01, 161.79,
+            187.96, 248.91, 289.59,
+        ];
         for (k, mode) in sstv::MODES.iter().enumerate() {
             let at = sstv::MODES.iter().position(|m| m.vis == mode.vis).unwrap();
             n.set_param(MODE, ParamValue::Int(at as i64)).unwrap_or_else(|e| panic!("{e}"));

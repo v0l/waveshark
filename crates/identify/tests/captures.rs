@@ -729,3 +729,15 @@ fn a_dwd_broadcast_is_read_as_the_baltic_forecast() {
         assert!(text.contains(line), "{line:?} missing from {text}");
     }
 }
+
+#[test]
+fn two_minutes_of_a_noaa_pass_are_one_picture() {
+    use identify::Signal;
+    let Some(buf) = fixture("apt_noaa18_137.912M_62.5k.cs16") else { return };
+    let rate = buf.rate.as_f64();
+    assert_eq!(identify::apt::Apt.read(&buf.samples, rate, 137_912_500.0).pictures, 1);
+    let read = identify::read_all(&buf.samples, rate, buf.center.as_f64());
+    let named: Vec<(&str, usize)> =
+        read.iter().filter(|r| r.frames > 0).map(|r| (r.protocol, r.frames)).collect();
+    assert_eq!(named, [("apt", 1)]);
+}

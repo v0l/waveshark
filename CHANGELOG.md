@@ -11,6 +11,7 @@ the code is in the commit log.
 
 ### Added
 
+- SSTV PD 50, 90, 120, 160, 180, 240 and 290, received and sent.
 - AGC decay and maximum gain, set per channel on the strip.
 - Zigbee network headers: each hop's EUI-64 and vendor, network addresses, beacons and the key in use.
 - LimeSDR on Windows, with LimeSuite installed.
@@ -90,6 +91,8 @@ the code is in the commit log.
 - APRS frames shown as unchecked though every one passed its FCS.
 - RTTY stations with a stop of one and a half bits, or recorded at a low level, breaking up.
 - Repeated packets dropped as copies when a recording replays faster than the air.
+- NXDN rows read out of other signals from one frame with nothing after it.
+- SSTV pictures losing their last line when the transmission ends.
 - Spectrum on a half duplex radio dropping the last fifth of a second of its own over.
 - Roger beep cut short at the end of an over, and the source heard again after it.
 - Survey device locations landing on the receiver from GPS wander while parked.

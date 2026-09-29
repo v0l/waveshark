@@ -94,7 +94,7 @@ pub struct Ident {
 
 impl Ident {
     fn of(s: &dyn Signal, read: Reading, center_hz: f64) -> Self {
-        let Reading { rows, pictures: _, voice_s: _, center_hz: _ } = read;
+        let Reading { rows, pictures, voice_s: _, center_hz: _ } = read;
         // The id rather than the name a transmitter gives itself: one
         // aircraft sends both, and two spellings of one transmitter read as
         // two transmitters.
@@ -104,7 +104,8 @@ impl Ident {
                 identities.push(id);
             }
         }
-        Self { protocol: s.id(), label: s.label(), frames: rows.len(), identities, center_hz, rows }
+        let frames = rows.len() + pictures;
+        Self { protocol: s.id(), label: s.label(), frames, identities, center_hz, rows }
     }
 }
 

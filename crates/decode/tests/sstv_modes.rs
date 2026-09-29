@@ -39,10 +39,10 @@ const BARS: [(&str, (u8, u8, u8)); 7] = [
 /// a fact about the mode rather than a fault.
 const MODES: [(&str, &str, usize); 5] = [
     ("sstv_martin2_bars_44100.wav", "Martin 2", 256),
-    ("sstv_scottie1_bars_44100.wav", "Scottie 1", 255),
-    ("sstv_scottie2_bars_44100.wav", "Scottie 2", 255),
+    ("sstv_scottie1_bars_44100.wav", "Scottie 1", 256),
+    ("sstv_scottie2_bars_44100.wav", "Scottie 2", 256),
     ("sstv_scottiedx_bars_44100.wav", "Scottie DX", 256),
-    ("sstv_robot36_bars_44100.wav", "Robot 36", 239),
+    ("sstv_robot36_bars_44100.wav", "Robot 36", 240),
 ];
 
 fn audio_of(name: &str) -> Option<(Vec<f32>, f64)> {

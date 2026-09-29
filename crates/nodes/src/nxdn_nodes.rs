@@ -102,6 +102,8 @@ pub struct NxdnNode {
     /// The call the last message named, so the voice frames after it
     /// belong to it.
     talking: Option<nxdn::Call>,
+    held: Option<NxdnFrame>,
+    next_at: Option<usize>,
 }
 
 impl Default for NxdnNode {
@@ -133,6 +135,8 @@ impl NxdnNode {
             audio_rate: AUDIO_HZ,
             accepted: 0,
             talking: None,
+            held: None,
+            next_at: None,
         }
     }
 
@@ -198,6 +202,15 @@ impl NxdnNode {
             channels: 1,
             pcm,
         })
+    }
+
+    fn publish(&mut self, f: &NxdnFrame, outputs: &mut [Payload]) {
+        if let Some(v) = self.call(f) {
+            outputs[OUT_VOICE].voice_mut().push(v);
+        }
+        let p = self.packet(f);
+        outputs[OUT_PACKETS].packets_mut().push(p);
+        self.next_at = Some(f.at + nxdn::FRAME_DIBITS);
     }
 
     fn packet(&mut self, frame: &NxdnFrame) -> common::packet::Packet {
@@ -285,18 +298,29 @@ impl Node for NxdnNode {
         self.framer.push(&syms, &mut frames);
         self.syms = syms;
 
-        for f in &frames {
+        for f in frames {
             // A frame whose LICH passed and whose payload did not says only
             // that something is on the channel, and on noise that is all a
             // false sync word ever says. See `nxdn::noise_is_not_a_frame`.
+            let follows = |at: usize| {
+                (0..FRAME_GAP).any(|k| f.at.abs_diff(at + k * nxdn::FRAME_DIBITS) <= FRAME_SLACK)
+            };
+            let chained = self.next_at.is_some_and(follows);
             if !f.frame.read_anything() {
+                if chained {
+                    self.next_at = Some(f.at + nxdn::FRAME_DIBITS);
+                }
                 continue;
             }
-            if let Some(v) = self.call(f) {
-                outputs[OUT_VOICE].voice_mut().push(v);
+            let confirms = self.held.as_ref().is_some_and(|h| follows(h.at + nxdn::FRAME_DIBITS));
+            if confirms && let Some(h) = self.held.take() {
+                self.publish(&h, outputs);
             }
-            let p = self.packet(f);
-            outputs[OUT_PACKETS].packets_mut().push(p);
+            if chained || confirms || !f.frame.facch1.is_empty() {
+                self.publish(&f, outputs);
+            } else {
+                self.held = Some(f);
+            }
         }
         Ok(())
     }
@@ -311,8 +335,14 @@ impl Node for NxdnNode {
         self.meter.reset();
         self.vocoder.reset();
         self.talking = None;
+        self.held = None;
+        self.next_at = None;
     }
 }
+
+const FRAME_SLACK: usize = 4;
+
+const FRAME_GAP: usize = 4;
 
 impl Protocol for Nxdn {
     fn arrives(&self) -> crate::protocol::Arrives {
@@ -528,6 +558,30 @@ mod tests {
         }
         dibits.extend(tail());
         dibits
+    }
+
+    fn slow_frames(ran: u8, frames: usize) -> Vec<u8> {
+        let mut dibits = tail();
+        for n in 0..frames {
+            let sacch = Sacch { ran, structure: 3, data: [false; 18] };
+            let mut payload = sacch.air();
+            payload.extend(decode::nxdn::voice_air(&[speech(n * 4), speech(n * 4 + 1)]));
+            payload.extend(decode::nxdn::voice_air(&[speech(n * 4 + 2), speech(n * 4 + 3)]));
+            dibits
+                .extend(decode::nxdn::keyed(decode::nxdn::rdch_lich(Steal::None, true), &payload));
+        }
+        dibits.extend(tail());
+        dibits
+    }
+
+    #[test]
+    fn a_frame_with_only_its_slow_channel_needs_another_behind_it() {
+        let rate = 96_000.0;
+        for (frames, want) in [(1, 0), (2, 2), (5, 5)] {
+            let iq = keyed(&slow_frames(7, frames), rate, WIDE_BAUD, 0.0, 0.0);
+            let (rows, _) = replay(&iq, rate, DEFAULT_HZ, DEFAULT_HZ, WIDE_BAUD);
+            assert_eq!(rows.len(), want, "{frames} frames keyed");
+        }
     }
 
     #[test]

@@ -77,6 +77,12 @@ impl Signal for Sstv {
                 pictures += 1;
             }
         }
+        if let Some(lines) = rx.finish()
+            && lines.complete
+            && !lines.rgb.is_empty()
+        {
+            pictures += 1;
+        }
         Reading { pictures, ..Reading::default() }
     }
 }

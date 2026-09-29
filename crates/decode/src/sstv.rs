@@ -24,6 +24,9 @@ pub enum Colour {
     Gbr,
     /// Luminance and two colour differences.
     Yuv,
+    /// Two lines' luminance around the colour differences they share: the
+    /// PD modes.
+    Pd,
 }
 
 /// One mode's timings, in seconds unless said otherwise.
@@ -44,7 +47,7 @@ pub struct Mode {
     /// the line rather than in front of it.
     pub sync_channel: usize,
     /// Where each channel starts, from the start of the line.
-    pub offsets: [f64; 3],
+    pub offsets: [f64; 4],
     pub line_time: f64,
     /// How many pixel times wide the sampling window is. Wider is smoother
     /// and blurrier; these are the reference decoder's values.
@@ -64,7 +67,45 @@ impl Mode {
     pub fn half_pixel_time(&self) -> f64 {
         self.half_scan_time / self.width as f64
     }
+
+    pub fn rows_per_line(&self) -> usize {
+        match self.colour {
+            Colour::Pd => 2,
+            Colour::Gbr | Colour::Yuv => 1,
+        }
+    }
+
+    pub fn lines(&self) -> usize {
+        self.height / self.rows_per_line()
+    }
 }
+
+const fn pd(name: &'static str, vis: u8, width: usize, height: usize, pixel: f64) -> Mode {
+    let sync = 0.020;
+    let porch = 0.00208;
+    let scan = pixel * width as f64;
+    let first = sync + porch;
+    Mode {
+        name,
+        vis,
+        colour: Colour::Pd,
+        width,
+        height,
+        scan_time: scan,
+        half_scan_time: 0.0,
+        sync_pulse: sync,
+        channels: 4,
+        sync_channel: 0,
+        offsets: [first, first + scan, first + 2.0 * scan, first + 3.0 * scan],
+        line_time: first + 4.0 * scan,
+        window_factor: PD_WINDOW / pixel,
+        start_sync: false,
+        half_scan: false,
+        alt_scan: false,
+    }
+}
+
+const PD_WINDOW: f64 = 0.00107;
 
 const fn martin(name: &'static str, vis: u8, scan: f64, window: f64) -> Mode {
     let sync_porch = 0.000572;
@@ -82,7 +123,7 @@ const fn martin(name: &'static str, vis: u8, scan: f64, window: f64) -> Mode {
         sync_pulse: 0.004862,
         channels: 3,
         sync_channel: 0,
-        offsets: [first, first + chan, first + 2.0 * chan],
+        offsets: [first, first + chan, first + 2.0 * chan, 0.0],
         line_time: 0.004862 + sync_porch + 3.0 * chan,
         window_factor: window,
         start_sync: false,
@@ -108,7 +149,7 @@ const fn scottie(name: &'static str, vis: u8, scan: f64, window: f64) -> Mode {
         sync_pulse: sync,
         channels: 3,
         sync_channel: 2,
-        offsets: [third + chan, third + 2.0 * chan, third],
+        offsets: [third + chan, third + 2.0 * chan, third, 0.0],
         line_time: sync + 3.0 * chan,
         window_factor: window,
         start_sync: true,
@@ -117,9 +158,9 @@ const fn scottie(name: &'static str, vis: u8, scan: f64, window: f64) -> Mode {
     }
 }
 
-/// Martin 1 and 2, Scottie 1, 2 and DX, Robot 36 and 72: the seven modes the
-/// VIS codes in common use name.
-pub const MODES: [Mode; 7] = [
+/// Martin 1 and 2, Scottie 1, 2 and DX, Robot 36 and 72, and the seven PD
+/// modes: what the VIS codes in common use name.
+pub const MODES: [Mode; 14] = [
     martin("Martin 1", 44, 0.146432, 2.34),
     martin("Martin 2", 40, 0.073216, 4.68),
     scottie("Scottie 1", 60, 0.138240, 2.48),
@@ -137,7 +178,7 @@ pub const MODES: [Mode; 7] = [
         sync_pulse: 0.009,
         channels: 2,
         sync_channel: 0,
-        offsets: [0.012, 0.012 + 0.0925 + 0.0015, 0.0],
+        offsets: [0.012, 0.012 + 0.0925 + 0.0015, 0.0, 0.0],
         line_time: 0.012 + 0.0925 + 0.0015 + 0.044,
         window_factor: 7.70,
         start_sync: false,
@@ -157,13 +198,20 @@ pub const MODES: [Mode; 7] = [
         sync_pulse: 0.009,
         channels: 3,
         sync_channel: 0,
-        offsets: [0.012, 0.012 + 0.1425 + 0.0015, 0.012 + 0.1425 + 0.0015 + 0.0735 + 0.0015],
+        offsets: [0.012, 0.012 + 0.1425 + 0.0015, 0.012 + 0.1425 + 0.0015 + 0.0735 + 0.0015, 0.0],
         line_time: 0.012 + 0.1425 + 0.0015 + 0.0735 + 0.0015 + 0.069,
         window_factor: 4.88,
         start_sync: false,
         half_scan: true,
         alt_scan: false,
     },
+    pd("PD 50", 93, 320, 256, 0.000286),
+    pd("PD 90", 99, 320, 256, 0.000532),
+    pd("PD 120", 95, 640, 496, 0.00019),
+    pd("PD 160", 98, 512, 400, 0.000382),
+    pd("PD 180", 96, 640, 496, 0.000286),
+    pd("PD 240", 97, 640, 496, 0.000382),
+    pd("PD 290", 94, 800, 616, 0.000286),
 ];
 
 pub fn mode_of(vis: u8) -> Option<&'static Mode> {
@@ -390,49 +438,105 @@ fn align_sync(
 /// `rgb` is row major, three bytes a pixel, `mode.width` by `mode.height`; a
 /// picture short of that is sent as far as it goes and the rest black.
 pub fn encode(rgb: &[u8], mode: &Mode, rate: f64) -> Option<Vec<f32>> {
-    if !(2..=3).contains(&mode.channels) {
+    let fits = match mode.colour {
+        Colour::Pd => mode.channels == 4,
+        Colour::Gbr | Colour::Yuv => (2..=3).contains(&mode.channels),
+    };
+    if !fits {
         return None;
     }
-    let mut out =
-        Vec::with_capacity(((HDR_SIZE + mode.height as f64 * mode.line_time) * rate) as usize);
-    let mut phase = 0.0f64;
-    // Where the tone that has been written should have ended, in seconds.
-    // A pixel at 11 kHz is two and a half samples long, so a tone rounded on
-    // its own runs a fifth over and a picture ends a quarter of a minute
-    // late; each tone is written up to its place on the timeline instead.
-    let mut elapsed = 0.0f64;
-    let mut tone = |hz: f64, seconds: f64, out: &mut Vec<f32>| {
-        elapsed += seconds;
-        let until = (elapsed * rate).round() as usize;
-        // Phase continuous across every tone, because a picture is read by a
-        // frequency meter and a step is a frequency of its own.
-        while out.len() < until {
-            phase += std::f64::consts::TAU * hz / rate;
-            out.push(phase.sin() as f32);
-        }
+    let mut k = Keyer {
+        rate,
+        phase: 0.0,
+        elapsed: 0.0,
+        out: Vec::with_capacity(
+            ((HDR_SIZE + mode.lines() as f64 * mode.line_time) * rate) as usize,
+        ),
     };
 
-    tone(1900.0, BREAK_OFFSET, &mut out);
-    tone(1200.0, LEADER_OFFSET - BREAK_OFFSET, &mut out);
-    tone(1900.0, VIS_START_OFFSET - LEADER_OFFSET, &mut out);
-    tone(1200.0, HDR_SIZE - VIS_START_OFFSET, &mut out);
+    k.tone(1900.0, BREAK_OFFSET);
+    k.tone(1200.0, LEADER_OFFSET - BREAK_OFFSET);
+    k.tone(1900.0, VIS_START_OFFSET - LEADER_OFFSET);
+    k.tone(1200.0, HDR_SIZE - VIS_START_OFFSET);
     // Seven bits least significant first, then a parity bit making the count
     // of ones even. A one is 1100 Hz.
     let mut ones = 0;
     for b in 0..7 {
         let one = mode.vis >> b & 1 == 1;
         ones += u32::from(one);
-        tone(if one { 1100.0 } else { 1300.0 }, VIS_BIT, &mut out);
+        k.tone(if one { 1100.0 } else { 1300.0 }, VIS_BIT);
     }
-    tone(if ones % 2 == 1 { 1100.0 } else { 1300.0 }, VIS_BIT, &mut out);
-    tone(1200.0, VIS_BIT, &mut out);
+    k.tone(if ones % 2 == 1 { 1100.0 } else { 1300.0 }, VIS_BIT);
+    k.tone(1200.0, VIS_BIT);
 
+    match mode.colour {
+        Colour::Pd => pd_lines(&mut k, rgb, mode),
+        Colour::Gbr | Colour::Yuv => channel_lines(&mut k, rgb, mode),
+    }
+    Some(k.out)
+}
+
+struct Keyer {
+    rate: f64,
+    phase: f64,
+    elapsed: f64,
+    out: Vec<f32>,
+}
+
+impl Keyer {
+    fn tone(&mut self, hz: f64, seconds: f64) {
+        // Where the tone that has been written should have ended, in seconds.
+        // A pixel at 11 kHz is two and a half samples long, so a tone rounded on
+        // its own runs a fifth over and a picture ends a quarter of a minute
+        // late; each tone is written up to its place on the timeline instead.
+        self.elapsed += seconds;
+        let until = (self.elapsed * self.rate).round() as usize;
+        // Phase continuous across every tone, because a picture is read by a
+        // frequency meter and a step is a frequency of its own.
+        while self.out.len() < until {
+            self.phase += std::f64::consts::TAU * hz / self.rate;
+            self.out.push(self.phase.sin() as f32);
+        }
+    }
+
+    fn pixel(&mut self, v: u8, seconds: f64) {
+        self.tone(1500.0 + 800.0 * f64::from(v) / 255.0, seconds);
+    }
+}
+
+fn pd_lines(k: &mut Keyer, rgb: &[u8], mode: &Mode) {
+    let px = |y: usize, x: usize| {
+        let i = (y * mode.width + x) * 3;
+        let p = rgb.get(i..i + 3).unwrap_or(&[0, 0, 0]);
+        ycbcr(p[0], p[1], p[2])
+    };
+    for l in 0..mode.lines() {
+        let (even, odd) = (2 * l, 2 * l + 1);
+        k.tone(1200.0, mode.sync_pulse);
+        k.tone(1500.0, mode.offsets[0] - mode.sync_pulse);
+        for chan in 0..4 {
+            for x in 0..mode.width {
+                let (a, b) = (px(even, x), px(odd, x));
+                let v = match chan {
+                    0 => a.0,
+                    1 => ((u16::from(a.1) + u16::from(b.1)) / 2) as u8,
+                    2 => ((u16::from(a.2) + u16::from(b.2)) / 2) as u8,
+                    _ => b.0,
+                };
+                k.pixel(v, mode.pixel_time());
+            }
+        }
+    }
+}
+
+fn channel_lines(k: &mut Keyer, rgb: &[u8], mode: &Mode) {
     // The channel order is green, blue, red for Martin and Scottie, and the
     // offsets say when each goes out; anything between them is the separator
     // tone.
     let plane = [1usize, 2, 0];
+    let yuv = mode.colour == Colour::Yuv;
     for y in 0..mode.height {
-        tone(1200.0, mode.sync_pulse, &mut out);
+        k.tone(1200.0, mode.sync_pulse);
         let mut at = mode.sync_pulse;
         let mut order: Vec<usize> = (0..mode.channels).collect();
         order.sort_by(|a, b| mode.offsets[*a].total_cmp(&mode.offsets[*b]));
@@ -443,25 +547,20 @@ pub fn encode(rgb: &[u8], mode: &Mode, rate: f64) -> Option<Vec<f32>> {
                 false => (mode.scan_time, mode.pixel_time()),
             };
             let gap = mode.offsets[chan] - at;
-            match mode.colour {
-                Colour::Gbr => tone(1500.0, gap, &mut out),
-                Colour::Yuv => {
-                    if chan > 0 {
-                        let cr = (mode.channels == 3 && chan == 1) || y.is_multiple_of(2);
-                        tone(if cr { 1500.0 } else { 2300.0 }, gap - ROBOT_PORCH, &mut out);
-                        tone(1900.0, ROBOT_PORCH, &mut out);
-                    } else {
-                        tone(1900.0, gap, &mut out);
-                    }
+            match (yuv, chan > 0) {
+                (false, _) => k.tone(1500.0, gap),
+                (true, true) => {
+                    let cr = (mode.channels == 3 && chan == 1) || y.is_multiple_of(2);
+                    k.tone(if cr { 1500.0 } else { 2300.0 }, gap - ROBOT_PORCH);
+                    k.tone(1900.0, ROBOT_PORCH);
                 }
+                (true, false) => k.tone(1900.0, gap),
             }
             for x in 0..mode.width {
-                let v = match mode.colour {
-                    Colour::Gbr => {
-                        rgb.get((y * mode.width + x) * 3 + plane[chan]).copied().unwrap_or(0)
-                    }
-                    Colour::Yuv => {
-                        let i = (y * mode.width + x) * 3;
+                let i = (y * mode.width + x) * 3;
+                let v = match yuv {
+                    false => rgb.get(i + plane[chan]).copied().unwrap_or(0),
+                    true => {
                         let px = rgb.get(i..i + 3).unwrap_or(&[0, 0, 0]);
                         let (luma, cr, cb) = ycbcr(px[0], px[1], px[2]);
                         match (chan, mode.channels, y.is_multiple_of(2)) {
@@ -471,13 +570,12 @@ pub fn encode(rgb: &[u8], mode: &Mode, rate: f64) -> Option<Vec<f32>> {
                         }
                     }
                 };
-                tone(1500.0 + 800.0 * f64::from(v) / 255.0, pixel_time, &mut out);
+                k.pixel(v, pixel_time);
             }
             at = mode.offsets[chan] + scan_time;
         }
-        tone(1500.0, mode.line_time - at, &mut out);
+        k.tone(1500.0, mode.line_time - at);
     }
-    Some(out)
 }
 
 const ROBOT_PORCH: f64 = 0.0015;
@@ -571,8 +669,16 @@ fn read_line(
             let to = (centre + half_window).min(last);
             let at = (*seq as f64 - base as f64 + from * rate).round() as isize;
             let len = (((to - from) * rate).round() as usize).max(4);
-            if at < 0 || at as usize + len >= audio.len() {
+            if at < 0 {
                 return Read::Hungry;
+            }
+            let Some(len) = audio.len().checked_sub(at as usize).map(|left| len.min(left)) else {
+                gaps[chan][px] = true;
+                continue;
+            };
+            if len < 4 {
+                gaps[chan][px] = true;
+                continue;
             }
             let hz = meter.peak_hz(&audio[at as usize..at as usize + len]);
             row[chan][px] = luma(hz);
@@ -605,6 +711,10 @@ fn read_line(
 fn convert_row(mode: &'static Mode, planes: &[Vec<Vec<u8>>], y: usize, out: &mut [u8]) {
     for x in 0..mode.width {
         let px = match (mode.channels, mode.colour) {
+            (4, Colour::Pd) => {
+                let l = &planes[y / 2];
+                yuv(l[if y.is_multiple_of(2) { 0 } else { 3 }][x], l[1][x], l[2][x])
+            }
             (3, Colour::Gbr) => (planes[y][2][x], planes[y][0][x], planes[y][1][x]),
             // Robot 72 sends luminance, then R-Y, then B-Y.
             (3, Colour::Yuv) => yuv(planes[y][0][x], planes[y][1][x], planes[y][2][x]),
@@ -797,7 +907,7 @@ impl Receiver {
                     mode,
                     seq,
                     line: 0,
-                    planes: vec![vec![vec![0u8; mode.width]; mode.channels]; mode.height],
+                    planes: vec![vec![vec![0u8; mode.width]; mode.channels]; mode.lines()],
                     held: 0,
                     loud: 0.0,
                 };
@@ -844,7 +954,7 @@ impl Receiver {
         let mut rows: Vec<u8> = Vec::new();
         let mut complete = false;
         loop {
-            if line >= mode.height {
+            if line >= mode.lines() {
                 complete = true;
                 break;
             }
@@ -893,7 +1003,7 @@ impl Receiver {
                 // this one, so conversion runs one line behind it.
                 true => line.saturating_sub(held + 1),
                 false => line.saturating_sub(held),
-            };
+            } * mode.rows_per_line();
             let canvas = self.canvas.as_mut().expect("a canvas while reading");
             while canvas.lines < ready {
                 let y = canvas.lines;
@@ -997,6 +1107,27 @@ mod tests {
         assert!(centre(3, 128)[1] > centre(3, 128)[2], "the green bar has no blue");
     }
 
+    #[test]
+    fn every_pd_mode_comes_back_off_the_tones() {
+        let rate = 11_025.0;
+        for mode in MODES.iter().filter(|m| m.colour == Colour::Pd) {
+            let rgb = bar_picture(mode);
+            let audio = encode(&rgb, mode, rate).expect("a PD mode encodes");
+            let want = HDR_SIZE + 9.0 * VIS_BIT + mode.lines() as f64 * mode.line_time;
+            assert!((audio.len() as f64 / rate - want).abs() < 0.01, "{}", mode.name);
+            let got = decode(&audio, rate).expect("a picture");
+            assert_eq!(got.mode.name, mode.name);
+            assert_eq!((got.width, got.height, got.lines), (mode.width, mode.height, mode.height));
+            for y in 0..mode.height {
+                for b in 0..8 {
+                    let x = b * mode.width / 8 + mode.width / 16;
+                    let px: [u8; 3] = got.rgb[(y * mode.width + x) * 3..][..3].try_into().unwrap();
+                    assert_eq!(nearest_bar(px), b, "{} bar {b} row {y}: {px:?}", mode.name);
+                }
+            }
+        }
+    }
+
     /// The eight bars the round trips are sent as: every pixel a known
     /// value, and the edges show a line read at the wrong offset.
     const BARS: [[u8; 3]; 8] = [
@@ -1047,7 +1178,7 @@ mod tests {
     /// pixels wide in Robot 36, so a bar edge smears over about ten pixels.
     #[test]
     fn a_robot_picture_this_encoder_sent_comes_back_off_the_tones() {
-        for (name, lines) in [("Robot 36", 239), ("Robot 72", 239)] {
+        for (name, lines) in [("Robot 36", 240), ("Robot 72", 240)] {
             let mode = MODES.iter().find(|m| m.name == name).unwrap();
             let rate = 11_025.0;
             let audio = encode(&bar_picture(mode), mode, rate).expect("a robot mode encodes");

@@ -41,42 +41,58 @@ impl Signal for Apt {
     /// A satellite's line scan off the discriminator. Pictures rather than
     /// rows, so what it reports is how many came out whole.
     fn read(&self, iq: &[C32], rate_hz: f64, center_hz: f64) -> Reading {
-        let Some((factor, mut resample)) = dsp::resample::stage(rate_hz, AUDIO_HZ, 4096) else {
-            return Reading::default();
-        };
-        let Some(mut chan) = crate::Channel::new(
-            rate_hz,
-            center_hz,
-            center_hz,
-            CHANNEL_WIDTH_HZ,
-            rate_hz / factor as f64,
-        ) else {
-            return Reading::default();
-        };
-        let mut fm = FmDemod::new(chan.rate_hz, DEVIATION_HZ);
-        let mut rx = apt::Receiver::new(AUDIO_HZ);
-        let (mut narrow, mut audio, mut at_rate) = (Vec::new(), Vec::new(), Vec::new());
-        let mut pictures = 0usize;
-        for b in iq.chunks(crate::BLOCK) {
-            chan.process(b, &mut narrow);
-            audio.clear();
-            fm.process(&narrow, &mut audio);
-            let feed = match resample.as_mut() {
-                Some(r) => {
-                    at_rate.clear();
-                    r.process_real(&audio, &mut at_rate);
-                    &at_rate
-                }
-                None => &audio,
-            };
-            if let Some(rows) = rx.push(feed)
-                && rows.complete
-            {
-                pictures += 1;
+        let mut best = Reading::default();
+        for hz in crate::channels_in(self, rate_hz, center_hz) {
+            let read = read_at(iq, rate_hz, center_hz, hz);
+            if read.pictures > best.pictures {
+                best = read.at(hz);
             }
         }
-        Reading { pictures, ..Reading::default() }
+        best
     }
+}
+
+fn read_at(iq: &[C32], rate_hz: f64, center_hz: f64, channel_hz: f64) -> Reading {
+    let Some((factor, mut resample)) = dsp::resample::stage(rate_hz, AUDIO_HZ, 4096) else {
+        return Reading::default();
+    };
+    let Some(mut chan) = crate::Channel::new(
+        rate_hz,
+        center_hz,
+        channel_hz,
+        CHANNEL_WIDTH_HZ,
+        rate_hz / factor as f64,
+    ) else {
+        return Reading::default();
+    };
+    let mut fm = FmDemod::new(chan.rate_hz, DEVIATION_HZ);
+    let mut rx = apt::Receiver::new(AUDIO_HZ);
+    let (mut narrow, mut audio, mut at_rate) = (Vec::new(), Vec::new(), Vec::new());
+    let mut pictures = 0usize;
+    for b in iq.chunks(crate::BLOCK) {
+        chan.process(b, &mut narrow);
+        audio.clear();
+        fm.process(&narrow, &mut audio);
+        let feed = match resample.as_mut() {
+            Some(r) => {
+                at_rate.clear();
+                r.process_real(&audio, &mut at_rate);
+                &at_rate
+            }
+            None => &audio,
+        };
+        if let Some(rows) = rx.push(feed)
+            && rows.complete
+        {
+            pictures += 1;
+        }
+    }
+    if let Some(rows) = rx.finish()
+        && rows.first + rows.lines() > 0
+    {
+        pictures += 1;
+    }
+    Reading { pictures, ..Reading::default() }
 }
 
 /// The rate the picture is read at: ten samples a word, which is a whole
