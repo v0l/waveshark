@@ -72,20 +72,20 @@ pub fn running(addr: SocketAddr) -> Option<Arc<iqstream::Server>> {
     servers().lock().ok()?.get(&addr).cloned()
 }
 
+#[cfg(feature = "iqstream")]
+fn listen(addr: SocketAddr) -> Result<Arc<iqstream::Server>> {
+    sdr_server::start(addr, sdr_server::Options::default())
+}
+
+#[cfg(not(feature = "iqstream"))]
+fn listen(addr: SocketAddr) -> Result<Arc<iqstream::Server>> {
+    iqstream::Server::start(addr, iqstream::ServerConfig::default())
+}
+
 /// The server on this address, started if it is not running yet.
 ///
 /// A port of zero is never shared: it asks the kernel for a free port, so two
 /// of them are two servers however the request was written.
-#[cfg(feature = "iqstream")]
-fn door() -> Option<Arc<dyn iqstream::Door>> {
-    Some(remote::door::Doors::shared())
-}
-
-#[cfg(not(feature = "iqstream"))]
-fn door() -> Option<Arc<dyn iqstream::Door>> {
-    None
-}
-
 pub fn server(addr: SocketAddr) -> Result<Arc<iqstream::Server>> {
     if addr.port() != 0
         && let Ok(map) = servers().lock()
@@ -93,14 +93,7 @@ pub fn server(addr: SocketAddr) -> Result<Arc<iqstream::Server>> {
     {
         return Ok(s.clone());
     }
-    let cfg = iqstream::ServerConfig {
-        name: "waveshark".into(),
-        streams: Vec::new(),
-        door: door(),
-        webtransport: addr.port().checked_add(1).filter(|_| addr.port() != 0),
-        webrtc: true,
-    };
-    let s = iqstream::Server::start(addr, cfg)?;
+    let s = listen(addr)?;
     if addr.port() != 0
         && let Ok(mut map) = servers().lock()
     {

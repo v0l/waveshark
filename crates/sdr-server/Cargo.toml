@@ -1,0 +1,17 @@
+[package]
+name = "sdr-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "One port for every SDR protocol this project speaks: IQStream, WebSocket, rtl_tcp and SpyServer on TCP, and WebTransport and WebRTC on UDP"
+
+[dependencies]
+common.workspace = true
+tracing.workspace = true
+iqstream = { workspace = true, features = ["net"] }
+remote = { workspace = true, features = ["iqstream", "rtl_tcp", "spyserver"] }
+nostr-directory = { workspace = true, features = ["relay"] }
+
+[dev-dependencies]
+dsp.workspace = true
+sdr-directory.workspace = true

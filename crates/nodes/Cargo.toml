@@ -41,14 +41,14 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 rumqttc = { version = "0.25", default-features = false, optional = true }
 serde_json.workspace = true
 iqstream.workspace = true
-remote = { workspace = true, optional = true }
+sdr-server = { workspace = true, optional = true }
 
 [features]
 # The app turns defaults off and names what it wants, so a default here is
 # only what `cargo test -p nodes` builds. The native libraries stay off.
 default = ["homeassistant", "iqstream", "feeds"]
 homeassistant = ["dep:rumqttc"]
-iqstream = ["iqstream/net", "dep:remote", "remote/iqstream", "remote/rtl_tcp", "remote/spyserver"]
+iqstream = ["iqstream/net", "dep:sdr-server"]
 feeds = []
 # TETRA air-interface decryption and TEA1 key recovery in the TETRA node.
 # Off by default; enables `decode/tea`. Without it the node still reads

@@ -104,11 +104,8 @@ fn answer_webrtc(now: Option<(SocketAddr, Config)>) {
     }
     *held = now.and_then(|(addr, config)| {
         let keys = config.nsec.as_deref().and_then(nostr_directory::identity)?;
-        let answer: nostr_directory::signal::Answer = std::sync::Arc::new(move |offer: &str| {
-            let server = nodes::iqstream_nodes::running(addr).ok_or("nothing is being served")?;
-            server.answer(offer).map_err(|e| e.to_string())
-        });
-        let answerer = nostr_directory::signal::Answerer::start(keys, &config.relays, answer);
+        let serving = move || nodes::iqstream_nodes::running(addr);
+        let answerer = sdr_server::answer_webrtc(keys, &config.relays, serving);
         Some((addr, config, answerer))
     });
 }

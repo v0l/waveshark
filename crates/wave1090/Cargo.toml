@@ -14,6 +14,7 @@ sources.workspace = true
 rtlsdr.workspace = true
 remote = { workspace = true, features = ["iqstream"] }
 iqstream = { workspace = true, features = ["net"] }
+sdr-server.workspace = true
 sdr-directory.workspace = true
 nostr-directory = { workspace = true, features = ["relay"] }
 tokio = { version = "1", features = ["rt", "signal"] }

@@ -1,8 +1,7 @@
 use common::device::Device as _;
 use common::{C32, Hz, Sps};
 use dsp::spectrum::{Detector, Spectrum};
-use iqstream::{Server, ServerConfig, StreamConfig};
-use remote::door::Doors;
+use sdr_server::{Options, Server, StreamConfig, WebTransport};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -30,9 +29,9 @@ impl Drop for Air {
 }
 
 fn air() -> Air {
-    let server = Server::start(
+    let server = sdr_server::start(
         "127.0.0.1:0".parse().unwrap(),
-        ServerConfig {
+        Options {
             name: "test".into(),
             streams: vec![StreamConfig {
                 name: "span".into(),
@@ -40,9 +39,9 @@ fn air() -> Air {
                 sample_rate: RATE,
                 ..Default::default()
             }],
-            door: Some(Doors::shared()),
-            webtransport: None,
+            webtransport: WebTransport::Off,
             webrtc: false,
+            rtl_tcp_and_spyserver: true,
         },
     )
     .unwrap();
@@ -219,11 +218,11 @@ fn an_iqstream_client_still_finds_the_server_behind_the_door() {
 fn a_ninth_listener_is_turned_away_and_the_directory_is_told_eight() {
     let air = air();
     let addr = air.server.addr().to_string();
-    let held: Vec<_> = (0..remote::door::MOST_SESSIONS)
+    let held: Vec<_> = (0..sdr_server::MOST_SESSIONS)
         .map(|_| remote::rtl_tcp::Device::open(&addr).unwrap())
         .collect();
     assert!(remote::rtl_tcp::Device::open(&addr).is_err());
-    assert_eq!(remote::door::MOST_SESSIONS as u32, sdr_directory::airspy::MAX_CLIENTS);
+    assert_eq!(sdr_server::MOST_SESSIONS as u32, sdr_directory::airspy::MAX_CLIENTS);
     drop(held);
     std::thread::sleep(Duration::from_millis(600));
     assert!(remote::rtl_tcp::Device::open(&addr).is_ok());

@@ -117,22 +117,16 @@ struct Args {
     #[arg(long, value_name = "DEG", allow_negative_numbers = true)]
     lon: Option<f64>,
 
-    /// Serve the samples on to other receivers over iqstream, as addr:port
-    /// or a bare port. One aerial then feeds this and whatever else wants it
+    /// Serve the samples on to other receivers, as addr:port or a bare
+    /// port. The port answers IQStream, WebSocket, rtl_tcp and SpyServer
+    /// clients, and WebRTC offers once the directory listing is on
     #[arg(long, value_name = "ADDR")]
     iqstream_listen: Option<String>,
 
-    /// Serve iqstream over WebTransport on this UDP port as well, for a
-    /// browser on an https page. The certificate is made here and renewed
-    /// every six days, and the directory listing carries its hash
-    #[arg(long, value_name = "PORT", requires = "iqstream_listen")]
-    iqstream_webtransport: Option<u16>,
-
-    /// Answer WebRTC offers sent to the directory key over nostr, so a
-    /// browser can read the samples on the iqstream UDP port without any
-    /// certificate at all
-    #[arg(long, requires = "iqstream_list")]
-    iqstream_webrtc: bool,
+    /// The UDP port WebTransport is served on for a browser on an https
+    /// page: the one after the listening port unless a port or `off` is given
+    #[arg(long, value_name = "PORT|off", default_value = "on")]
+    iqstream_webtransport: sdr_server::WebTransport,
 
     /// List the iqstream server in the public directory on nostr, so another
     /// receiver can find it. Published at start and every 24 hours, and
@@ -309,23 +303,21 @@ fn listen(args: &Args, center_hz: u64, rate: f64, hardware: &str) -> Result<Opti
             Err(_) => bail!("--iqstream-listen wants addr:port or a port, not {spec:?}"),
         },
     };
-    let cfg = iqstream::ServerConfig {
+    let options = sdr_server::Options {
+        name: "wave1090".into(),
+        streams: vec![sdr_server::StreamConfig {
+            name: "span".into(),
+            center_hz,
+            sample_rate: rate as u32,
+            gain_db: Some(args.gain),
+            tunable: false,
+            tune_range_hz: None,
+            settings: Vec::new(),
+        }],
         webtransport: args.iqstream_webtransport,
-        webrtc: args.iqstream_webrtc,
-        ..iqstream::ServerConfig::single(
-            "wave1090",
-            iqstream::StreamConfig {
-                name: "span".into(),
-                center_hz,
-                sample_rate: rate as u32,
-                gain_db: Some(args.gain),
-                tunable: false,
-                tune_range_hz: None,
-                settings: Vec::new(),
-            },
-        )
+        ..sdr_server::Options::default()
     };
-    let server = iqstream::Server::start(addr, cfg).context("cannot serve iqstream")?;
+    let server = sdr_server::start(addr, options).context("cannot serve iqstream")?;
     tracing::info!("iqstream on {}", server.addr());
     if let Some(wt) = server.webtransport() {
         let at = format!("{}:{}", server.addr().ip(), wt.port);
@@ -339,17 +331,11 @@ fn listen(args: &Args, center_hz: u64, rate: f64, hardware: &str) -> Result<Opti
     let mut answerer = None;
     if args.iqstream_list {
         let listing = listing(args)?;
-        if server.webrtc()
-            && let Some(keys) =
-                listing.directory.nsec.as_deref().and_then(nostr_directory::identity)
-        {
+        if let Some(keys) = listing.directory.nsec.as_deref().and_then(nostr_directory::identity) {
             let answering = server.clone();
-            let answer: nostr_directory::signal::Answer =
-                std::sync::Arc::new(move |offer: &str| {
-                    answering.answer(offer).map_err(|e| e.to_string())
-                });
             let relays = &listing.directory.relays;
-            answerer = Some(nostr_directory::signal::Answerer::start(keys, relays, answer));
+            answerer =
+                Some(sdr_server::answer_webrtc(keys, relays, move || Some(answering.clone())));
             tracing::info!("iqstream answers webrtc offers on {} relays", relays.len());
         }
         let shared = server.clone();

@@ -21,6 +21,7 @@ members = [
     "crates/sdr-directory",
     "crates/nostr-directory",
     "crates/remote",
+    "crates/sdr-server",
     "crates/sources",
     "crates/decode",
     "crates/datasets",
@@ -62,6 +63,7 @@ default-members = [
     "crates/sdr-directory",
     "crates/nostr-directory",
     "crates/remote",
+    "crates/sdr-server",
     "crates/sources",
     "crates/decode",
     "crates/datasets",
@@ -109,6 +111,7 @@ usbio = { path = "crates/usbio" }
 limesdr = { path = "crates/limesdr" }
 limesdr-sys = { path = "crates/limesdr-sys" }
 remote = { path = "crates/remote", default-features = false }
+sdr-server = { path = "crates/sdr-server" }
 sources = { path = "crates/sources" }
 decode = { path = "crates/decode" }
 datasets = { path = "crates/datasets", default-features = false }

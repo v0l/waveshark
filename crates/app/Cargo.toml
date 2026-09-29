@@ -36,6 +36,7 @@ hackrf = { workspace = true, optional = true }
 airspy = { workspace = true, optional = true }
 limesdr = { workspace = true, optional = true }
 remote.workspace = true
+sdr-server = { workspace = true, optional = true }
 sources.workspace = true
 nodes.workspace = true
 iqstream.workspace = true
@@ -131,7 +132,7 @@ mcp = ["dep:rmcp", "dep:axum"]
 limesdr = ["dep:limesdr"]
 native = ["usb", "iqstream", "rtl_tcp", "spyserver", "kiwisdr", "homeassistant", "gps", "update", "survey", "artemis", "feeds"]
 usb = ["rtlsdr", "hackrf", "airspy", "pluto"]
-iqstream = ["iqstream_client", "nodes/iqstream"]
+iqstream = ["iqstream_client", "nodes/iqstream", "dep:sdr-server"]
 iqstream_client = ["remote/iqstream", "iqstream/net", "nostr-directory/relay"]
 rtl_tcp = ["remote/rtl_tcp"]
 spyserver = ["remote/spyserver"]

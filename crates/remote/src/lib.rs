@@ -16,13 +16,6 @@
     not(target_arch = "wasm32")
 ))]
 mod cut;
-#[cfg(all(
-    feature = "iqstream",
-    feature = "rtl_tcp",
-    feature = "spyserver",
-    not(target_arch = "wasm32")
-))]
-pub mod door;
 pub mod gaps;
 #[cfg(feature = "pluto")]
 pub mod iiod;

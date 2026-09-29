@@ -351,6 +351,7 @@ dependencies = [
  "rtlsdr",
  "schemars",
  "sdr-directory",
+ "sdr-server",
  "serde",
  "serde_json",
  "sources",
@@ -4109,9 +4110,9 @@ dependencies = [
  "pipeline",
  "poll-promise",
  "rayon",
- "remote",
  "rumqttc",
  "rustfft",
+ "sdr-server",
  "serde_json",
  "sources",
  "stt",
@@ -5496,7 +5497,6 @@ dependencies = [
  "nostr-directory",
  "nusb",
  "quick-xml",
- "sdr-directory",
  "tokio",
  "tracing",
  "tungstenite",
@@ -5949,6 +5949,19 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "web-time",
+]
+
+[[package]]
+name = "sdr-server"
+version = "0.4.0"
+dependencies = [
+ "common",
+ "dsp",
+ "iqstream",
+ "nostr-directory",
+ "remote",
+ "sdr-directory",
+ "tracing",
 ]
 
 [[package]]
@@ -7497,6 +7510,7 @@ dependencies = [
  "remote",
  "rtlsdr",
  "sdr-directory",
+ "sdr-server",
  "serde_json",
  "sources",
  "tokio",

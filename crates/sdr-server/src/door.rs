@@ -54,8 +54,8 @@ impl Door for Doors {
             return;
         };
         let serve: fn(TcpStream, SocketAddr, Arc<Stream>) = match speaks {
-            Speaks::RtlTcp => crate::rtl_tcp::serve::serve,
-            Speaks::SpyServer => crate::spyserver::serve::serve,
+            Speaks::RtlTcp => remote::rtl_tcp::serve::serve,
+            Speaks::SpyServer => remote::spyserver::serve::serve,
             Speaks::Http | Speaks::Unknown => {
                 tracing::debug!("{peer} speaks {speaks:?}, which this server does not");
                 return;

@@ -37,7 +37,7 @@ the code is in the commit log.
 - TUNERS map layer of public IQStream servers, SpyServers and KiwiSDRs, each opened with CONNECT.
 - Mouse wheel on faders and squelch thresholds.
 - Cell tower map marking the cells this receiver decoded in cyan.
-- SpyServer and rtl_tcp clients on the IQ server's port, each tuning anywhere inside the span.
+- SpyServer and rtl_tcp clients on the IQ server's port of waveshark and wave1090, each tuning anywhere inside the span.
 - Airspy SpyServer directory listing of the IQ server, with its owner email.
 - IQStream over WebSocket: `ws://` and `wss://` remote tuners, and served on the IQ server's port.
 - WebTransport for IQStream: `https://` remote tuners pinned by a certificate hash the directory lists.
