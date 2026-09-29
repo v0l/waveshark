@@ -194,6 +194,9 @@ impl Protocol for Lte {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged
     }
+    fn keys(&self) -> Option<common::Modulation> {
+        Some(common::Modulation::Ofdm)
+    }
 
     fn stickiness(&self) -> Stickiness {
         Stickiness::Claim

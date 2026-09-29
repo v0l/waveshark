@@ -416,26 +416,28 @@ positions of the aircraft over the south east that afternoon.
 
 A far busier span than the other Mode S captures: 28 aircraft answering
 interrogations, so replies overlap and the preamble detector sees frames on
-top of frames. Besides the Mode S traffic the receiver reads 34
-rows as M17 packets, which is a false decode on a band M17 is never on. It
-is also what showed a reply early in a block leaving without its samples.
+top of frames. 34 of the replies begin with the two bytes an M17 packet
+does, and were read as M17 until a tagged protocol had to agree with the
+keying of the front end that heard the frame. The Qatari 06a0b8 is the
+address that showed an identifier losing its leading zero, and a reply early
+in a block leaving without its samples.
 """
 
 rows = 1985
 
 [[capture.read]]
 protocol = "adsb"
-rows = 1951
+rows = 1985
 subjects = [
-    "3465d8", "3cefbc", "3e193a", "4007fa", "40624f", "406279", "40650b",
-    "407022", "40756a", "4075a2", "424b95", "43c704", "4401b7", "4402f2",
-    "46b8a2", "490d0b", "49130d", "49328b", "4a0664", "4ca2c9", "4ca788",
-    "4ca809", "4ca92b", "4ca92d", "4ca9cf", "4cafb3", "4d2347", "6a0b8",
+    "06a0b8", "3465d8", "3cefbc", "3e193a", "4007fa", "40624f", "406279",
+    "40650b", "407022", "40756a", "4075a2", "424b95", "43c704", "4401b7",
+    "4402f2", "46b8a2", "490d0b", "49130d", "49328b", "4a0664", "4ca2c9",
+    "4ca788", "4ca809", "4ca92b", "4ca92d", "4ca9cf", "4cafb3", "4d2347",
 ]
 
 [[capture.read]]
 protocol = "m17"
-rows = 34
+rows = 0
 
 [[capture]]
 name = "ais_london_162M_250k.cs16"
@@ -739,3 +741,37 @@ channels = """
 """
 
 rows = 0
+
+[[capture]]
+name = "dab_bbc_12b_225.648M_2048k.cs16"
+sha256 = "90c59f420046e45638ecfa388c191a3f8409443f1389514ca5d7dc8c63e97dbb"
+url = "https://nostr.download/90c59f420046e45638ecfa388c191a3f8409443f1389514ca5d7dc8c63e97dbb.xz"
+compression = "xz"
+license = "unstated"
+license_source = "SDRangel, sdrangel.org/iq-files dab.zip, cut and converted and re-hosted"
+description = """
+Not this project's recording: five seconds of the BBC National DAB
+multiplex on block 12B, 225.648 MHz, near London on 16 December 2021, from
+five seconds into SDRangel's DAB example. Converted from the WAV's data
+chunk at its own 2.048 MS/s.
+
+A DAB decode channel reads the ensemble, BBC National DAB, and its eleven
+services; `crates/identify/tests/captures.rs` reads the same twelve with the
+ids and labels. It read none of them through the receiver until the node
+put them on its packet port rather than emitting them as events nothing
+collected.
+"""
+
+channels = """
+225.648 MHz DAB
+"""
+
+rows = 12
+
+[[capture.read]]
+protocol = "dab"
+rows = 12
+subjects = [
+    "C221", "C222", "C223", "C224", "C225", "C228", "C22A", "C22B", "C22C",
+    "C236", "C238",
+]

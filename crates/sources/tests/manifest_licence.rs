@@ -89,8 +89,8 @@ fn ours(e: &Entry) -> bool {
 fn every_capture_says_what_it_may_be_used_for() {
     let decode = parse(&manifest("decode.toml"), "[[capture]]");
     let fixture = parse(&manifest("fixture.toml"), "[[capture]]");
-    assert_eq!(decode.len(), 22, "captures in decode.toml");
-    assert_eq!(fixture.len(), 49, "captures in fixture.toml");
+    assert_eq!(decode.len(), 23, "captures in decode.toml");
+    assert_eq!(fixture.len(), 48, "captures in fixture.toml");
 
     let all = published();
     for entry in &all {

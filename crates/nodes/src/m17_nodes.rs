@@ -392,6 +392,9 @@ impl Protocol for M17 {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged
     }
+    fn keys(&self) -> Option<common::Modulation> {
+        Some(common::Modulation::Fsk4)
+    }
     fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
         let bytes = p.bytes();
         read(bytes).map(|d| vec![d])

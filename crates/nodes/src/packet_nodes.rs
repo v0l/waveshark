@@ -139,7 +139,16 @@ fn read_frame(p: &mut Packet) {
     if p.frame.as_ref().is_none_or(|f| f.bytes.is_empty()) {
         return;
     }
+    let keyed = p
+        .keying
+        .as_ref()
+        .filter(|k| k.how == common::packet::Knowledge::Configured)
+        .map(|k| k.modulation);
     for proto in crate::protocol::frame_readers() {
+        let elsewhere = matches!((keyed, proto.keys()), (Some(k), Some(own)) if k != own);
+        if proto.frame_claim() == crate::protocol::FrameClaim::Tagged && elsewhere {
+            continue;
+        }
         if let Some(rows) = proto.stated(p) {
             p.stack.extend(rows);
             return;
@@ -661,6 +670,17 @@ mod tests {
             let want: Vec<&str> = rows.iter().map(|d| d.id).collect();
             assert_eq!(read, want, "what the walk read at {hz} Hz");
         }
+    }
+
+    #[test]
+    fn a_mode_s_reply_that_starts_like_an_m17_packet_stays_mode_s() {
+        let bytes = vec![0x02, 0x00, 0x05, 0x98, 0x3a, 0x1c, 0x7e];
+        assert!(decode::m17::read(&bytes).is_some(), "the bytes parse as M17");
+        let mut p = framed(1_090_000_000, 2_400_000, bytes)
+            .keyed(common::packet::Keying::configured(common::Modulation::Ppm));
+        read_frame(&mut p);
+        let read: Vec<&str> = p.stack.iter().map(|d| d.id).collect();
+        assert!(!read.contains(&"m17"), "read as {read:?}");
     }
 
     #[test]

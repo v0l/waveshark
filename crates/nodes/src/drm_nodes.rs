@@ -99,12 +99,9 @@ impl Simple for DrmNode {
         self.rx = DrmReceiver::new(Mode::B);
         self.told.clear();
 
-        let mut out = i.spec.with_kind(PortKind::Bytes);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
-        // What leaves is the signalling this reads, which is 64 bits of fast
-        // access channel every 400 ms.
-        out.rate = 160.0;
         Ok(out)
     }
 
@@ -133,17 +130,21 @@ impl Simple for DrmNode {
                 let carrier = crate::locked(
                     self.channel_hz as u64,
                     CHANNEL_WIDTH_HZ as u32,
-                    &self.narrow,
+                    &self.at_rate,
                     self.rx.snr_db(),
-                );
-                c.emit(pipeline::event::Event::Decoded(
+                )
+                .with_iq(std::sync::Arc::new(common::pulse::IqBurst {
+                    rate: RATE_HZ,
+                    center_hz: self.channel_hz as u64,
+                    samples: self.at_rate.clone(),
+                }));
+                o.packets_mut().push(
                     common::packet::Packet::heard(carrier)
                         .keyed(common::packet::Keying::configured(common::Modulation::Ofdm))
                         .decoded(d),
-                ));
+                );
             }
         }
-        let _ = o;
         Ok(())
     }
 
@@ -211,10 +212,8 @@ impl Protocol for DrmProtocol {
     fn stickiness(&self) -> Stickiness {
         Stickiness::SESSION
     }
-    /// The signalling channels. The multiplex is not decoded, so nothing
-    /// reaches the audio bus.
     fn outputs(&self) -> &'static [PortKind] {
-        &[PortKind::Bytes]
+        &[PortKind::Packets]
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
@@ -228,9 +227,7 @@ pub const DESC: StageDesc = StageDesc {
     name: "drm",
     summary: "One DRM channel: OFDM, its fast access channel, its services",
     category: Category::Decode,
-    // What reaches the packet list is the multiplex and its services,
-    // emitted rather than carried on a wire.
-    feeds_bus: false,
+    feeds_bus: true,
 };
 
 pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
@@ -399,7 +396,7 @@ mod tests {
             let mut n = DrmNode::new(DEFAULT_HZ);
             let spec = PortSpec { spec: StreamSpec::iq(rate, Hz(3_965_000)), latency: 0 };
             let out = n.negotiate(&spec).unwrap_or_else(|e| panic!("{rate} refused: {e}"));
-            assert_eq!(out.kind, PortKind::Bytes);
+            assert_eq!(out.kind, PortKind::Packets);
             assert_eq!(out.center, Hz(3_965_000));
         }
     }

@@ -124,7 +124,10 @@ impl std::fmt::Display for Id {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Num(v) => write!(f, "{v}"),
-            Self::Hex(v) => write!(f, "{v:x}"),
+            Self::Hex(v) => {
+                let digits = (format!("{v:x}").len() + 1) & !1;
+                write!(f, "{v:0digits$x}")
+            }
             Self::Call(s) | Self::Text(s) => f.write_str(s),
             Self::Key(k) => {
                 for b in k.iter() {
@@ -205,5 +208,18 @@ impl Link {
             (Some(a), Some(b)) if a.named() && b.named() => Some((a, b)),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_hex_identifier_is_written_in_whole_bytes() {
+        assert_eq!(Id::Hex(0x06a0b8).to_string(), "06a0b8");
+        assert_eq!(Id::Hex(0x4ca92d).to_string(), "4ca92d");
+        assert_eq!(Id::Hex(0x050d_3664).to_string(), "050d3664");
+        assert_eq!(Id::Hex(0).to_string(), "00");
     }
 }

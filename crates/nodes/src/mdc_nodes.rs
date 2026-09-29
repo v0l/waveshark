@@ -216,6 +216,9 @@ impl Protocol for Mdc {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged
     }
+    fn keys(&self) -> Option<common::Modulation> {
+        Some(common::Modulation::Msk)
+    }
     fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
         let bytes = p.bytes();
         read(bytes).map(|d| vec![d])

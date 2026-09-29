@@ -206,6 +206,9 @@ impl Protocol for Iridium {
     fn frame_claim(&self) -> FrameClaim {
         FrameClaim::Tagged
     }
+    fn keys(&self) -> Option<common::Modulation> {
+        Some(common::Modulation::Dqpsk)
+    }
     fn stated(&self, p: &common::packet::Packet) -> Option<Vec<common::packet::Proto>> {
         let bytes = p.bytes();
         read(bytes, common::Hz(p.center_hz())).map(|d| vec![d])

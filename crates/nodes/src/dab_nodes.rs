@@ -146,7 +146,12 @@ impl DabNode {
             CHANNEL_WIDTH_HZ as u32,
             &self.at_rate,
             self.rx.snr_db(),
-        );
+        )
+        .with_iq(std::sync::Arc::new(common::pulse::IqBurst {
+            rate: RATE_HZ,
+            center_hz: self.channel_hz as u64,
+            samples: self.at_rate.clone(),
+        }));
         common::packet::Packet::heard(carrier)
             .keyed(common::packet::Keying::configured(common::Modulation::Ofdm))
             .decoded(said)
@@ -373,12 +378,9 @@ impl pipeline::node::Node for DabNode {
         self.resample = resample.unwrap_or_else(|| Rational::with_ratio(1, 1));
         self.restart();
 
-        let mut out = i.spec.with_kind(PortKind::Bytes);
+        let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;
-        // What leaves is the fast information channel, which is 96 kbit/s of
-        // blocks whatever the ensemble carries.
-        out.rate = 12_000.0;
         let mut sound = out.with_kind(PortKind::Real);
         sound.rate = SOUND_RATE_HZ;
         sound.channels = 1;
@@ -422,7 +424,8 @@ impl pipeline::node::Node for DabNode {
             && let Some(d) = dab::ensemble_read(&self.rx)
         {
             self.told = named;
-            c.emit(pipeline::event::Event::Decoded(self.locked_on(d)));
+            let p = self.locked_on(d);
+            outputs[0].packets_mut().push(p);
         }
         let fresh: Vec<u32> = self
             .rx
@@ -434,7 +437,8 @@ impl pipeline::node::Node for DabNode {
         for id in fresh {
             self.named.push(id);
             if let Some(d) = dab::service_read(&self.rx, id) {
-                c.emit(pipeline::event::Event::Decoded(self.locked_on(d)));
+                let p = self.locked_on(d);
+                outputs[0].packets_mut().push(p);
             }
         }
         Ok(())
@@ -546,9 +550,8 @@ impl Protocol for DabProtocol {
     fn stickiness(&self) -> Stickiness {
         Stickiness::SESSION
     }
-    /// The fast information channel's blocks.
     fn outputs(&self) -> &'static [PortKind] {
-        &[PortKind::Bytes, PortKind::Real]
+        &[PortKind::Packets, PortKind::Real]
     }
     fn chain(&self, at: Placed) -> Vec<NodeSpec> {
         vec![NodeSpec::new(DESC.name).f(CHANNEL_HZ, at.center_hz)]
@@ -562,10 +565,7 @@ pub const DESC: StageDesc = StageDesc {
     name: "dab",
     summary: "One DAB ensemble: OFDM, the fast information channel, its stations and their sound",
     category: Category::Decode,
-    // What it puts on its port is the fast information channel. What reaches
-    // the packet list is the ensemble and its services, emitted rather than
-    // carried on a wire.
-    feeds_bus: false,
+    feeds_bus: true,
 };
 
 pub fn build(s: &Settings) -> Result<Box<dyn pipeline::node::Node>> {
@@ -699,17 +699,17 @@ mod tests {
         let tags = Vec::new();
         let (mut said, mut sound) = (Vec::new(), Vec::new());
         for chunk in iq.chunks(65_536) {
-            let mut outs = [Payload::empty_of(PortKind::Bytes), Payload::empty_of(PortKind::Real)];
+            let mut outs =
+                [Payload::empty_of(PortKind::Packets), Payload::empty_of(PortKind::Real)];
             let (mut events, mut new_tags) = (Vec::new(), Vec::new());
             let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             ctx.block_seconds = chunk.len() as f64 / rate;
             let input = Payload::Iq(chunk.to_vec());
             n.process(&[&input], &mut outs, &mut ctx).expect("read");
             sound.extend_from_slice(outs[1].as_real().unwrap_or(&[]));
-            said.extend(events.into_iter().filter_map(|e| match e {
-                pipeline::event::Event::Decoded(p) => p.stack.last().cloned(),
-                _ => None,
-            }));
+            said.extend(
+                outs[0].as_packets().unwrap_or(&[]).iter().filter_map(|p| p.stack.last().cloned()),
+            );
         }
         (said, sound)
     }
@@ -982,7 +982,7 @@ mod tests {
             let out = n
                 .negotiate(std::slice::from_ref(&spec))
                 .unwrap_or_else(|e| panic!("{rate} refused: {e}"));
-            assert_eq!(out[0].kind, PortKind::Bytes);
+            assert_eq!(out[0].kind, PortKind::Packets);
             assert_eq!(out[0].center, Hz(222_064_000));
             assert_eq!((out[1].kind, out[1].rate), (PortKind::Real, SOUND_RATE_HZ));
         }

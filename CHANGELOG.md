@@ -82,6 +82,9 @@ the code is in the commit log.
 - Mode S replies early in a block listed without their samples.
 - Auto scanner blocks crashing the receiver on a span narrower than 100 kHz.
 - Recording names with a centre below 1 MHz, like `clock_0.11M_192k.cs16`, read as a rate.
+- DAB ensembles and stations and DRM services missing from the packet list.
+- M17 packets read out of Mode S replies and other frames another front end keyed.
+- ICAO addresses and other hex identifiers shown without their leading zero.
 - Spectrum on a half duplex radio dropping the last fifth of a second of its own over.
 - Roger beep cut short at the end of an over, and the source heard again after it.
 - Survey device locations landing on the receiver from GPS wander while parked.

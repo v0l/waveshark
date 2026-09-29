@@ -424,6 +424,10 @@ pub trait Protocol: Send + Sync {
         FrameClaim::Never
     }
 
+    fn keys(&self) -> Option<common::Modulation> {
+        None
+    }
+
     /// The rows a frame off the packet bus becomes.
     ///
     /// `None` where the frame is not this protocol's, so the next protocol
