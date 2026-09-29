@@ -11,6 +11,7 @@ the code is in the commit log.
 
 ### Added
 
+- NAVTEX bulletins on 518, 490 and 4209.5 kHz, by station, subject and number.
 - SSTV PD 50, 90, 120, 160, 180, 240 and 290, received and sent.
 - AGC decay and maximum gain, set per channel on the strip.
 - Zigbee network headers: each hop's EUI-64 and vendor, network addresses, beacons and the key in use.

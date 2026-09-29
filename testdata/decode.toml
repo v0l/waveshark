@@ -567,19 +567,30 @@ license_source = "SDRangel, sdrangel.org/iq-files navtex.zip, converted and re-h
 description = """
 481 seconds of NAVTEX navigational warnings from Niton on 518 kHz, recorded
 on 21 February 2023, SDRangel's NAVTEX example whole. SITOR-B, 100 baud with
-a 170 Hz shift. The WAV carries no centre, so the 518 kHz here is the NAVTEX
-channel the tones sit either side of.
+a 170 Hz shift, every character sent twice 35 bits apart. The WAV carries no
+centre, so the 518 kHz here is the NAVTEX channel the tones sit either side
+of.
 
-There is no NAVTEX decoder, and the receiver reads nothing.
+Ten bulletins from station E, Niton: EA09 to EA39 and EL09, the Plymouth
+and Portland submarine and gunnery warning among them. A NAVTEX channel
+tuned to 518 kHz reads all ten, each character from whichever of its two copies arrived whole. The recording
+is a channel rather than a span, so the carrier sits on the file's centre,
+where an auto block takes it for the tuner's own offset and opens nothing;
+that is why this one is tuned rather than found.
 """
 
-scanners = """
-[NAVTEX]
-range = 517 - 519 kHz
-front = auto
+channels = """
+518 kHz NAVTEX
 """
 
-rows = 0
+rows = 10
+
+[[capture.read]]
+protocol = "navtex"
+rows = 10
+subjects = [
+    "EA09", "EA14", "EA22", "EA25", "EA30", "EA31", "EA33", "EA34", "EA39", "EL09",
+]
 
 [[capture]]
 name = "ysf_145.6875M_74.999k.cs16"

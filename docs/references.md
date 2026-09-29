@@ -114,6 +114,10 @@ which is a different and stronger claim than "it runs".
 - **dumpvdl2** (Tomasz Lemiech) for VDL Mode 2, which is where the header and
   block constants were read from as well.
 - **colaclanth's `sstv`** for the SSTV modes, picture against picture.
+- **fldigi** (`src/navtex/navtex.cxx`) for the CCIR 476 table SITOR-B and
+  NAVTEX are sent in, the phasing codes, and where the repeat of a character
+  sits. The Niton recording SDRangel publishes is what the decoder is checked
+  against, bulletin by bulletin.
 - **SDRangel's radiosonde demodulator** for the RS41, on the recording
   SDRangel publishes as its own example. The frame layout itself is described
   by Johannes Bazant (`bazjo/RS41_Decoding`) and zilog80 (`rs1729/RS`), which

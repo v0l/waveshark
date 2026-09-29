@@ -570,6 +570,7 @@ fn compiled() -> &'static [&'static dyn Protocol] {
         &crate::pocsag_nodes::Pocsag,
         &crate::flex_nodes::Flex,
         &crate::rtty_nodes::Rtty,
+        &crate::navtex_nodes::Navtex,
         &crate::ft8_nodes::Ft8,
         &crate::ft8_nodes::Ft4,
         &crate::morse_nodes::Morse,

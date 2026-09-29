@@ -18,10 +18,6 @@
 //! The one that framed more characters wins, and if neither framed enough of
 //! them that printed, nothing is published: RTTY carries no check at all, so
 //! the framing and the tables are the only evidence there is.
-//!
-//! The channel is where it is tuned and the node does not search for the
-//! station. Measured on a keyed 170 Hz shift at 45.45 baud, an over reads
-//! whole up to 25 Hz off channel and loses characters beyond that.
 
 use crate::NodeSpec;
 use crate::protocol::{FrameClaim, Mark, Placed, Placement, Protocol, Shape};

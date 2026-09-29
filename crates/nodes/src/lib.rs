@@ -64,6 +64,7 @@ pub mod mod_nodes;
 pub mod modes_nodes;
 pub mod morse_nodes;
 pub mod mrz_nodes;
+pub mod navtex_nodes;
 pub mod nrf24_nodes;
 pub mod nxdn_nodes;
 pub mod p25_nodes;
@@ -295,6 +296,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (pocsag_nodes::DESC, pocsag_nodes::build),
     (flex_nodes::DESC, flex_nodes::build),
     (rtty_nodes::DESC, rtty_nodes::build),
+    (navtex_nodes::DESC, navtex_nodes::build),
     (ft8_nodes::FT8_DESC, ft8_nodes::build_ft8),
     (ft8_nodes::FT4_DESC, ft8_nodes::build_ft4),
     (morse_nodes::DESC, morse_nodes::build),

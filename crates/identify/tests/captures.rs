@@ -741,3 +741,31 @@ fn two_minutes_of_a_noaa_pass_are_one_picture() {
         read.iter().filter(|r| r.frames > 0).map(|r| (r.protocol, r.frames)).collect();
     assert_eq!(named, [("apt", 1)]);
 }
+
+#[test]
+fn niton_navtex_is_read_as_its_ten_bulletins() {
+    let Some(buf) = fixture("navtex_niton_0.518M_1.953k.cs16") else { return };
+    let got =
+        identify::identify(&buf.samples, buf.rate.as_f64(), buf.center.as_f64()).expect("NAVTEX");
+    assert_eq!(got.protocol, "navtex");
+    assert_eq!(got.frames, 10);
+    assert_eq!(
+        got.identities,
+        ["EA39", "EL09", "EA34", "EA33", "EA31", "EA30", "EA25", "EA22", "EA14", "EA09"]
+    );
+    let text: Vec<String> = got
+        .rows
+        .iter()
+        .flat_map(|r| &r.facts)
+        .filter_map(|f| match f {
+            common::packet::Fact::Message(m) => Some(m.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(text[0].contains("NASH POINT LIGHT, NORMAL CONDITIONS RESTORED."), "{}", text[0]);
+    assert!(
+        text[1].starts_with("FOST SUBFACTS AND GUNFACTS WARNING (ALL TIMES UTC)."),
+        "{}",
+        text[1]
+    );
+}

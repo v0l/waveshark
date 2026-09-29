@@ -77,6 +77,7 @@ pub mod meshtastic;
 pub mod morse;
 pub mod mpegts;
 pub mod mrz;
+pub mod navtex;
 pub mod nrf24;
 pub mod nxdn;
 pub mod odid;
@@ -91,6 +92,7 @@ pub mod rs;
 pub mod rs41;
 pub mod rtty;
 pub mod script;
+pub mod sitor;
 pub mod slicer;
 #[cfg(feature = "ffmpeg")]
 pub mod sound;

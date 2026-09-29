@@ -46,6 +46,7 @@ pub mod meisei;
 pub mod modes;
 pub mod morse;
 pub mod mrz;
+pub mod navtex;
 pub mod nrf24;
 pub mod nxdn;
 pub mod p25;
@@ -215,6 +216,7 @@ pub fn all() -> &'static [&'static dyn Signal] {
         &pocsag::Pocsag,
         &flex::Flex,
         &rtty::Rtty,
+        &navtex::Navtex,
         &ft8::Ft8,
         &ft8::Ft4,
         &morse::Morse,

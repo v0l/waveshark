@@ -410,15 +410,19 @@ pub(super) fn found(
         );
     }
     let hz = b.center_hz as f64;
+    let width = match b.bandwidth_hz < b.rate {
+        true => b.bandwidth_hz,
+        false => b.signal_hz,
+    };
     for p in protocol::all() {
         let shape = p.shape();
         if shape.span_wide || !shape.families.is_empty() {
             continue;
         }
-        if !candidate(*p, hz, b.bandwidth_hz, b.rate) {
+        if !candidate(*p, hz, width, b.rate) {
             continue;
         }
-        for w in p.widths_for(hz, b.bandwidth_hz) {
+        for w in p.widths_for(hz, width) {
             let at = Placed {
                 center_hz: hz,
                 width_hz: w,
@@ -474,6 +478,29 @@ pub(super) fn candidate(p: &dyn Protocol, hz: f64, width_hz: f64, rate: f64) -> 
 mod tests {
     use super::*;
     use crate::registry;
+
+    #[test]
+    fn a_source_in_a_span_no_wider_than_itself_is_judged_by_its_signal() {
+        let b = SourceBlock {
+            id: SourceId(1),
+            state: common::source::SourceState::Opened,
+            center_hz: 517_975,
+            bandwidth_hz: 1_953.0,
+            signal_hz: 610.0,
+            rate: 1_953.0,
+            start_sample: 0,
+            snr_db: 22.0,
+            samples: Vec::new(),
+        };
+        let spec = StreamSpec::iq(b.rate, Hz(b.center_hz));
+        let origin = Origin { span_sample: 0, span_rate_hz: b.rate };
+        let (members, _) = found(&b, spec, origin, &registry()).expect("members");
+        assert!(
+            members.iter().any(|m| m.name == "navtex"),
+            "{:?}",
+            members.iter().map(|m| m.name).collect::<Vec<_>>()
+        );
+    }
 
     /// A slot built by hand, with one front end on it, so what the fanout
     /// does with a block can be checked without a detector, an extractor or
