@@ -4156,6 +4156,7 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "httpc",
+ "iqstream",
  "rustls",
  "sdr-directory",
  "secp256k1",

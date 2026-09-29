@@ -11,11 +11,12 @@ fn main() {
     println!("{} listings in {:?}", listed.len(), t.elapsed());
     for l in &listed {
         println!(
-            "{} {} {} {:?}",
+            "{} {} {} {:?} webrtc {}",
             l.author,
             l.entry.addr(),
             l.entry.station.name,
-            l.entry.webtransport
+            l.entry.webtransport,
+            l.entry.webrtc
         );
     }
     dir.close();

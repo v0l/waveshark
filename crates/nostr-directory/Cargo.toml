@@ -16,6 +16,7 @@ getrandom = "0.4"
 hex = "0.4"
 httpc = { workspace = true, optional = true }
 sdr-directory.workspace = true
+iqstream.workspace = true
 secp256k1 = { version = "0.33", default-features = false, features = ["std"] }
 serde_json.workspace = true
 sha2.workspace = true

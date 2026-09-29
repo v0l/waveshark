@@ -4,9 +4,7 @@ pub mod model;
 pub mod portmap;
 pub mod probe;
 
-pub use model::{
-    Accuracy, Dial, Entry, Hardware, Location, Protocol, Station, Tuner, Version, WebTransport,
-};
+pub use model::{Accuracy, Dial, Entry, Hardware, Location, Protocol, Station, Tuner, Version};
 
 use std::collections::HashMap;
 use std::fmt;

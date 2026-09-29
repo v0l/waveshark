@@ -203,9 +203,13 @@ pub fn entry<C>(
         port,
         data_port,
         also,
-        webtransport: webtransport
-            .zip(server.webtransport())
-            .map(|(port, offered)| crate::WebTransport { port, hashes: offered.hex() }),
+        webtransport: webtransport.zip(server.webtransport()).map(|(port, offered)| {
+            let at = match host.contains(':') {
+                true => format!("[{host}]:{port}"),
+                false => format!("{host}:{port}"),
+            };
+            iqstream::ws::webtransport_url(&at, &offered.hex())
+        }),
         webrtc: server.webrtc(),
         station: Station {
             name: listing.name.clone(),
@@ -597,10 +601,6 @@ mod tests {
             Lister::<Recorder>::paced(move || Some(found.clone()), offer, Pace::LIVE).unwrap();
         until(&log, 1);
         let listed = log.0.lock().unwrap()[0].1.clone().unwrap();
-        assert_eq!(
-            listed.webtransport,
-            Some(crate::WebTransport { port: offered.port, hashes: offered.hex() })
-        );
         assert_eq!(
             listed.webtransport_url().unwrap(),
             format!("https://198.51.100.7:{}/?cert={}", offered.port, offered.hex().join(","))

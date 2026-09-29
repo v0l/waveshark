@@ -104,6 +104,9 @@ fn digest(pubkey: &PublicKey, created_at: u64, kind: u16, tags: &[Tag], content:
 
 pub fn announcement(keys: &Keys, entry: &Entry, at: u64) -> Event {
     let mut tags = crate::tags::encode(entry);
+    if entry.webrtc {
+        tags.push(crate::tags::webrtc(&keys.public_key()));
+    }
     tags.push(tag("expiration", [(at + EXPIRES_AFTER_SECS).to_string()]));
     Event::sign(keys, KIND, tags, "", at)
 }
@@ -130,7 +133,8 @@ pub fn read(event: &Event, now: u64) -> Result<Listing, Refused> {
     if let Some(at) = event.expiration().filter(|at| *at <= now) {
         return Err(Refused::Expired(at));
     }
-    let entry = crate::tags::decode(event.tags.iter()).map_err(Refused::Content)?;
+    let mut entry = crate::tags::decode(event.tags.iter()).map_err(Refused::Content)?;
+    entry.webrtc = crate::tags::offers_webrtc(event.tags.iter(), &event.pubkey);
     Ok(Listing { author: Author::from(event.pubkey), seen: event.created_at, entry })
 }
 
@@ -232,5 +236,24 @@ mod tests {
         assert_eq!((t.kind, t.created_at), (KIND, NOW));
         assert_eq!(t.expiration(), Some(NOW + TOMBSTONE_SECS));
         assert!(matches!(read(&t, NOW), Err(Refused::Content(_))));
+    }
+
+    #[test]
+    fn webrtc_is_an_r_tag_naming_the_listing_key_and_no_other() {
+        let keys = Keys::generate();
+        let offered = Entry { webrtc: true, ..entry("sdr.example.net", vec![airband()]) };
+        let listed = announcement(&keys, &offered, NOW);
+        let r = format!("webrtc://{}", keys.public_key().to_hex());
+        assert!(listed.tags.contains(&tag("r", [r.as_str()])));
+        assert!(read(&listed, NOW).unwrap().entry.webrtc);
+        let plain = announcement(&keys, &entry("sdr.example.net", vec![airband()]), NOW);
+        assert!(!read(&plain, NOW).unwrap().entry.webrtc);
+        let mut tags = plain.tags.clone();
+        tags.push(tag("r", [format!("webrtc://{}", Keys::generate().public_key().to_hex())]));
+        let borrowed = Event::sign(&keys, KIND, tags, "", NOW);
+        assert!(
+            !read(&borrowed, NOW).unwrap().entry.webrtc,
+            "somebody else's key is not this station's"
+        );
     }
 }
