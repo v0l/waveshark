@@ -581,6 +581,7 @@ fn compiled() -> &'static [&'static dyn Protocol] {
         &crate::m17_nodes::M17,
         &crate::dmr_nodes::Dmr,
         &crate::p25_nodes::P25,
+        &crate::ysf_nodes::Ysf,
         &crate::nxdn_nodes::Nxdn,
         &crate::tetra_nodes::Tetra,
         &crate::gsm_nodes::Gsm,

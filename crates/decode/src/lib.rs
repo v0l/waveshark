@@ -117,6 +117,7 @@ pub mod wefax;
 pub mod whiten;
 pub mod wifi;
 pub mod wmbus;
+pub mod ysf;
 pub mod zigbee;
 pub mod zwave;
 

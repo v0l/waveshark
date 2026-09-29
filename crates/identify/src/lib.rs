@@ -67,6 +67,7 @@ pub mod walksnail;
 pub mod wefax;
 pub mod wifi;
 pub mod wmbus;
+pub mod ysf;
 pub mod zwave;
 
 use common::C32;
@@ -227,6 +228,7 @@ pub fn all() -> &'static [&'static dyn Signal] {
         &m17::M17,
         &dmr::Dmr,
         &p25::P25,
+        &ysf::Ysf,
         &nxdn::Nxdn,
         &tetra::Tetra,
         &gsm::Gsm,

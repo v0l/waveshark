@@ -97,6 +97,7 @@ pub mod wfm;
 pub mod wifi_nodes;
 pub mod wigle_nodes;
 pub mod wmbus_nodes;
+pub mod ysf_nodes;
 pub mod zwave_nodes;
 
 pub use acars_nodes::AcarsNode;
@@ -292,6 +293,7 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (tetra_nodes::DESC, tetra_nodes::build),
     (dmr_nodes::DESC, dmr_nodes::build),
     (p25_nodes::DESC, p25_nodes::build),
+    (ysf_nodes::DESC, ysf_nodes::build),
     (nxdn_nodes::DESC, nxdn_nodes::build),
     (pocsag_nodes::DESC, pocsag_nodes::build),
     (flex_nodes::DESC, flex_nodes::build),

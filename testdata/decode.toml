@@ -601,10 +601,14 @@ license = "unstated"
 license_source = "SDRangel, sdrangel.org/iq-files dsd.zip, converted and re-hosted"
 description = """
 16 seconds of Yaesu System Fusion speech on 145.6875 MHz, recorded on 2
-December 2021, SDRangel's digital speech example whole. C4FM at 4800 baud.
-The rate SDRangel wrote is 74999 S/s and is kept as written.
+December 2021, SDRangel's digital speech example whole. C4FM at 4800 baud,
+voice and data mode 2. The rate SDRangel wrote is 74999 S/s and is kept as
+written. G1RCE through the GB3XP repeater, which the header and the data
+channel both name; the radio IDs the Yaesu sets beside them are in there too.
 
-There is no System Fusion decoder, and the receiver reads nothing from it.
+76 frames of 100 ms from header to terminator, each behind its frame
+information channel's CRC. A System Fusion channel tuned to it reads all 76;
+an auto block reads 71.
 """
 
 scanners = """
@@ -613,7 +617,13 @@ range = 145.6 - 145.8 MHz
 front = auto
 """
 
-rows = 0
+rows = 71
+
+[[capture.read]]
+protocol = "ysf"
+rows = 71
+checked = true
+subjects = ["G1RCE"]
 
 [[capture]]
 name = "graves_iss_143.05M_6k.cs16"

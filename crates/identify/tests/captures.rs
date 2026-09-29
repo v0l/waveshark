@@ -769,3 +769,13 @@ fn niton_navtex_is_read_as_its_ten_bulletins() {
         text[1]
     );
 }
+
+#[test]
+fn a_fusion_over_through_gb3xp_names_g1rce() {
+    let Some(buf) = fixture("ysf_145.6875M_74.999k.cs16") else { return };
+    let got = identify::identify(&buf.samples, buf.rate.as_f64(), buf.center.as_f64())
+        .expect("System Fusion");
+    assert_eq!(got.protocol, "ysf");
+    assert_eq!(got.frames, 70);
+    assert_eq!(got.identities, ["G1RCE"]);
+}
