@@ -85,7 +85,9 @@ impl SubBand {
     /// left for its own audio decimation to land on a whole number.
     fn plan(band: (f64, f64), span_rate: f64, min_rate: f64) -> Self {
         let (lo, hi) = band;
-        let center = ((lo + hi) / 2.0 / SUBBAND_GRID_HZ).round() * SUBBAND_GRID_HZ;
+        let snapped = ((lo + hi) / 2.0 / SUBBAND_GRID_HZ).round() * SUBBAND_GRID_HZ;
+        let snapped_need = 2.0 * (lo - snapped).abs().max((hi - snapped).abs());
+        let center = if snapped_need > span_rate { (lo + hi) / 2.0 } else { snapped };
         // Measured from the snapped centre, so the snap cannot push an edge
         // of the wanted band outside what is kept.
         let need = 2.0 * (lo - center).abs().max((hi - center).abs());
@@ -5449,6 +5451,17 @@ impl nodes::Ring for RecordRing {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn a_band_in_a_span_narrower_than_the_grid_is_cut_where_it_is() {
+        let sub = SubBand::plan((145_813_000.0, 145_837_000.0), 24_000.0, 0.0);
+        assert_eq!(sub.center, 145_825_000.0);
+        assert_eq!(sub.factor, 1);
+        assert!(sub.is_whole_span(145_825_000.0));
+
+        let sub = SubBand::plan((433_050_000.0, 434_790_000.0), 2_400_000.0, 0.0);
+        assert_eq!(sub.center, 433_900_000.0);
+    }
 
     struct StuckOnDrop(Option<crossbeam_channel::Receiver<()>>);
 

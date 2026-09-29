@@ -3093,7 +3093,7 @@ fn fresh(id: u64, freq: f64, mode: ChanMode, label: Option<String>) -> Channel {
 /// repeater recalled without its shift is a channel working simplex on the
 /// repeater's output, where nobody is listening. Levels and squelch are the
 /// strip's and are set against the signal on the day.
-fn recalled(id: u64, s: &crate::memory::Saved) -> Channel {
+pub(crate) fn recalled(id: u64, s: &crate::memory::Saved) -> Channel {
     let label = match s.label.trim().is_empty() {
         true => None,
         false => Some(s.label.clone()),
@@ -3109,7 +3109,7 @@ fn recalled(id: u64, s: &crate::memory::Saved) -> Channel {
 
 /// The whole channel list as the radio takes it: offsets from wherever the
 /// receiver is now, and nothing the strip keeps for itself.
-fn specs_of(channels: &[Channel], center: f64) -> Vec<ChannelSpec> {
+pub(crate) fn specs_of(channels: &[Channel], center: f64) -> Vec<ChannelSpec> {
     channels
         .iter()
         .filter(|c| c.on)

@@ -1280,3 +1280,40 @@ Gateway 1 is the one the devices drove past, from 38 m to 1.6 km. Gateways 2
 and 3 were only ever heard from 2.1 km and 4.2 km away and never approached,
 which is the other half of the test.
 """
+
+[[capture]]
+name = "dab_bbc_12b_225.648M_2048k.cs16"
+sha256 = "90c59f420046e45638ecfa388c191a3f8409443f1389514ca5d7dc8c63e97dbb"
+url = "https://nostr.download/90c59f420046e45638ecfa388c191a3f8409443f1389514ca5d7dc8c63e97dbb.xz"
+compression = "xz"
+license = "unstated"
+license_source = "SDRangel, sdrangel.org/iq-files dab.zip, cut and converted and re-hosted"
+description = """
+Not this project's recording: five seconds of the BBC National DAB
+multiplex on block 12B, 225.648 MHz, near London on 16 December 2021, from
+five seconds into SDRangel's DAB example. Converted from the WAV's data
+chunk at its own 2.048 MS/s.
+
+`crates/identify/tests/captures.rs` reads the ensemble, BBC National DAB,
+and its eleven services by id and label. The same file through a DAB decode
+channel in the receiver puts nothing on the bus, because the node emits the
+ensemble and its services as events and nothing collects them.
+"""
+
+[[capture]]
+name = "wfm_london_99M_4000k.cs16"
+sha256 = "4fb6b149310e54ac90ae3efad965f8ba000b00ef56d47ac0694ccf30ea5d96d5"
+url = "https://nostr.download/4fb6b149310e54ac90ae3efad965f8ba000b00ef56d47ac0694ccf30ea5d96d5.xz"
+compression = "xz"
+license = "unstated"
+license_source = "SDRangel, sdrangel.org/iq-files bfm.zip, cut and converted and re-hosted"
+description = """
+Not this project's recording: five seconds of 97 to 101 MHz near London on
+16 December 2021, from five seconds into SDRangel's broadcast FM example.
+Converted from the WAV's data chunk at its own 4 MS/s.
+
+Six stations in one span. `crates/app/src/radio/tests/captures.rs` tunes a
+WFM channel to five of them and pins what each one's RDS named: LBC on
+97.3, Radio 1 on 98.5 and again on 98.8 with its identifier but not its
+name, KISS on 100.0 and Classic on 100.6.
+"""

@@ -243,6 +243,63 @@ fn a_band_iii_recording_is_the_melbourne_ensemble_welle_io_2_4_read() {
     assert_eq!(services, theirs, "welle.io 2.4 on the same three seconds");
 }
 
+#[test]
+fn a_band_iii_recording_is_the_bbc_national_multiplex() {
+    let Some(buf) = fixture("dab_bbc_12b_225.648M_2048k.cs16") else { return };
+    let (rate, center) = (buf.rate.as_f64(), buf.center.as_f64());
+    let got = identify::identify(&buf.samples, rate, center).expect("an ensemble");
+    assert_eq!(got.protocol, "dab");
+    assert_eq!(got.frames, 12, "the ensemble and its 11 services");
+    assert_eq!(got.center_hz, 225_648_000.0);
+
+    let rows = identify::dab::DabProtocol.read(&buf.samples, rate, center).rows;
+    let named = |row: &common::packet::Proto| {
+        row.facts.iter().find_map(|f| match f {
+            common::packet::Fact::Named(n) => Some(n.label.clone()),
+            _ => None,
+        })
+    };
+    let ensemble: Vec<_> = rows.iter().filter(|r| r.kind == "ensemble").collect();
+    assert_eq!(ensemble.len(), 1);
+    assert_eq!(named(ensemble[0]).as_deref(), Some("BBC National DAB"));
+    let mut services: Vec<(String, String)> = rows
+        .iter()
+        .filter(|r| r.kind == "audio_service")
+        .map(|r| {
+            (r.subject.as_ref().expect("a service id").id.to_string(), named(r).expect("a label"))
+        })
+        .collect();
+    services.sort();
+    assert_eq!(
+        services,
+        [
+            ("C221", "BBC Radio 1"),
+            ("C222", "BBC Radio 2"),
+            ("C223", "BBC Radio 3"),
+            ("C224", "BBC Radio 4"),
+            ("C225", "BBC Radio 5 Live"),
+            ("C228", "BBC R5LiveSportX"),
+            ("C22A", "BBC Radio 1Xtra"),
+            ("C22B", "BBC Radio 6Music"),
+            ("C22C", "BBC Radio 4Extra"),
+            ("C236", "BBC AsianNetwork"),
+            ("C238", "BBC WorldService"),
+        ]
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+    );
+}
+
+#[test]
+fn a_pass_of_the_psat_digipeater_names_four_stations() {
+    let Some(buf) = fixture("ax25_no84_145.825M_24k.cs16") else { return };
+    let got = identify::identify(&buf.samples, buf.rate.as_f64(), buf.center.as_f64())
+        .expect("packet in this recording");
+    assert_eq!(got.protocol, "aprs");
+    assert_eq!(got.frames, 4);
+    assert_eq!(got.center_hz, 145_825_000.0);
+    assert_eq!(got.identities, ["IU3MEY", "PSAT", "DL6AP-7", "2E0SUD"]);
+}
+
 fn nxdn_calls(name: &str) -> Option<(usize, Vec<(String, String, u16)>)> {
     let buf = fixture(name)?;
     let rows = identify::nxdn::Nxdn.read(&buf.samples, buf.rate.as_f64(), buf.center.as_f64()).rows;

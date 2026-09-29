@@ -286,7 +286,7 @@ failing something, is in `AGENTS.md`.
 Each entry also carries a `license`, and
 [`testdata/LICENSE.md`](../testdata/LICENSE.md) holds the terms: CC BY 4.0 for
 everything recorded or generated for this project, with the attribution line
-to use, and the publisher's own terms for the thirteen fixtures that came from
+to use, and the publisher's own terms for the twenty-eight fixtures that came from
 somewhere else.
 
 | fixture | publisher | terms |
@@ -297,6 +297,20 @@ somewhere else.
 | `sstv_martin1_44100.wav` | colaclanth/sstv | GPL-3.0, converted here and re-hosted |
 | `dvbt_hd_429M_9142857.cs8` | Ron Economos, w6rz.net | no terms stated, cut here and re-hosted |
 | `rs41_herstmonceux_405.80024M_31.25k.cs16` | SDRangel | no terms stated, cut here and re-hosted |
+| `adsb_london_1090M_2400k.cu8` | SDRangel | no terms stated, cut and converted here and re-hosted |
+| `ais_london_162M_250k.cs16` | SDRangel | no terms stated, cut and converted here and re-hosted |
+| `airband_london_119.5M_3000k.cs16` | SDRangel | no terms stated, cut and converted here and re-hosted |
+| `apt_noaa18_137.912M_62.5k.cs16` | SDRangel | no terms stated, cut and converted here and re-hosted |
+| `ax25_no84_145.825M_24k.cs16` | SDRangel | no terms stated, converted here and re-hosted |
+| `clocks_msf_dcf77_tdf_0.11M_192k.cs16` | SDRangel | no terms stated, cut and converted here and re-hosted |
+| `dab_bbc_12b_225.648M_2048k.cs16` | SDRangel | no terms stated, cut and converted here and re-hosted |
+| `graves_iss_143.05M_6k.cs16` | SDRangel | no terms stated, converted here and re-hosted |
+| `navtex_niton_0.518M_1.953k.cs16` | SDRangel | no terms stated, converted here and re-hosted |
+| `rtty_dwd_11.039M_2k.cs16` | SDRangel | no terms stated, converted here and re-hosted |
+| `sstv_pd120_iss_145.79544M_250k.cs16` | SDRangel | no terms stated, converted here and re-hosted |
+| `vor_ockham_biggin_115.2M_384k.cs16` | SDRangel | no terms stated, cut and converted here and re-hosted |
+| `wfm_london_99M_4000k.cs16` | SDRangel | no terms stated, cut and converted here and re-hosted |
+| `ysf_145.6875M_74.999k.cs16` | SDRangel | no terms stated, converted here and re-hosted |
 | `dab_melbourne_9a_202.928M_2500k.cs16` | Signal Identification Wiki | no terms stated, cut here and re-hosted |
 | `lte_b20_madrid_806M_30720k.cs8` | Daniel Estévez | CC BY 4.0, requantised here and re-hosted |
 | `nxdn48_453M_48k.cs16` | Signal Identification Wiki | no terms stated, converted here and re-hosted |

@@ -78,6 +78,10 @@ the code is in the commit log.
 ### Fixed
 
 - HackRF cutting the last quarter second off every over.
+- AIS frames heard together listed at -200 dBFS and without their samples.
+- Mode S replies early in a block listed without their samples.
+- Auto scanner blocks crashing the receiver on a span narrower than 100 kHz.
+- Recording names with a centre below 1 MHz, like `clock_0.11M_192k.cs16`, read as a rate.
 - Spectrum on a half duplex radio dropping the last fifth of a second of its own over.
 - Roger beep cut short at the end of an over, and the source heard again after it.
 - Survey device locations landing on the receiver from GPS wander while parked.

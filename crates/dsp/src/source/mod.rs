@@ -484,6 +484,19 @@ mod tests {
     }
 
     #[test]
+    fn a_band_beyond_the_stream_reads_nothing_rather_than_panicking() {
+        let rate = 24_000.0;
+        let mut d = SourceDetector::new(rate, rate, cfg());
+        d.set_band(13_000.0, 37_000.0);
+        let mut opened = 0;
+        for chunk in noise(240_000, 0.1, 5).chunks(4096) {
+            opened +=
+                d.process(chunk).iter().filter(|e| matches!(e, SourceEvent::Opened(_))).count();
+        }
+        assert_eq!(opened, 0);
+    }
+
+    #[test]
     fn nothing_opens_on_noise() {
         let mut d = SourceDetector::new(RATE, RATE, cfg());
         let mut opened = 0;

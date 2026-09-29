@@ -510,3 +510,39 @@ fn a_meshcore_advert_is_found_and_read() {
     );
     assert!(r.snr_db().is_finite() && r.rssi_dbfs().is_finite(), "no level on the row");
 }
+
+#[test]
+fn five_london_stations_name_themselves_over_rds() {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/wfm_london_99M_4000k.cs16");
+    if !p.exists() {
+        eprintln!("skipping: wfm_london_99M_4000k.cs16 absent, run testdata/fetch.sh");
+        return;
+    }
+    let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
+    let tuned = [97.3e6, 98.5e6, 98.8e6, 100.0e6, 100.6e6];
+    let mut plan = replay_plan(&buf, false);
+    plan.fronts.clear();
+    plan.channels = tuned
+        .iter()
+        .zip(1..)
+        .map(|(hz, id)| ChannelSpec {
+            mode: ChanMode::Audio(Demod::Wfm),
+            ..strip_channel(id, hz - buf.center.as_f64())
+        })
+        .collect();
+    let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a receiver");
+    replay_blocks(&mut rx, &buf);
+    let heard: Vec<(Option<u16>, Option<String>)> =
+        rx.channels().iter().map(|c| (c.station.pi, c.station.name.clone())).collect();
+    assert_eq!(
+        heard,
+        [
+            (Some(0xC478), Some("LBC".into())),
+            (Some(0xC201), Some("Radio 1".into())),
+            (Some(0xC201), None),
+            (Some(0xC483), Some("KISS".into())),
+            (Some(0xC2A1), Some("Classic".into())),
+        ]
+    );
+}

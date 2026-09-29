@@ -551,7 +551,7 @@ impl SourceDetector {
     /// reports sensors from outside the band a scanner block declared, and
     /// spends the work to read them.
     pub fn set_band(&mut self, lo_hz: f64, hi_hz: f64) {
-        let lo = self.bin_of(lo_hz).floor().max(0.0) as usize;
+        let lo = (self.bin_of(lo_hz).floor().max(0.0) as usize).min(self.n - 1);
         let hi = self.bin_of(hi_hz).ceil().max(1.0) as usize - 1;
         self.bin_lo = self.bin_lo.max(lo);
         self.bin_hi = self.bin_hi.min(hi.min(self.n - 1));

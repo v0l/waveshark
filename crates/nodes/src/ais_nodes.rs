@@ -97,15 +97,13 @@ impl Simple for AisNode {
         self.frames.clear();
         self.det.process(iq, &mut self.frames);
         let out = o.packets_mut();
-        for f in &self.frames {
+        let read = self
+            .meter
+            .packets(self.frames.iter().map(|f| f.payload.clone()), common::packet::now_us());
+        for (f, p) in self.frames.iter().zip(read) {
             self.accepted += 1;
             let hz = CHANNEL_HZ[(f.channel as usize).min(CHANNEL_HZ.len() - 1)];
-            out.push(
-                self.meter
-                    .packet_now(f.payload.clone())
-                    .at_center(hz as u64)
-                    .checked(common::packet::Integrity::Passed),
-            );
+            out.push(p.at_center(hz as u64).checked(common::packet::Integrity::Passed));
         }
         Ok(())
     }

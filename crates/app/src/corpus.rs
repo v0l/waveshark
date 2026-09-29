@@ -16,6 +16,8 @@ struct Manifest {
 struct Capture {
     name: String,
     rows: Option<usize>,
+    scanners: Option<String>,
+    channels: Option<String>,
     #[serde(default)]
     read: Vec<Read>,
 }
@@ -50,10 +52,24 @@ fn testdata() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata")
 }
 
-fn replay(buf: &common::IqBuf) -> Vec<Reception> {
+fn replay(buf: &common::IqBuf, scanners: Option<&str>, channels: Option<&str>) -> Vec<Reception> {
+    let table = match scanners {
+        Some(added) => {
+            crate::scanners::Scanners::parse(&format!("{}\n{added}", crate::scanners::DEFAULT_TEXT))
+        }
+        None => crate::scanners::Scanners::default(),
+    };
     let mut plan = crate::radio::replay_plan(buf, false);
-    plan.fronts = crate::scanners::Scanners::default()
-        .fronts(crate::scanners::Span::new(buf.center.as_f64(), buf.rate.as_f64()));
+    plan.fronts = table.fronts(crate::scanners::Span::new(buf.center.as_f64(), buf.rate.as_f64()));
+    if let Some(bank) = channels {
+        let tuned: Vec<_> = crate::memory::Memory::parse(bank)
+            .list
+            .iter()
+            .zip(1..)
+            .map(|(saved, id)| crate::ui::recalled(id, saved))
+            .collect();
+        plan.channels = crate::ui::specs_of(&tuned, buf.center.as_f64());
+    }
     let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default())
         .expect("a receiver for the capture");
     crate::radio::replay_blocks(&mut rx, buf)
@@ -239,7 +255,7 @@ fn every_capture_in_decode_toml_reads_as_it_says() {
         let buf = sources::FileSource::open(&path)
             .and_then(|s| s.read_all())
             .unwrap_or_else(|e| panic!("{}: {e}", cap.name));
-        let out = replay(&buf);
+        let out = replay(&buf, cap.scanners.as_deref(), cap.channels.as_deref());
         read += 1;
 
         if let Some(want) = cap.rows

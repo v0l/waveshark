@@ -163,8 +163,9 @@ impl FrameMeter {
         // Trimmed when it holds twice what is kept, not every block: moving
         // the whole ring down by a block on every block was measured to cost
         // more than the decoding it feeds.
-        if self.ring.len() >= 2 * self.keep {
-            let drop = self.ring.len() - self.keep;
+        let hold = if iq.len() > self.keep { self.keep + iq.len() } else { self.keep };
+        if self.ring.len() >= 2 * self.keep && self.ring.len() > hold {
+            let drop = self.ring.len() - hold;
             self.ring.drain(..drop);
             self.base += drop as u64;
         }
@@ -315,6 +316,22 @@ impl FrameMeter {
         self.made(carrier, bytes)
     }
 
+    pub fn packets(
+        &mut self,
+        frames: impl IntoIterator<Item = Vec<u8>>,
+        at_us: u64,
+    ) -> Vec<Packet> {
+        let mut out: Vec<Packet> = Vec::new();
+        for bytes in frames {
+            let p = match out.first() {
+                Some(first) => self.made(first.carrier.clone(), bytes),
+                None => self.packet(bytes, at_us),
+            };
+            out.push(p);
+        }
+        out
+    }
+
     fn made(&self, carrier: common::packet::Carrier, bytes: Vec<u8>) -> Packet {
         let p = Packet::heard(carrier).framed(PacketFrame::of(bytes));
         match self.keying {
@@ -352,6 +369,30 @@ mod tests {
             f.carrier.rssi_dbfs,
             g.carrier.rssi_dbfs
         );
+    }
+
+    #[test]
+    fn frames_read_out_of_one_block_share_its_level_and_samples() {
+        let mut m = FrameMeter::new(1_000_000.0, 162_000_000, 0.1);
+        m.feed(&vec![C32::new(0.01, 0.0); 1000]);
+        m.feed(&vec![C32::new(0.5, 0.0); 1000]);
+        let both = m.packets([vec![1], vec![2]], 1_788_177_600_000_000);
+        assert_eq!(both.len(), 2);
+        for p in &both {
+            assert!(p.carrier.rssi_dbfs > -7.0 && p.carrier.rssi_dbfs < -5.0);
+            assert_eq!(p.carrier.iq.as_ref().map(|q| q.samples.len()), Some(2000));
+        }
+        assert_eq!(both[1].frame.as_ref().map(|f| f.bytes.as_slice()), Some(&[2u8][..]));
+    }
+
+    #[test]
+    fn a_block_longer_than_the_ring_is_kept_whole_with_the_ring_before_it() {
+        let mut m = FrameMeter::new(2_400_000.0, 1_090_000_000, 0.001);
+        m.feed(&vec![C32::new(0.01, 0.0); 16_384]);
+        assert_eq!(m.iq_at(0, 100).map(|q| q.samples.len()), Some(100));
+        m.feed(&vec![C32::new(0.01, 0.0); 16_384]);
+        assert_eq!(m.iq_at(0, 100), None);
+        assert_eq!(m.iq_at(16_384 - 2_400, 100).map(|q| q.samples.len()), Some(100));
     }
 
     /// A packet leaves here complete: nothing downstream may have to fill in

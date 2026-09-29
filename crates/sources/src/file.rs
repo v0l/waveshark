@@ -60,18 +60,19 @@ pub fn parse_filename(path: &Path) -> FileMeta {
 
     let mut center = None;
     let mut rate = None;
-    for tok in stem.split('_') {
-        if let Some(v) = parse_si(tok) {
-            // Frequencies are quoted in Hz and rates in samples per second; a
-            // token ending in `M` is a frequency and one ending in `k` is
-            // usually a rate. Disambiguate by magnitude, which is unambiguous
-            // in practice: no capture is tuned below 1 MHz on these radios and
-            // none is sampled above 100 MS/s.
-            if v >= 1e6 && center.is_none() && tok.ends_with(['M', 'm', 'G', 'g']) {
-                center = Some(Hz(v as u64));
-            } else if v >= LOWEST_RATE && rate.is_none() {
-                rate = Some(Sps(v as u64));
-            }
+    let numbers: Vec<(&str, f64)> =
+        stem.split('_').filter_map(|tok| Some((tok, parse_si(tok)?))).collect();
+    for (i, &(tok, v)) in numbers.iter().enumerate() {
+        let rate_follows = numbers[i + 1..].iter().any(|&(_, r)| r >= LOWEST_RATE);
+        // Frequencies are quoted in Hz and rates in samples per second; a
+        // token ending in `M` is a frequency and one ending in `k` is
+        // usually a rate. Disambiguate by magnitude, which is unambiguous
+        // in practice: no capture is tuned below 1 MHz on these radios and
+        // none is sampled above 100 MS/s.
+        if (v >= 1e6 || rate_follows) && center.is_none() && tok.ends_with(['M', 'm', 'G', 'g']) {
+            center = Some(Hz(v as u64));
+        } else if v >= LOWEST_RATE && rate.is_none() {
+            rate = Some(Sps(v as u64));
         }
     }
     FileMeta { center, rate, format }
@@ -449,6 +450,16 @@ mod tests {
         let m = parse_filename(Path::new("01_FR_1_433.92M_250k.cu8"));
         assert_eq!(m.center, Some(Hz(433_920_000)));
         assert_eq!(m.rate, Some(Sps(250_000)));
+    }
+
+    #[test]
+    fn a_centre_under_a_megahertz_is_a_centre_before_its_rate() {
+        let m = parse_filename(Path::new("clock_0.11M_192k.cs16"));
+        assert_eq!(m.center, Some(Hz(110_000)));
+        assert_eq!(m.rate, Some(Sps(192_000)));
+        let m = parse_filename(Path::new("x_0.5M.cs16"));
+        assert_eq!(m.center, None);
+        assert_eq!(m.rate, Some(Sps(500_000)));
     }
 
     #[test]

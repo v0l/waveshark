@@ -389,3 +389,353 @@ rows = 11
 protocol = "ais"
 on_hz = 162_025_000
 rows = 13
+
+# The captures below are SDRangel's example recordings
+# (https://www.sdrangel.org/iq-files/), converted from its WAV and .sdriq
+# files to cs16 (cu8 for ADS-B, whose samples were 8-bit already) and cut
+# where noted. A 24-bit .sdriq is shifted down to the fewest bits that clip
+# nothing. The centre is the one SDRangel wrote into the file.
+#
+# Where no shipped scanner block covers a recording, `scanners` adds the
+# block an operator would, in the scanner table's own format, and `channels`
+# tunes strip channels in the memory bank's format. What each reads is
+# pinned as it stands, misses and false rows included.
+
+[[capture]]
+name = "adsb_london_1090M_2400k.cu8"
+sha256 = "732fdb31fd577cc0ace90cc6e2a6aa26b234eb10ac0470918168b05792dc3b27"
+url = "https://nostr.download/732fdb31fd577cc0ace90cc6e2a6aa26b234eb10ac0470918168b05792dc3b27.xz"
+compression = "xz"
+license = "unstated"
+license_source = "SDRangel, sdrangel.org/iq-files adsb.zip, cut and converted and re-hosted"
+description = """
+Ten seconds of 1090 MHz near London on 26 November 2021, starting ten
+seconds into SDRangel's ADS-B example. The WAV's samples are 8-bit values
+scaled by 256, so the cu8 here is lossless. It holds the ICAO addresses and
+positions of the aircraft over the south east that afternoon.
+
+A far busier span than the other Mode S captures: 28 aircraft answering
+interrogations, so replies overlap and the preamble detector sees frames on
+top of frames. Besides the Mode S traffic the receiver reads 34
+rows as M17 packets, which is a false decode on a band M17 is never on. It
+is also what showed a reply early in a block leaving without its samples.
+"""
+
+rows = 1985
+
+[[capture.read]]
+protocol = "adsb"
+rows = 1951
+subjects = [
+    "3465d8", "3cefbc", "3e193a", "4007fa", "40624f", "406279", "40650b",
+    "407022", "40756a", "4075a2", "424b95", "43c704", "4401b7", "4402f2",
+    "46b8a2", "490d0b", "49130d", "49328b", "4a0664", "4ca2c9", "4ca788",
+    "4ca809", "4ca92b", "4ca92d", "4ca9cf", "4cafb3", "4d2347", "6a0b8",
+]
+
+[[capture.read]]
+protocol = "m17"
+rows = 34
+
+[[capture]]
+name = "ais_london_162M_250k.cs16"
+sha256 = "a1290d4fe9d64365aed2451ba6d5f46400e60537bb35ed7d1f508ab17b2706c5"
+url = "https://nostr.download/a1290d4fe9d64365aed2451ba6d5f46400e60537bb35ed7d1f508ab17b2706c5.xz"
+compression = "xz"
+license = "unstated"
+license_source = "SDRangel, sdrangel.org/iq-files ais.zip, cut and converted and re-hosted"
+description = """
+Twenty seconds of both AIS channels from near London on 4 May 2021, from 100
+seconds into SDRangel's 431 second AIS example. The .sdriq is 24-bit and is
+shifted down by eight bits here. It holds the MMSIs and positions of the
+vessels on the Thames that day.
+
+The strong counterpart to the Nijmegen capture: the same decoder at 250 kS/s
+with the signal well above the least significant bit, and 33 vessels and a
+base station rather than nine vessels. Both channels often carry a frame in
+the same block, which is what showed the second frame of a block leaving
+without its level or its samples.
+"""
+
+rows = 185
+
+[[capture.read]]
+protocol = "ais"
+rows = 185
+checked = true
+subjects = [
+    "209207000", "209361000", "209792000", "212882000", "229802000",
+    "232003119", "232003580", "2320061", "232008120", "232021171",
+    "232026551", "232033454", "235013782", "235055028", "235055709",
+    "235078641", "235080632", "235082675", "235091146", "235093883",
+    "235115656", "236529000", "244125000", "245176000", "246359000",
+    "249444000", "249445000", "249673000", "255806279", "256947000",
+    "277574000", "305425000", "305811000", "312417000",
+]
+
+[[capture.read]]
+protocol = "ais"
+on_hz = 161_975_000
+rows = 95
+
+[[capture.read]]
+protocol = "ais"
+on_hz = 162_025_000
+rows = 90
+
+[[capture]]
+name = "ax25_no84_145.825M_24k.cs16"
+sha256 = "fd5f4d32d3897ab2ced7c461ca28d3b03c861f9192c06b7c04198e79b847528a"
+url = "https://nostr.download/fd5f4d32d3897ab2ced7c461ca28d3b03c861f9192c06b7c04198e79b847528a.xz"
+compression = "xz"
+license = "unstated"
+license_source = "SDRangel, sdrangel.org/iq-files no84.zip, converted and re-hosted"
+description = """
+51 seconds of the NO-84 (PSAT) APRS digipeater on 145.825 MHz, recorded on
+15 December 2021, SDRangel's packet example whole. The callsigns and
+positions in it are the amateur stations that went through the satellite on
+that pass.
+
+About nine bursts at 15 to 20 dB, moving with the pass's Doppler. The
+identify crate reads four frames from IU3MEY, PSAT, DL6AP-7 and 2E0SUD; the
+receiver, finding the bursts with an auto block, reads one.
+"""
+
+scanners = """
+[PSAT]
+range = 145.81 - 145.84 MHz
+front = auto
+"""
+
+rows = 1
+
+[[capture.read]]
+protocol = "aprs"
+rows = 1
+subjects = ["IU3MEY"]
+
+[[capture]]
+name = "rtty_dwd_11.039M_2k.cs16"
+sha256 = "3a8d4565fcf408ffea00d7fe7266c45fb88f9c2f9d4758ea73c0d82bb02a1ab1"
+url = "https://nostr.download/3a8d4565fcf408ffea00d7fe7266c45fb88f9c2f9d4758ea73c0d82bb02a1ab1.xz"
+compression = "xz"
+license = "unstated"
+license_source = "SDRangel, sdrangel.org/iq-files rtty.zip, converted and re-hosted"
+description = """
+400 seconds of the Deutscher Wetterdienst's RTTY weather broadcast on
+11.039 MHz, recorded on 28 February 2023, SDRangel's RTTY example whole. 50
+baud with a 450 Hz shift, the tones either side of the centre.
+
+The receiver reads no RTTY from it: nothing places a teleprinter at
+11.039 MHz, and 450 Hz is not one of the shifts it tries. The auto block
+finds the signal and names it an unknown.
+"""
+
+scanners = """
+[DWD]
+range = 11.03 - 11.05 MHz
+front = auto
+"""
+
+rows = 1
+
+[[capture.read]]
+protocol = "rtty"
+rows = 0
+
+[[capture]]
+name = "navtex_niton_0.518M_1.953k.cs16"
+sha256 = "4d0016e50d72cc80660ac016b3ef2e7e266c19d9cf4fbfe6d3f86585f917806d"
+url = "https://nostr.download/4d0016e50d72cc80660ac016b3ef2e7e266c19d9cf4fbfe6d3f86585f917806d.xz"
+compression = "xz"
+license = "unstated"
+license_source = "SDRangel, sdrangel.org/iq-files navtex.zip, converted and re-hosted"
+description = """
+481 seconds of NAVTEX navigational warnings from Niton on 518 kHz, recorded
+on 21 February 2023, SDRangel's NAVTEX example whole. SITOR-B, 100 baud with
+a 170 Hz shift. The WAV carries no centre, so the 518 kHz here is the NAVTEX
+channel the tones sit either side of.
+
+There is no NAVTEX decoder, so the receiver reads it as one unknown carrier.
+"""
+
+scanners = """
+[NAVTEX]
+range = 517 - 519 kHz
+front = auto
+"""
+
+rows = 1
+
+[[capture]]
+name = "ysf_145.6875M_74.999k.cs16"
+sha256 = "5a5fb011d6982c712f0f8bb577284112162fa241574769f36ebbaa5ab5b262b7"
+url = "https://nostr.download/5a5fb011d6982c712f0f8bb577284112162fa241574769f36ebbaa5ab5b262b7.xz"
+compression = "xz"
+license = "unstated"
+license_source = "SDRangel, sdrangel.org/iq-files dsd.zip, converted and re-hosted"
+description = """
+16 seconds of Yaesu System Fusion speech on 145.6875 MHz, recorded on 2
+December 2021, SDRangel's digital speech example whole. C4FM at 4800 baud.
+The rate SDRangel wrote is 74999 S/s and is kept as written.
+
+There is no System Fusion decoder, and the receiver reads nothing from it.
+"""
+
+scanners = """
+[2 m]
+range = 145.6 - 145.8 MHz
+front = auto
+"""
+
+rows = 0
+
+[[capture]]
+name = "graves_iss_143.05M_6k.cs16"
+sha256 = "4d1d45188c5c7632e98f80853057d4720056990c1bfa90d7c2184c4890541194"
+url = "https://nostr.download/4d1d45188c5c7632e98f80853057d4720056990c1bfa90d7c2184c4890541194.xz"
+compression = "xz"
+license = "unstated"
+license_source = "SDRangel, sdrangel.org/iq-files radar.zip, converted and re-hosted"
+description = """
+57 seconds of the GRAVES space surveillance radar on 143.05 MHz reflected
+off the International Space Station, recorded on 30 January 2021, SDRangel's
+radar example whole. The echo is a carrier sweeping with the station's
+Doppler.
+
+Nothing in it is a packet, and the receiver reads nothing.
+"""
+
+scanners = """
+[GRAVES]
+range = 143.04 - 143.06 MHz
+front = auto
+"""
+
+rows = 0
+
+[[capture]]
+name = "apt_noaa18_137.912M_62.5k.cs16"
+sha256 = "9edd50882dd6761f3abb226dff93092445f64f929413f7739f34867a7beaf4f6"
+url = "https://nostr.download/9edd50882dd6761f3abb226dff93092445f64f929413f7739f34867a7beaf4f6.xz"
+compression = "xz"
+license = "unstated"
+license_source = "SDRangel, sdrangel.org/iq-files apt.zip, cut and converted and re-hosted"
+description = """
+120 seconds of NOAA 18's APT picture on 137.9125 MHz, recorded on 27
+November 2021, from 215 seconds into SDRangel's 549 second example, which is
+the middle of the pass. 240 lines of picture.
+
+The receiver reads no APT from it: the auto block measures the downlink and
+names it an unknown twice.
+"""
+
+scanners = """
+[NOAA APT]
+range = 137.88 - 137.94 MHz
+front = auto
+"""
+
+rows = 2
+
+[[capture.read]]
+protocol = "apt"
+rows = 0
+
+[[capture]]
+name = "sstv_pd120_iss_145.79544M_250k.cs16"
+sha256 = "b9af9ad309939f71ff0583563cf0b05fb46f17562151579b47b40b88fa834916"
+url = "https://nostr.download/b9af9ad309939f71ff0583563cf0b05fb46f17562151579b47b40b88fa834916.xz"
+compression = "xz"
+license = "unstated"
+license_source = "SDRangel, sdrangel.org/iq-files sstv.zip, converted and re-hosted"
+description = """
+132 seconds of a PD120 SSTV picture from the International Space Station on
+145.8 MHz, recorded on 21 September 2022, SDRangel's SSTV example whole: one
+PD120 frame is 126 seconds.
+
+The receiver has no PD modes and reads no picture. The auto block names the
+FM downlink an unknown twice.
+"""
+
+scanners = """
+[ISS]
+range = 145.7 - 145.9 MHz
+front = auto
+"""
+
+rows = 2
+
+[[capture.read]]
+protocol = "sstv"
+rows = 0
+
+[[capture]]
+name = "vor_ockham_biggin_115.2M_384k.cs16"
+sha256 = "2ea36165ea047b125e50b556c6fd57a56e35859909e17d55241072e8383b1110"
+url = "https://nostr.download/2ea36165ea047b125e50b556c6fd57a56e35859909e17d55241072e8383b1110.xz"
+compression = "xz"
+license = "unstated"
+license_source = "SDRangel, sdrangel.org/iq-files vor.zip, cut and converted and re-hosted"
+description = """
+Ten seconds of the Ockham (115.3 MHz) and Biggin (115.1 MHz) VORs, recorded
+on 23 November 2020, from ten seconds into SDRangel's VOR example. The
+.sdriq is 24-bit and is shifted down by two bits here.
+
+There is no VOR decoder, and the receiver reads nothing.
+"""
+
+scanners = """
+[VOR]
+range = 108 - 118 MHz
+front = auto
+"""
+
+rows = 0
+
+[[capture]]
+name = "clocks_msf_dcf77_tdf_0.11M_192k.cs16"
+sha256 = "7bde17a4138e73a4e0d3fba7bd7b21cfa405f082971f9dc55bc49fc453fd094f"
+url = "https://nostr.download/7bde17a4138e73a4e0d3fba7bd7b21cfa405f082971f9dc55bc49fc453fd094f.xz"
+compression = "xz"
+license = "unstated"
+license_source = "SDRangel, sdrangel.org/iq-files clock.zip, cut and converted and re-hosted"
+description = """
+Ten seconds of the long wave time signals, recorded on 28 November 2021,
+from ten seconds into SDRangel's radio clock example: MSF at 60 kHz, DCF77
+at 77.5 kHz and TDF at 162 kHz, with the tuner at 110 kHz. The .sdriq is
+24-bit and is shifted down by five bits here. A time code takes a minute,
+so ten seconds holds the second markers and not a whole frame.
+
+There is no time signal decoder, and the receiver reads nothing.
+"""
+
+scanners = """
+[LF]
+range = 40 - 200 kHz
+front = auto
+"""
+
+rows = 0
+
+[[capture]]
+name = "airband_london_119.5M_3000k.cs16"
+sha256 = "14c4ad16f48e9520d8731a856bd62aed01518f1be766eb0ee2a20b3b569260a6"
+url = "https://nostr.download/14c4ad16f48e9520d8731a856bd62aed01518f1be766eb0ee2a20b3b569260a6.xz"
+compression = "xz"
+license = "unstated"
+license_source = "SDRangel, sdrangel.org/iq-files airband.zip, cut and converted and re-hosted"
+description = """
+Six seconds of the VHF airband around London on 16 December 2021, from 22
+seconds into SDRangel's airband example: AM voice on 118.955 and 120.4 MHz.
+
+Two AM channels tuned to the voices. Speech is not a packet, so the receiver
+reads nothing onto the bus.
+"""
+
+channels = """
+118.955 MHz AM
+120.4 MHz AM
+"""
+
+rows = 0

@@ -89,8 +89,8 @@ fn ours(e: &Entry) -> bool {
 fn every_capture_says_what_it_may_be_used_for() {
     let decode = parse(&manifest("decode.toml"), "[[capture]]");
     let fixture = parse(&manifest("fixture.toml"), "[[capture]]");
-    assert_eq!(decode.len(), 10, "captures in decode.toml");
-    assert_eq!(fixture.len(), 47, "captures in fixture.toml");
+    assert_eq!(decode.len(), 22, "captures in decode.toml");
+    assert_eq!(fixture.len(), 49, "captures in fixture.toml");
 
     let all = published();
     for entry in &all {
@@ -109,20 +109,34 @@ fn every_capture_says_what_it_may_be_used_for() {
         names,
         [
             "acars_acarsdec_12500.wav",
+            "adsb_london_1090M_2400k.cu8",
             "aero_oqpsk_1546M_48k.cs16",
+            "airband_london_119.5M_3000k.cs16",
+            "ais_london_162M_250k.cs16",
+            "apt_noaa18_137.912M_62.5k.cs16",
+            "ax25_no84_145.825M_24k.cs16",
+            "clocks_msf_dcf77_tdf_0.11M_192k.cs16",
+            "dab_bbc_12b_225.648M_2048k.cs16",
             "dab_melbourne_9a_202.928M_2500k.cs16",
             "drm_b_3.965M_48k.cs16",
             "dvbt_hd_429M_9142857.cs8",
             "eas_tor_kilx_22050.wav",
             "ft8_wsjtx_210703_133430_12000.wav",
+            "graves_iss_143.05M_6k.cs16",
             "lte_b20_madrid_806M_30720k.cs8",
+            "navtex_niton_0.518M_1.953k.cs16",
             "nxdn48_453M_48k.cs16",
             "nxdn96_453M_48k.cs16",
             "rs41_herstmonceux_405.80024M_31.25k.cs16",
+            "rtty_dwd_11.039M_2k.cs16",
             "sstv_martin1_44100.wav",
+            "sstv_pd120_iss_145.79544M_250k.cs16",
             "stdc_egc_1541.45M_48k.cs16",
             "survey/lora_salvora.csv",
             "vdl2_model_136.975M_1050k.wav",
+            "vor_ockham_biggin_115.2M_384k.cs16",
+            "wfm_london_99M_4000k.cs16",
+            "ysf_145.6875M_74.999k.cs16",
         ]
     );
     let stated: Vec<&Licence> = foreign.iter().map(|(_, l, _)| *l).collect();
@@ -135,15 +149,29 @@ fn every_capture_says_what_it_may_be_used_for() {
             &Licence::Unstated,
             &Licence::Unstated,
             &Licence::Unstated,
+            &Licence::Unstated,
+            &Licence::Unstated,
+            &Licence::Unstated,
+            &Licence::Unstated,
+            &Licence::Unstated,
+            &Licence::Unstated,
+            &Licence::Unstated,
             &Licence::Upstream("GPL-3.0".into()),
+            &Licence::Unstated,
             &Licence::CcBy4,
             &Licence::Unstated,
             &Licence::Unstated,
             &Licence::Unstated,
+            &Licence::Unstated,
+            &Licence::Unstated,
             &Licence::Upstream("GPL-3.0".into()),
+            &Licence::Unstated,
             &Licence::Unstated,
             &Licence::CcBy4,
             &Licence::Upstream("GPL-3.0".into()),
+            &Licence::Unstated,
+            &Licence::Unstated,
+            &Licence::Unstated,
         ]
     );
     for (name, _, source) in &foreign {
@@ -155,7 +183,7 @@ fn every_capture_says_what_it_may_be_used_for() {
 fn nothing_of_somebody_elses_is_re_hosted_without_naming_them() {
     let all = published();
     let rehosted: Vec<&Entry> = all.iter().filter(|e| e.url.contains("nostr.download")).collect();
-    assert_eq!(rehosted.len(), 53, "captures re-hosted on nostr.download");
+    assert_eq!(rehosted.len(), 67, "captures re-hosted on nostr.download");
     for entry in &rehosted {
         assert!(
             ours(entry) || entry.source.is_some(),
