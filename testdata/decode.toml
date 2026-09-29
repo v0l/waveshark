@@ -727,16 +727,22 @@ license_source = "SDRangel, sdrangel.org/iq-files vor.zip, cut and converted and
 description = """
 Eleven seconds of the Ockham (115.3 MHz) and Biggin (115.1 MHz) VORs,
 recorded on 23 November 2020, from 4.5 seconds into SDRangel's VOR example,
-which is where Ockham keys its identifier. The .sdriq is 24-bit and is
+which is where both key their identifiers. The .sdriq is 24-bit and is
 shifted down by two bits here.
 
-The receiver reads a radial off each every five seconds: about 91 degrees
-from Ockham and 254 to 262 from Biggin, and reads OCK off Ockham's 1020 Hz
-tone. Where the recording was made is not published, so the radials are
-checked against each other rather than a map: due east of Ockham and west
-south west of Biggin cross in south west London, and the other sign
-convention puts the receiver west of one beacon and east of the other at
-once. Biggin keys its identifier here too, too weakly to read.
+A radial off each every five seconds, about 91 degrees from Ockham and 254
+to 262 from Biggin, and OCK and BIG off their 1020 Hz tones; each
+identifier is a row of its own with the radial it was heard with. Where the
+recording was made is not published, so the radials are checked against
+each other rather than a map: due east of Ockham and west south west of
+Biggin cross in south west London, and the other sign convention puts the
+receiver west of one beacon and east of the other at once.
+
+Under the auto block, Biggin's channel passes from the source that found it
+to the channel kept for it after its identifier has begun, and an
+identifier heard from the middle is not read, so this reads Biggin's radial
+and not its name. `crates/identify/tests/captures.rs` reads both names off
+channels on the two beacons.
 """
 
 scanners = """
@@ -745,16 +751,16 @@ range = 108 - 118 MHz
 front = auto
 """
 
-rows = 3
+rows = 4
 
 [[capture.read]]
 protocol = "vor"
-rows = 3
+rows = 4
 
 [[capture.read]]
 protocol = "vor"
 on_hz = 115_300_856
-rows = 2
+rows = 3
 subjects = ["OCK"]
 
 [[capture]]

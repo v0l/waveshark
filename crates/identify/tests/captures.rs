@@ -798,11 +798,11 @@ fn ockham_and_biggin_put_the_receiver_on_crossing_radials() {
         (radials, named)
     };
     let ((ockham, ock), (biggin, big)) = (read(115_300_000.0), read(115_100_000.0));
-    assert_eq!((ockham.len(), biggin.len()), (2, 2));
+    assert_eq!((ockham.len(), biggin.len()), (3, 3));
     assert!(ockham.iter().all(|r| (88.0..=94.0).contains(r)), "Ockham {ockham:?}");
     assert!(biggin.iter().all(|r| (248.0..=264.0).contains(r)), "Biggin {biggin:?}");
-    assert_eq!(ock, ["OCK"]);
-    assert_eq!(big, Vec::<String>::new());
+    assert_eq!(ock, ["OCK", "OCK"]);
+    assert_eq!(big, ["BIG"]);
 }
 
 #[test]

@@ -58,6 +58,7 @@ pub struct Reader {
     demod: VorDemod,
     ident: vor::Ident,
     named: Option<String>,
+    last: Option<Bearing>,
 }
 
 impl Reader {
@@ -66,23 +67,27 @@ impl Reader {
             demod: VorDemod::new(rate, WINDOW_S),
             ident: vor::Ident::new(IDENT_BLOCK_S),
             named: None,
+            last: None,
         }
     }
 
     pub fn push(&mut self, narrow: &[C32], out: &mut Vec<Vec<u8>>) {
         let mut bearings: Vec<Bearing> = Vec::new();
         self.demod.push(narrow, &mut bearings);
+        for b in bearings.iter().filter(|b| b.plausible()) {
+            out.push(vor::encode(Some(b.radial_deg), b.reference_hz, self.named.as_deref()));
+            self.last = Some(*b);
+        }
         for level in self.demod.take_ident_levels() {
-            if let Some(id) = self.ident.push(level) {
-                self.named = Some(id);
+            let Some(id) = self.ident.push(level) else { continue };
+            let news = self.named.as_ref() != Some(&id);
+            self.named = Some(id);
+            if news {
+                let (radial, reference) =
+                    self.last.map_or((None, 0.0), |b| (Some(b.radial_deg), b.reference_hz));
+                out.push(vor::encode(radial, reference, self.named.as_deref()));
             }
         }
-        out.extend(
-            bearings
-                .iter()
-                .filter(|b| b.plausible())
-                .map(|b| vor::encode(b.radial_deg, b.reference_hz, self.named.as_deref())),
-        );
     }
 }
 
