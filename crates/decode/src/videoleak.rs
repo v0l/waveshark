@@ -644,8 +644,8 @@ mod tests {
 
     #[cfg(not(target_os = "linux"))]
     fn thread_seconds() -> f64 {
-        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-        START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
+        static START: std::sync::OnceLock<common::time::Instant> = std::sync::OnceLock::new();
+        START.get_or_init(common::time::Instant::now).elapsed().as_secs_f64()
     }
 
     #[test]

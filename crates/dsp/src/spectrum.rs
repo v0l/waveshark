@@ -515,7 +515,7 @@ mod tests {
         for size in [1024usize, 4096, 16384] {
             let mut s = Spectrum::new(size);
             let sig = tone(1 << 20, 100.0, size, 1.0);
-            let t = std::time::Instant::now();
+            let t = common::time::Instant::now();
             s.process(&sig);
             s.take(&[]);
             let secs = t.elapsed().as_secs_f64();

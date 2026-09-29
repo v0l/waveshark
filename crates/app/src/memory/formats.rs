@@ -666,8 +666,8 @@ fn mode_of(s: &str) -> Option<(ChanMode, Option<f64>)> {
 
 /// A file name for an export, with the day in it so two are not the same.
 pub fn export_name() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = common::time::SystemTime::now()
+        .duration_since(common::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
         .unwrap_or(0);
     format!("waveshark-channels-{}.csv", crate::segments::when(now).format("%Y%m%d"))

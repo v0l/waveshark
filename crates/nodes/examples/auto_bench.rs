@@ -69,7 +69,7 @@ fn main() {
     for b in iq[..warm].chunks(block) {
         g.feed_iq(b).unwrap();
     }
-    let t0 = std::time::Instant::now();
+    let t0 = common::time::Instant::now();
     let mut packets = 0usize;
     for b in iq[warm..].chunks(block) {
         g.feed_iq(b).unwrap();

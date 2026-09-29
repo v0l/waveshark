@@ -60,6 +60,13 @@ pub enum Speech {
 impl Speech {
     pub const ALL: [Speech; 3] = [Speech::Local, Speech::Chat, Speech::Server];
 
+    pub fn built(self) -> bool {
+        match self {
+            Self::Local => crate::build::Feature::Tts.built(),
+            Self::Chat | Self::Server => true,
+        }
+    }
+
     pub fn id(self) -> &'static str {
         match self {
             Self::Local => "local",
@@ -254,14 +261,11 @@ impl Default for Config {
 impl Config {
     /// `$XDG_CONFIG_HOME/waveshark/agent`, beside the session.
     pub fn path() -> Option<PathBuf> {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(base.join("waveshark").join("agent"))
+        Some(common::platform::config_dir()?.join("agent"))
     }
 
     pub fn load() -> Self {
-        let text = Self::path().and_then(|p| std::fs::read_to_string(p).ok());
+        let text = Self::path().and_then(|p| common::store::read(&p).ok());
         text.map(|t| Self::parse(&t)).unwrap_or_default()
     }
 
@@ -269,10 +273,7 @@ impl Config {
         let Some(path) = Self::path() else {
             return Err(std::io::Error::other("no config directory"));
         };
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, self.render())
+        common::store::write(&path, &self.render())
     }
 
     pub fn parse(text: &str) -> Self {

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WaveShark</title>
+<style>
+html, body { margin: 0; height: 100%; background: #16181b; overflow: hidden; }
+canvas { width: 100%; height: 100%; display: block; }
+</style>
+</head>
+<body>
+<canvas id="waveshark"></canvas>
+<script type="module">
+import init, { start_app } from "./waveshark.js";
+await init();
+await start_app();
+</script>
+</body>
+</html>

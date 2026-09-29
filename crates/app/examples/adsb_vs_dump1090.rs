@@ -15,6 +15,7 @@
 //! neither side timestamps at the antenna and dump1090's AVR output has no
 //! timestamp at all.
 
+use common::time::{Duration, Instant};
 use common::{C32, Device as _, Hz};
 use decode::adsb::{self, AddressBook};
 use dsp::{ModeSConfig, ModeSDetector, ModeSFrame};
@@ -23,7 +24,6 @@ use std::io::{BufRead, BufReader};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 /// How far apart two reports of the same bytes may be and still be the same
 /// transmission

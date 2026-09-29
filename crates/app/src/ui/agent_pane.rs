@@ -134,7 +134,7 @@ impl AgentView<'_> {
         // been answered can carry on talking, and nothing else on the screen
         // says for how long.
         if self.air.on.is_some()
-            && let Some(left) = self.air.following(&self.chat.config, std::time::Instant::now())
+            && let Some(left) = self.air.following(&self.chat.config, common::time::Instant::now())
         {
             ui.horizontal(|ui| {
                 ui.add_space(12.0);
@@ -199,7 +199,7 @@ impl AgentView<'_> {
                     // it has been telling people on the channel. One card
                     // per over, in the shape a call has everywhere else:
                     // what was heard, what was answered, or why not.
-                    let now = std::time::Instant::now();
+                    let now = common::time::Instant::now();
                     let quiet = !self.air.state.busy();
                     if !self.air.log.is_empty() && !self.chat.turns.is_empty() {
                         ui.add_space(6.0);

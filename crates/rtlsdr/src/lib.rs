@@ -15,6 +15,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use usb::DirectSampling;
 
+pub use usb::USB_IDS;
+
 /// Depth of the buffer queue handed to the consumer. At 2.4 MS/s a 16 KiB
 /// transfer is ~3.4 ms, so 64 is roughly 220 ms of slack before dropping.
 const QUEUE_DEPTH: usize = 64;
@@ -280,7 +282,7 @@ impl Device for RtlSdr {
         let streaming = self.streaming.clone();
         let stream_flag = streaming.clone();
         let loop_reader = reader.clone();
-        std::thread::Builder::new()
+        common::thread::Builder::new()
             .name("rtlsdr-rx".into())
             .spawn(move || convert_loop(loop_reader, ctx, streaming))?;
         Ok(Box::new(RtlStream { rx, dropped, streaming: stream_flag, reader }))

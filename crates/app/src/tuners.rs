@@ -65,14 +65,14 @@ pub struct ServedTunerNode {
     /// When the radio may be tried again. A dongle plugged in after the
     /// receiver started is worth serving, and one somebody else had open is
     /// worth serving when they let it go.
-    next_try: Option<std::time::Instant>,
+    next_try: Option<common::time::Instant>,
 }
 
 /// How long a radio that would not open is left alone.
 ///
 /// Enumerating the USB bus is not free and a fault is usually somebody else
 /// holding the dongle, which they hold for minutes rather than milliseconds.
-const RETRY_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+const RETRY_EVERY: common::time::Duration = common::time::Duration::from_secs(5);
 
 /// One radio, open and being read.
 struct Serving {
@@ -138,13 +138,13 @@ impl ServedTunerNode {
             s.server.remove_stream(s.tuner.id());
             self.serving = None;
             self.fault = Some(why);
-            self.next_try = Some(std::time::Instant::now() + RETRY_EVERY);
+            self.next_try = Some(common::time::Instant::now() + RETRY_EVERY);
         }
         if self.serving.is_some() {
             return;
         }
         match self.next_try {
-            Some(at) if std::time::Instant::now() < at => return,
+            Some(at) if common::time::Instant::now() < at => return,
             _ => {}
         }
         match self.open() {
@@ -158,7 +158,7 @@ impl ServedTunerNode {
                 // a hundred blocks a second would be a log nobody can read.
                 tracing::warn!("iqstream_tuner: {}: {e}", self.radio);
                 self.fault = Some(e.to_string());
-                self.next_try = Some(std::time::Instant::now() + RETRY_EVERY);
+                self.next_try = Some(common::time::Instant::now() + RETRY_EVERY);
             }
         }
     }
@@ -196,7 +196,7 @@ impl ServedTunerNode {
         let blocks = Arc::new(AtomicU64::new(0));
         let ended: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let pumping = (tuner.clone(), stop.clone(), blocks.clone(), ended.clone());
-        std::thread::Builder::new()
+        common::thread::Builder::new()
             .name("iqstream-tuner".into())
             .spawn(move || {
                 let (tuner, stop, blocks, ended) = pumping;
@@ -358,9 +358,9 @@ fn apply(dev: &mut dyn Device, ask: &iqstream::Ask) -> Result<()> {
 /// A block is tens of milliseconds and reading a gain back crosses USB, so
 /// this is the gap between a switch being thrown at the far end and the
 /// readers being told, against a control transfer a block.
-const SETTINGS_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
+const SETTINGS_EVERY: common::time::Duration = common::time::Duration::from_millis(500);
 
-const IDLE_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+const IDLE_POLL: common::time::Duration = common::time::Duration::from_millis(50);
 
 /// Read the radio, hand it out, and move it where a subscriber asked.
 fn pump(
@@ -373,7 +373,7 @@ fn pump(
 ) -> Result<()> {
     let mut rx: Option<Box<dyn RxStream>> = None;
     let mut uc8 = Vec::new();
-    let mut asked_settings = std::time::Instant::now();
+    let mut asked_settings = common::time::Instant::now();
     while !stop.load(Ordering::SeqCst) {
         if tuner.listened() {
             let reading = match &mut rx {
@@ -422,7 +422,7 @@ fn pump(
                 if dev.rate_needs_restart() {
                     let center = dev.center();
                     drop(dev);
-                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    std::thread::sleep(common::time::Duration::from_millis(150));
                     dev = opened_at(entry, r, Some(center))?;
                 } else {
                     dev.set_rate(r)?;
@@ -430,7 +430,7 @@ fn pump(
             } else if let Err(e) = apply(dev.as_mut(), &ask) {
                 tracing::debug!("iqstream_tuner: {}: {e}", ask.name);
             }
-            asked_settings = std::time::Instant::now() - SETTINGS_EVERY;
+            asked_settings = common::time::Instant::now() - SETTINGS_EVERY;
         }
 
         // And what it is set to, which moves without anything here asking:
@@ -438,7 +438,7 @@ fn pump(
         // Only a set that differs is announced, so this is a comparison a
         // block and a message only when something moved.
         if asked_settings.elapsed() >= SETTINGS_EVERY {
-            asked_settings = std::time::Instant::now();
+            asked_settings = common::time::Instant::now();
             tuner.set_sample_rate(dev.rate().0 as u32);
             tuner.set_settings(served_settings(dev.as_ref(), rates));
         }
@@ -490,7 +490,7 @@ impl Simple for ServedTunerNode {
             (None, Some(e)) => {
                 v.push(("fault".into(), e.clone()));
                 if let Some(at) = self.next_try {
-                    let left = at.saturating_duration_since(std::time::Instant::now());
+                    let left = at.saturating_duration_since(common::time::Instant::now());
                     v.push(("retry in".into(), format!("{:.0} s", left.as_secs_f64())));
                 }
             }
@@ -571,8 +571,8 @@ mod tests {
         // But it is due again, because a dongle plugged in after the receiver
         // started is worth serving.
         let due = n.next_try.expect("another attempt");
-        assert!(due > std::time::Instant::now());
-        assert!(due <= std::time::Instant::now() + RETRY_EVERY);
+        assert!(due > common::time::Instant::now());
+        assert!(due <= common::time::Instant::now() + RETRY_EVERY);
         assert!(
             readings.iter().any(|(k, _)| k == "retry in"),
             "the chain view says when: {readings:?}"
@@ -842,10 +842,10 @@ mod tests {
         }
     }
 
-    fn pumped_for(tuner: &Arc<iqstream::Stream>, run: std::time::Duration) -> Result<()> {
+    fn pumped_for(tuner: &Arc<iqstream::Stream>, run: common::time::Duration) -> Result<()> {
         let stop = Arc::new(AtomicBool::new(false));
         let halt = stop.clone();
-        let stopper = std::thread::spawn(move || {
+        let stopper = common::thread::spawn(move || {
             std::thread::sleep(run);
             halt.store(true, Ordering::SeqCst);
         });
@@ -873,7 +873,7 @@ mod tests {
             settings: Vec::new(),
         });
         assert!(
-            pumped_for(&tuner, std::time::Duration::from_millis(200)).is_ok(),
+            pumped_for(&tuner, common::time::Duration::from_millis(200)).is_ok(),
             "the radio was started with nobody to read it"
         );
 
@@ -884,11 +884,11 @@ mod tests {
                 iqstream::ClientConfig { name: "test".into(), bits: 8, ..Default::default() },
             ))
             .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !tuner.listened() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(10));
+        let deadline = common::time::Instant::now() + common::time::Duration::from_secs(5);
+        while !tuner.listened() && common::time::Instant::now() < deadline {
+            std::thread::sleep(common::time::Duration::from_millis(10));
         }
-        let started = pumped_for(&tuner, std::time::Duration::from_secs(1));
+        let started = pumped_for(&tuner, common::time::Duration::from_secs(1));
         assert_eq!(
             started.map_err(|e| e.to_string()),
             Err("not a real radio".to_string()),

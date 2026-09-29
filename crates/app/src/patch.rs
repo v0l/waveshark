@@ -289,11 +289,7 @@ impl Patch {
         if cfg!(test) {
             return None;
         }
-        let base =
-            std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from).or_else(|| {
-                std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
-            })?;
-        Some(base.join("waveshark").join("patch"))
+        Some(common::platform::config_dir()?.join("patch"))
     }
 }
 
@@ -528,14 +524,11 @@ impl Edits {
 
     pub fn save(&self, places: &Places) {
         let Some(path) = Self::path() else { return };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, self.render(places));
+        let _ = common::store::write(&path, &self.render(places));
     }
 
     pub fn load() -> Option<(Self, Places)> {
-        let text = std::fs::read_to_string(Self::path()?).ok()?;
+        let text = common::store::read(&Self::path()?).ok()?;
         Some(Self::parse(&text))
     }
 }

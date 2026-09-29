@@ -2,6 +2,7 @@ pub mod gain;
 pub mod hf;
 
 use airspy_usb as usb;
+
 use common::device::{Choice, Device, DeviceInfo, DriverKind, GainMode, GainStage, RxStream};
 use common::{C32, Error, Hz, IqBuf, Result, SampleFormat, Sps, Toggle, TunerRange};
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
@@ -10,6 +11,7 @@ use gain::{Stages, Table};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+pub use usb::USB_IDS;
 
 const FREQ_MIN: u64 = 24_000_000;
 const FREQ_MAX: u64 = 1_800_000_000;
@@ -376,7 +378,7 @@ impl Device for Airspy {
             seq: 0,
             convert: RealToIq::new(),
         };
-        std::thread::Builder::new()
+        common::thread::Builder::new()
             .name("airspy-rx".into())
             .spawn(move || convert_loop(reader, ctx))?;
         Ok(Box::new(AirspyStream { rx, dropped, stopper }))

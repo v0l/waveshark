@@ -276,7 +276,7 @@ impl TxCapture {
         center: Option<Hz>,
         format: common::SampleFormat,
     ) -> Option<Self> {
-        let len = std::fs::metadata(path).ok().filter(|m| m.is_file())?.len();
+        let len = common::fs::blocking::metadata(path).ok().filter(|m| m.is_file())?.len();
         if rate.0 == 0 {
             return None;
         }
@@ -471,7 +471,7 @@ pub(super) struct Tx {
     /// When the over ended, while the courtesy tone that closes it is still
     /// going out. The radio goes back when the tone has, so a half duplex
     /// radio is not retuned out from under it.
-    pub(super) ending: Option<std::time::Instant>,
+    pub(super) ending: Option<common::time::Instant>,
     pub(super) back_to_receive: bool,
 }
 
@@ -497,7 +497,7 @@ impl Deaf {
 /// The longest an over is held open for its courtesy tone: the longest tone
 /// that can be set ([`nodes::ROGER_MAX_MS`]) and a block or two for the
 /// chain to have made it.
-pub(super) const ROGER_LIMIT: std::time::Duration = std::time::Duration::from_millis(1_500);
+pub(super) const ROGER_LIMIT: common::time::Duration = common::time::Duration::from_millis(1_500);
 
 impl<'a, R: Fn()> RadioThread<'a, R> {
     /// Open the microphone, once, for whatever wants speech.
@@ -564,7 +564,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             return;
         }
         if self.rx.end_over() {
-            self.tx.ending = Some(std::time::Instant::now());
+            self.tx.ending = Some(common::time::Instant::now());
             return;
         }
         self.unkey_now();

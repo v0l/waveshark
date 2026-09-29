@@ -86,7 +86,7 @@ fn thirty_bursting_devices_over_sixteen_megahertz() {
     let mut g =
         build_chain(StreamSpec::iq(rate, Hz(869_525_000)), &[NodeSpec::new("auto")], &registry())
             .unwrap();
-    let t0 = std::time::Instant::now();
+    let t0 = common::time::Instant::now();
     let mut packets = 0;
     for b in iq.chunks(262_144) {
         g.feed_iq(b).unwrap();

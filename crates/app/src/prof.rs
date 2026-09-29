@@ -4,9 +4,9 @@
 //! coarse (one per pipeline stage or UI section) because the instrumentation
 //! itself costs tens of nanoseconds and would dominate anything finer.
 
+use common::time::{Duration, Instant};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
 use tracing::Subscriber;
 use tracing::span::{Attributes, Id};
 use tracing_subscriber::Layer;

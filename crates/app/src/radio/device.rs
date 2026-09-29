@@ -20,7 +20,7 @@ pub(super) fn restart(
     *dev = Box::new(Closed::of(dev.as_ref()));
     // The device needs a moment to release its USB claim; reopening
     // immediately gets "already in use".
-    std::thread::sleep(std::time::Duration::from_millis(150));
+    std::thread::sleep(common::time::Duration::from_millis(150));
     let mut fresh = open()?;
     fresh.set_rate(rate)?;
     // Reopening resets the correction and the converter, and a span change
@@ -137,7 +137,7 @@ impl FrontEnd {
 /// step further out.
 /// Samples worth dropping after a retune: what the tuner says it needs, at
 /// the rate it is sampling.
-pub(super) fn settle_samples(rate: f64, settle: std::time::Duration) -> usize {
+pub(super) fn settle_samples(rate: f64, settle: common::time::Duration) -> usize {
     (rate * settle.as_secs_f64()).max(0.0) as usize
 }
 
@@ -148,12 +148,12 @@ pub(super) fn settle_samples(rate: f64, settle: std::time::Duration) -> usize {
 /// takes roughly a fifth of the time and the spectrum keeps updating; issuing
 /// one per frame instead leaves nothing over to read with and the display
 /// freezes for as long as the drag lasts.
-pub(super) const MIN_TUNE_GAP: std::time::Duration = std::time::Duration::from_millis(120);
+pub(super) const MIN_TUNE_GAP: common::time::Duration = common::time::Duration::from_millis(120);
 
 /// Overridable so the benchmark can measure what happens without the spacing.
-pub(super) fn tune_gap() -> std::time::Duration {
+pub(super) fn tune_gap() -> common::time::Duration {
     match std::env::var("SR_TUNE_GAP_MS").ok().and_then(|v| v.parse().ok()) {
-        Some(ms) => std::time::Duration::from_millis(ms),
+        Some(ms) => common::time::Duration::from_millis(ms),
         None => MIN_TUNE_GAP,
     }
 }

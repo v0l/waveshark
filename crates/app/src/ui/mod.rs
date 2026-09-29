@@ -107,7 +107,7 @@ pub struct App {
     scripts: scripts_pane::ScriptsState,
     /// When the `.sub` file being keyed from the scripts panel has played,
     /// so the key comes back up without the operator holding anything.
-    sub_until: Option<std::time::Instant>,
+    sub_until: Option<common::time::Instant>,
     /// Where the radio transmits, or `None` for one that does not.
     tx_reach: Option<(f64, f64)>,
     sats: state::SatsState,
@@ -127,7 +127,7 @@ pub struct App {
     /// else that waits on a network later. One per application rather than
     /// one per view, so a second view that needs it borrows a handle instead
     /// of standing up threads of its own.
-    rt: tokio::runtime::Runtime,
+    rt: crate::task::Spawner,
     /// What the panes asked the receiver for this frame, sent once drawing
     /// is over.
     cmds: Vec<Cmd>,
@@ -136,7 +136,7 @@ pub struct App {
     err: Option<String>,
     /// When `err` was set, so it can fade rather than stay until the next
     /// one replaces it.
-    err_at: Option<std::time::Instant>,
+    err_at: Option<common::time::Instant>,
 
     center: f64,
     rate: f64,
@@ -148,7 +148,9 @@ pub struct App {
     devices: Vec<crate::devices::Entry>,
     /// The open-a-capture dialog, while it is up. It runs on its own thread
     /// so the receiver keeps painting behind it.
-    picking: Option<poll_promise::Promise<Option<std::path::PathBuf>>>,
+    picking: Option<
+        poll_promise::Promise<Option<Result<crate::devices::Capture, settings::CaptureEdit>>>,
+    >,
     /// How the capture being replayed is to be cut, and the cut in progress.
     trim: settings::TrimEdit,
     trimming: Option<poll_promise::Promise<std::result::Result<sources::Clipped, String>>>,
@@ -173,7 +175,7 @@ pub struct App {
     /// Where bursts are being written and how much may be written, when
     /// recording.
     record_dir: Option<(std::path::PathBuf, Option<u64>)>,
-    shot_at: Option<std::time::Instant>,
+    shot_at: Option<common::time::Instant>,
     shot_sent: bool,
     /// Start the radio on the first frame, rather than waiting for a click.
     autostart: bool,
@@ -195,7 +197,7 @@ pub struct App {
     accuracy_m: Option<f64>,
     /// When the radio last delivered a spectrum, for noticing that it has
     /// stopped.
-    last_frame: Option<std::time::Instant>,
+    last_frame: Option<common::time::Instant>,
     /// What the radio is set to, as the operator set it. The one record every
     /// route to a radio setting writes and reads; see
     /// [`crate::session::RadioSettings`].
@@ -348,7 +350,7 @@ const SUB_CHANNEL: &str = "SUB";
 
 /// Carrier held past the end of the file, so the last gap is played out
 /// rather than cut off by the key coming up on the final mark.
-const SUB_TAIL: std::time::Duration = std::time::Duration::from_millis(120);
+const SUB_TAIL: common::time::Duration = common::time::Duration::from_millis(120);
 
 /// The window a set of readings wants drawn against: a floor under the
 /// quiet bins and a ceiling over the loud ones, or `None` for readings with
@@ -494,6 +496,26 @@ impl View {
 
     const COUNT: usize = View::ALL.len();
 
+    fn built(self) -> bool {
+        match self {
+            View::Transcript => crate::build::Feature::Stt.built(),
+            View::Devices | View::Trilateration => crate::build::Feature::Survey.built(),
+            View::Dashboard
+            | View::Spectrum
+            | View::Chain
+            | View::Map
+            | View::Calls
+            | View::Messages
+            | View::Links
+            | View::Channels
+            | View::Satellites
+            | View::Video
+            | View::Keys
+            | View::Control
+            | View::Agent => true,
+        }
+    }
+
     fn slot(self) -> usize {
         View::ALL.iter().position(|v| *v == self).unwrap_or(0)
     }
@@ -637,18 +659,6 @@ const HANDLE_H: f32 = 7.0;
 /// screen, which is about what a rooftop antenna hears.
 const DEFAULT_MAP_ZOOM: f64 = 8.0;
 
-/// Two workers, matching the two tile requests allowed in flight. Everything
-/// this runtime carries is waiting on a network rather than computing, so
-/// sizing it to the core count would buy nothing.
-fn background_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .thread_name("net")
-        .enable_all()
-        .build()
-        .expect("background runtime")
-}
-
 /// Bytes, in whatever unit keeps the number readable.
 fn human_bytes(n: u64) -> String {
     const UNITS: [(&str, u64); 4] = [("GB", 1 << 30), ("MB", 1 << 20), ("kB", 1 << 10), ("B", 1)];
@@ -695,7 +705,7 @@ const MIN_SPAN_DB: f32 = 50.0;
 const WATERFALL_SPAN_DB: f32 = 50.0;
 
 /// How long a fault stays over the spectrum.
-const ERR_SHOWN_FOR: std::time::Duration = std::time::Duration::from_secs(8);
+const ERR_SHOWN_FOR: common::time::Duration = common::time::Duration::from_secs(8);
 
 /// Share of the scope pane the spectrum gets by default.
 const DEFAULT_PLOT_FRAC: f32 = 0.34;
@@ -727,7 +737,7 @@ impl Default for App {
             scripts: scripts_pane::ScriptsState::default(),
             sub_until: None,
             tx_reach: None,
-            rt: background_runtime(),
+            rt: crate::task::spawner(),
             calls: state::CallsState::default(),
             transcript: state::TranscriptState::default(),
             // What was written before this receiver started, so the view
@@ -767,7 +777,8 @@ impl Default for App {
             autostart: false,
             view: View::Dashboard,
             prev_view: View::Spectrum,
-            group_view: Group::ALL.map(|g| g.views()[0]),
+            group_view: Group::ALL
+                .map(|g| g.views().iter().copied().find(|v| v.built()).unwrap_or(g.views()[0])),
             view_seen: [0; View::COUNT],
             video_seen: 0,
             video_live_was: false,
@@ -1291,6 +1302,9 @@ impl App {
     }
 
     pub fn find_in(&mut self, d: crate::directories::Directory) {
+        if !d.proto().built() {
+            return;
+        }
         self.remote = Some(RemoteEdit::of(d.proto()));
         self.find = Some(settings::FindEdit::open(d));
     }
@@ -1304,7 +1318,7 @@ impl App {
     /// either arrives the same way.
     #[cfg(feature = "mcp")]
     pub fn serve_mcp(&mut self, addr: std::net::SocketAddr) -> anyhow::Result<()> {
-        crate::agent::serve(addr, self.rt.handle(), self.desk.clone())
+        crate::agent::serve(addr, &self.rt, self.desk.clone())
     }
 
     /// Pick the span closest to `hz`, narrowing in software if the radio
@@ -1373,7 +1387,7 @@ impl App {
         self.err = None;
         let Some(entry) = self.device.clone() else {
             self.err = Some("no radio found. plug one in, then press RESCAN.".into());
-            self.err_at = Some(std::time::Instant::now());
+            self.err_at = Some(common::time::Instant::now());
             return;
         };
         self.fit_spans();
@@ -1386,7 +1400,7 @@ impl App {
             Sps((self.rate * self.zoom.max(1) as f64).round() as u64),
             self.radio_settings.offset,
             self.scope.fft,
-            move || c.request_repaint(),
+            move || crate::window::repaint(&c),
         ));
         for cmd in self.startup_cmds() {
             self.send(cmd);
@@ -1543,7 +1557,7 @@ impl App {
         let fault = radio.status.error.lock().take().or_else(|| radio.status.refused.lock().take());
         if let Some(e) = fault {
             self.err = Some(e);
-            self.err_at = Some(std::time::Instant::now());
+            self.err_at = Some(common::time::Instant::now());
         }
         // A fault is worth a look, not a permanent fixture: the radio going
         // quiet re-raises itself every frame for as long as it is true, and
@@ -1562,15 +1576,15 @@ impl App {
         // it is working right up until somebody notices the waterfall has not
         // moved in a minute.
         if !frames.is_empty() {
-            self.last_frame = Some(std::time::Instant::now());
+            self.last_frame = Some(common::time::Instant::now());
         } else if radio.status.running.load(std::sync::atomic::Ordering::Relaxed) {
-            let since = self.last_frame.get_or_insert_with(std::time::Instant::now).elapsed();
-            if since > std::time::Duration::from_secs(3) {
+            let since = self.last_frame.get_or_insert_with(common::time::Instant::now).elapsed();
+            if since > common::time::Duration::from_secs(3) {
                 self.err = Some(format!(
                     "the radio has sent nothing for {:.0} s; it may need unplugging",
                     since.as_secs_f32()
                 ));
-                self.err_at = Some(std::time::Instant::now());
+                self.err_at = Some(common::time::Instant::now());
             }
         }
         // A pinned radio cannot be retuned, and a dial left wherever it was
@@ -1678,7 +1692,7 @@ impl App {
                 self.scope.wf.push(&pending, floor, ceil);
                 self.scope.wf_pending = pending;
                 self.scope.wf_pending.fill(f32::MIN);
-                self.scope.wf_last = Some(std::time::Instant::now());
+                self.scope.wf_last = Some(common::time::Instant::now());
             }
             self.scope.db = f.db;
             self.scope.extra = f.extra;
@@ -1927,16 +1941,16 @@ impl App {
         self.cmds.push(Cmd::Key(Some(id)));
         // A tail beyond the file: the last gap is silence the transmitter
         // still has to play out before the carrier drops.
-        self.sub_until = Some(std::time::Instant::now() + over + SUB_TAIL);
+        self.sub_until = Some(common::time::Instant::now() + over + SUB_TAIL);
     }
 
     /// Let the key go once the file has played.
     fn sub_key(&mut self, ctx: &egui::Context) {
         let Some(until) = self.sub_until else { return };
-        if std::time::Instant::now() < until {
+        if common::time::Instant::now() < until {
             // Nothing else may be drawing, and a carrier that stays up
             // because the window went idle is the worst fault this has.
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            ctx.request_repaint_after(common::time::Duration::from_millis(50));
             return;
         }
         self.sub_until = None;
@@ -1953,7 +1967,7 @@ impl App {
     fn map_view(&mut self, ui: &mut egui::Ui) {
         // Cloned rather than borrowed, so holding the runtime does not hold
         // the application while the pane borrows its own state out of it.
-        let rt = self.rt.handle().clone();
+        let rt = self.rt.clone();
         // The trail is whatever the device list has selected, so choosing a
         // device in one view and looking at the map in the other shows the
         // same device.
@@ -2095,7 +2109,7 @@ impl App {
             self.calls.list.hear(c);
         }
         let active: Vec<crate::calls::Call> =
-            self.calls.list.active(std::time::Instant::now()).into_iter().cloned().collect();
+            self.calls.list.active(common::time::Instant::now()).into_iter().cloned().collect();
         let mut cmds = std::mem::take(&mut self.cmds);
         self.calls.subscribe_new(&active, &mut cmds);
         self.cmds = cmds;
@@ -2173,7 +2187,7 @@ impl App {
         // What was said on that channel, by frequency: the transcript files
         // speech under the conversation it was heard in, and an analogue
         // channel's conversation is its frequency.
-        let heard: Vec<(std::time::Instant, Option<String>, String)> = self
+        let heard: Vec<(common::time::Instant, Option<String>, String)> = self
             .transcript
             .log
             .recent(16)
@@ -2191,7 +2205,7 @@ impl App {
         let config = self.chat.config.clone();
         for (at, from, text) in heard {
             let desk = self.desk.clone();
-            self.air.heard(&config, &desk, self.rt.handle(), at, from.as_deref(), &text);
+            self.air.heard(&config, &desk, &self.rt, at, from.as_deref(), &text);
         }
 
         let busy = self
@@ -2201,7 +2215,7 @@ impl App {
             .unwrap_or_default()
             .iter()
             .any(|s| s.id == id && s.squelch_open);
-        match self.air.poll(&config, std::time::Instant::now(), busy) {
+        match self.air.poll(&config, common::time::Instant::now(), busy) {
             Some(Move::Key(id)) => {
                 self.audio.keying =
                     state::Keying { at: Some(id), latched: true, ..Default::default() };
@@ -2246,7 +2260,7 @@ impl App {
         match act {
             Some(agent_pane::Action::Ask(text)) => {
                 let desk = self.desk.clone();
-                self.chat.ask(&text, desk, self.rt.handle());
+                self.chat.ask(&text, desk, &self.rt);
             }
             Some(agent_pane::Action::Clear) => self.chat.clear(),
             Some(agent_pane::Action::Interrupt) => self.chat.interrupt(),
@@ -2399,8 +2413,10 @@ impl App {
         if self.survey.db.is_none() {
             self.survey.db = survey::Db::open_read(&path).ok();
         }
-        let due =
-            self.survey.refreshed.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1));
+        let due = self
+            .survey
+            .refreshed
+            .is_none_or(|t| t.elapsed() >= common::time::Duration::from_secs(1));
         if !due {
             return;
         }
@@ -2413,7 +2429,7 @@ impl App {
                 self.survey.estimate = survey::locate(&self.survey.trail);
             }
         }
-        self.survey.refreshed = Some(std::time::Instant::now());
+        self.survey.refreshed = Some(common::time::Instant::now());
     }
 
     /// Fill a feed's dialog from the record, and open it.
@@ -2497,7 +2513,7 @@ impl App {
             Ok(n) => format!("wrote {n} rows to {}", out.display()),
             Err(e) => format!("survey export failed: {e}"),
         });
-        self.err_at = Some(std::time::Instant::now());
+        self.err_at = Some(common::time::Instant::now());
     }
 
     /// Draw the dashboard, then do what it asked for.
@@ -2538,7 +2554,7 @@ impl App {
             st: &mut self.keys,
             radio: self.radio.as_ref(),
             cmds: &mut self.cmds,
-            rt: self.rt.handle().clone(),
+            rt: self.rt.clone(),
         }
         .show(ui);
     }
@@ -3220,13 +3236,17 @@ impl eframe::App for App {
         // is open. Both used to be read only under --soak, so the call list
         // and the transcript filled in a soak run and stayed empty in use.
         self.poll_capture(ui.ctx());
+        if crate::webusb::granted() {
+            let c = ui.ctx().clone();
+            self.rescan(&c);
+        }
         self.poll_remote(ui.ctx());
         self.poll_memory_io();
         self.pick_file.poll(&mut self.cmds);
         // The `.sub` dialog lands its file as a command like any other.
         self.audio.sub_pick.poll(&mut self.cmds);
-        if let Some(path) = self.audio.capture_pick.poll(&mut self.cmds) {
-            self.capture_edit = Some(settings::CaptureEdit::new(path, true));
+        if let Some(edit) = self.audio.capture_pick.poll(&mut self.cmds) {
+            self.capture_edit = Some(edit);
         }
         // And the save dialog writes the file it was given a name for.
         self.log.sub_save.poll();
@@ -3321,7 +3341,7 @@ impl eframe::App for App {
         self.sync_settings();
         self.settings.flush(true);
         self.chain.flush_edits(true);
-        crate::iqstream_listing::withdraw_all(std::time::Duration::from_secs(3));
+        crate::iqstream_listing::withdraw_all(common::time::Duration::from_secs(3));
     }
 }
 
@@ -3335,7 +3355,7 @@ impl App {
         }
         // Deliberately does not request repaints: the point is to measure how
         // often the app redraws on its own.
-        let t0 = *self.shot_at.get_or_insert_with(std::time::Instant::now);
+        let t0 = *self.shot_at.get_or_insert_with(common::time::Instant::now);
         let el = t0.elapsed().as_secs_f32();
         if el < secs {
             return;
@@ -3353,7 +3373,7 @@ impl App {
             })
             .unwrap_or(0.0);
         println!("ran {el:.1}s, used {cpu:.2}s CPU = {:.0}% of one core", cpu / el as f64 * 100.0);
-        crate::prof::report(std::time::Duration::from_secs_f32(el));
+        crate::prof::report(common::time::Duration::from_secs_f32(el));
         self.shot_sent = true;
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
@@ -3363,7 +3383,7 @@ impl App {
             return;
         };
         ctx.request_repaint();
-        let t0 = *self.shot_at.get_or_insert_with(std::time::Instant::now);
+        let t0 = *self.shot_at.get_or_insert_with(common::time::Instant::now);
         // Wait for the tuner to lock and the waterfall to fill; a screenshot
         // taken before that reviews an empty screen, not the design.
         if !self.shot_sent && t0.elapsed().as_secs_f32() > self.shot_after {
@@ -3405,6 +3425,9 @@ impl App {
 
     /// Open a view, remembering the one being left.
     fn set_view(&mut self, v: View) {
+        if !v.built() {
+            return;
+        }
         if let Tab::Group(g) = Tab::of(v) {
             self.group_view[g.slot()] = v;
         }
@@ -3430,6 +3453,7 @@ impl App {
             .views()
             .iter()
             .copied()
+            .filter(|v| v.built())
             .map(|v| (v, format!("{} {}", v.label(), self.view_mark(v))))
             .collect();
         let options: Vec<(View, &str)> = labels.iter().map(|(v, l)| (*v, l.as_str())).collect();
@@ -4146,7 +4170,8 @@ mod tests {
         let text = "Filetype: Flipper SubGhz Key File\nVersion: 1\nFrequency: 433920000\n\
             Preset: FuriHalSubGhzPresetOok650Async\nProtocol: Princeton\nBit: 24\n\
             Key: 00 00 00 00 00 95 D5 D4\nTE: 400\n";
-        let path = std::env::temp_dir().join(format!("waveshark-tx-{}.sub", std::process::id()));
+        let path = common::platform::scratch_dir()
+            .join(format!("waveshark-tx-{}.sub", std::process::id()));
         std::fs::write(&path, text).unwrap();
         let f = crate::radio::SubFile::open(&path).unwrap();
         let over = f.file.duration();
@@ -4175,9 +4200,9 @@ mod tests {
         // The key is still down while the file plays, and comes up after it
         // with the tail the transmitter needs to play the last gap out.
         let until = a.sub_until.expect("the over has an end");
-        assert!(until > std::time::Instant::now() + over, "the tail is past the file");
-        assert!(until <= std::time::Instant::now() + over + SUB_TAIL);
-        a.sub_until = Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+        assert!(until > common::time::Instant::now() + over, "the tail is past the file");
+        assert!(until <= common::time::Instant::now() + over + SUB_TAIL);
+        a.sub_until = Some(common::time::Instant::now() - common::time::Duration::from_millis(1));
         a.cmds.clear();
         a.sub_key(&egui::Context::default());
         assert!(a.sub_until.is_none());
@@ -4195,25 +4220,25 @@ mod tests {
         let text = "Filetype: Flipper SubGhz Key File\nVersion: 1\nFrequency: 433920000\n\
             Preset: FuriHalSubGhzPresetOok650Async\nProtocol: Princeton\nBit: 24\n\
             Key: 00 00 00 00 00 95 D5 D4\nTE: 400\n";
-        let path =
-            std::env::temp_dir().join(format!("waveshark-passes-{}.sub", std::process::id()));
+        let path = common::platform::scratch_dir()
+            .join(format!("waveshark-passes-{}.sub", std::process::id()));
         std::fs::write(&path, text).unwrap();
         let f = crate::radio::SubFile::open(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         let once = f.file.duration();
-        let last_gap = std::time::Duration::from_micros(
+        let last_gap = common::time::Duration::from_micros(
             f.file.bursts.last().and_then(|b| b.last()).unwrap().gap as u64,
         );
-        let over = once * 3 + (std::time::Duration::from_millis(200) - last_gap) * 2;
+        let over = once * 3 + (common::time::Duration::from_millis(200) - last_gap) * 2;
 
-        let before = std::time::Instant::now();
+        let before = common::time::Instant::now();
         a.transmit_sub(f);
         let until = a.sub_until.expect("the over has an end");
         assert!(
             until >= before + over + SUB_TAIL,
             "three passes and two pauses before the key comes up"
         );
-        assert!(until <= std::time::Instant::now() + over + SUB_TAIL, "and no longer");
+        assert!(until <= common::time::Instant::now() + over + SUB_TAIL, "and no longer");
     }
 
     /// Two detectors are two sets of numbers, so the colours are worked out
@@ -4982,7 +5007,7 @@ mod tests {
         for (n, text) in ["go ahead", "received, out"].into_iter().enumerate() {
             a.transcript.log.push(crate::transcripts::Utterance {
                 key: key.clone(),
-                at: std::time::Instant::now() + std::time::Duration::from_secs(n as u64),
+                at: common::time::Instant::now() + common::time::Duration::from_secs(n as u64),
                 seconds: 1.0,
                 text: text.into(),
                 settled: true,
@@ -5106,7 +5131,7 @@ mod tests {
     /// and needed `--span 250 --run` typed after it to show anything.
     #[test]
     fn naming_a_capture_as_the_device_fixes_the_span_and_the_dial() {
-        let dir = std::env::temp_dir().join("sr_set_device");
+        let dir = common::platform::scratch_dir().join("sr_set_device");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("bench_868.3M_250k.cu8");
@@ -5144,7 +5169,7 @@ mod tests {
     /// fault banner for a radio nobody asked for.
     #[test]
     fn a_named_device_is_the_only_one_opened() {
-        let dir = std::env::temp_dir().join("sr_named_device");
+        let dir = common::platform::scratch_dir().join("sr_named_device");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let saved = dir.join("saved_433.92M_250k.cu8");

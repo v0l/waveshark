@@ -6,7 +6,7 @@ use crate::{
 use std::net::SocketAddr;
 use std::num::NonZeroU16;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use web_time::{Duration, Instant};
 
 const DIRECTORY_WAIT: Duration = Duration::from_secs(10);
 const SERVER_POLL: Duration = Duration::from_secs(1);
@@ -87,7 +87,7 @@ impl<C: Clone + PartialEq> Wanted<C> {
 pub struct Lister<D: SdrDirectory> {
     wanted: Arc<Wanted<D::Config>>,
     state: Arc<Mutex<ListingState>>,
-    thread: std::thread::JoinHandle<()>,
+    thread: common::thread::JoinHandle<()>,
 }
 
 impl<D: SdrDirectory + 'static> Lister<D> {
@@ -116,7 +116,7 @@ impl<D: SdrDirectory + 'static> Lister<D> {
         wanted.set(Some(listing), false);
         let state = Arc::new(Mutex::new(ListingState::Waiting));
         let (shown, asked) = (state.clone(), wanted.clone());
-        let thread = std::thread::Builder::new()
+        let thread = common::thread::Builder::new()
             .name("iqstream-list".into())
             .spawn(move || run::<D>(find, &asked, &shown, pace, &open))?;
         Ok(Lister { wanted, state, thread })
@@ -157,7 +157,7 @@ pub fn withdraw_all<D: SdrDirectory + 'static>(listers: Vec<Lister<D>>, within: 
     for l in &listers {
         l.stop();
     }
-    let started = std::time::Instant::now();
+    let started = web_time::Instant::now();
     while listers.iter().any(|l| !l.finished()) && started.elapsed() < within {
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -547,7 +547,7 @@ mod tests {
         let std::net::SocketAddr::V4(at) = sock.local_addr().unwrap() else { unreachable!() };
         let heard = Arc::new(Mutex::new(Vec::new()));
         let log = heard.clone();
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             let mut buf = [0u8; 64];
             let mut tcp_asked = 0;
             while let Ok((n, from)) = sock.recv_from(&mut buf) {

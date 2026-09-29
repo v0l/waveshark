@@ -72,7 +72,7 @@ impl Search {
             }
             let end = (start + chunk).min(range.end);
             let (tx, stop, frames) = (tx.clone(), stop.clone(), frames.clone());
-            std::thread::spawn(move || {
+            common::thread::spawn(move || {
                 // Sweep in blocks so the stop flag is seen promptly.
                 const STEP: u64 = 1 << 20;
                 let mut at = start;
@@ -157,7 +157,7 @@ mod tests {
                 Progress::Running => {
                     spins += 1;
                     assert!(spins < 5_000, "search did not finish");
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    std::thread::sleep(common::time::Duration::from_millis(1));
                 }
                 Progress::NoGpu => unreachable!(),
             }
@@ -179,7 +179,7 @@ mod tests {
             match s.poll() {
                 Progress::Exhausted => break,
                 Progress::Found(_) => panic!("no key should fit this window"),
-                Progress::Running => std::thread::sleep(std::time::Duration::from_millis(1)),
+                Progress::Running => std::thread::sleep(common::time::Duration::from_millis(1)),
                 Progress::NoGpu => unreachable!(),
             }
         }

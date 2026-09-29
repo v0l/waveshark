@@ -31,7 +31,7 @@ fn main() {
     let mut det = BleDetector::new(rate, centre, BleConfig::default());
     println!("channels: {:?}", det.channels());
     let mut frames = Vec::new();
-    let t0 = std::time::Instant::now();
+    let t0 = common::time::Instant::now();
     for c in iq.chunks(65_536) {
         det.process(c, &mut frames);
     }

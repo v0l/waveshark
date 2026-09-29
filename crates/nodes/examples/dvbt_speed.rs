@@ -10,7 +10,7 @@ fn main() {
     let air = samples.len() as f64 / (64e6 / 7.0);
     let mut rx = DvbtReceiver::new();
     let mut out = Vec::new();
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     for block in samples.chunks(65_536) {
         rx.push(block, &mut out);
     }
@@ -20,7 +20,7 @@ fn main() {
     // What each layer costs on its own, over the same samples.
     let mut front = dsp::dvbt::Dvbt::new();
     let mut symbols = Vec::new();
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     for block in samples.chunks(65_536) {
         front.push(block, &mut symbols);
         symbols.clear();
@@ -36,7 +36,7 @@ fn main() {
     let params = front.params().expect("a lock");
     let mut inner = dsp::dvbt::Inner::new(params.mode, params.constellation);
     let mut soft = Vec::new();
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     for s in &symbols {
         soft.clear();
         inner.demodulate(&s.cells, &s.csi, s.index.unwrap_or(0), &mut soft);
@@ -45,7 +45,7 @@ fn main() {
 
     let mut v = dsp::conv::Viterbi::new(dsp::conv::K7_X_FIRST);
     let mut bits = Vec::new();
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     for s in &symbols {
         soft.clear();
         inner.demodulate(&s.cells, &s.csi, s.index.unwrap_or(0), &mut soft);
@@ -64,7 +64,7 @@ fn main() {
     }
     let mut v = dsp::conv::Viterbi::new(dsp::conv::K7_X_FIRST);
     let mut bits = Vec::new();
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     v.push(&all, params.code_rate_hp.mask(), &mut bits);
     let took = t.elapsed().as_secs_f64();
     println!(
@@ -85,7 +85,7 @@ fn main() {
     }
     let mut outer = decode::dvbt::Outer::new();
     let mut packets = Vec::new();
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     outer.push(&bytes, &mut packets);
     println!(
         "the outer code alone {:.2}x real time, {} packets",

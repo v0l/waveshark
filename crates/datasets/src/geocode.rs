@@ -1,5 +1,5 @@
 use crate::Error;
-use std::time::Duration;
+use common::time::Duration;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Query {
@@ -42,17 +42,10 @@ pub trait Geocoder: Send + Sync {
     fn locate(&self, q: &Query) -> Result<Option<Place>, Error>;
 }
 
-pub struct Pdok {
-    client: Option<httpc::BlockingClient>,
-}
+#[derive(Default)]
+pub struct Pdok;
 
 const PDOK_FREE: &str = "https://api.pdok.nl/bzk/locatieserver/search/v3_1/free";
-
-impl Default for Pdok {
-    fn default() -> Self {
-        Self { client: httpc::blocking(Duration::from_secs(10)).ok() }
-    }
-}
 
 impl Geocoder for Pdok {
     fn name(&self) -> &'static str {
@@ -69,19 +62,17 @@ impl Geocoder for Pdok {
 
     fn locate(&self, q: &Query) -> Result<Option<Place>, Error> {
         let fail = |e: String| Error::Fetch(PDOK_FREE.into(), e);
-        let client = self.client.as_ref().ok_or_else(|| fail("no HTTP client".into()))?;
-        let body = client
-            .get(PDOK_FREE)
+        let body = httpc::get(PDOK_FREE)
+            .timeout(Duration::from_secs(10))
             .query(&[
                 ("q", q.text.as_str()),
                 ("rows", "1"),
                 ("fq", "type:(postcode OR weg OR woonplaats)"),
                 ("fl", "centroide_ll,type,weergavenaam,woonplaatsnaam,gemeentenaam"),
             ])
-            .send()
-            .and_then(|r| r.error_for_status())
-            .and_then(|r| r.text())
-            .map_err(|e| fail(e.to_string()))?;
+            .wait()
+            .and_then(|r| r.ok()?.text())
+            .map_err(fail)?;
         pdok_answer(&body, &q.town).map_err(|e| Error::Parse(PDOK_FREE.into(), e))
     }
 }

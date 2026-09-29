@@ -136,7 +136,7 @@ impl Entry {
         if self.idle {
             return;
         }
-        let t = std::time::Instant::now();
+        let t = common::time::Instant::now();
         let mut slots = self.in_slots.iter().copied();
         match (self.in_slots.len(), slots.next(), slots.next()) {
             (0, _, _) => self.call(&[], &[], &[], block_seconds),
@@ -422,7 +422,7 @@ pub struct Graph {
     /// measurement.
     rate: Vec<f32>,
     rate_seen: Vec<u64>,
-    rate_at: std::time::Instant,
+    rate_at: common::time::Instant,
     output_slot: Slot,
     events: Vec<Emitted>,
     input_off: bool,
@@ -600,7 +600,7 @@ impl Graph {
             produced: vec![0; wiring.n_slots],
             rate: vec![0.0; wiring.n_slots],
             rate_seen: vec![0; wiring.n_slots],
-            rate_at: std::time::Instant::now(),
+            rate_at: common::time::Instant::now(),
             output_slot: INPUT_SLOT,
             events: Vec::new(),
             input_off: false,
@@ -1139,7 +1139,7 @@ impl Graph {
         if dt < RATE_WINDOW {
             return;
         }
-        self.rate_at = std::time::Instant::now();
+        self.rate_at = common::time::Instant::now();
         // A time constant rather than a fixed weight, so the smoothing does
         // not change when the window does.
         let a = dt / (RATE_TAU + dt);

@@ -106,10 +106,7 @@ pub struct KeyStore {
 impl KeyStore {
     /// `$XDG_CONFIG_HOME/waveshark/keys`, beside the scanners and session.
     pub fn path() -> Option<PathBuf> {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(base.join("waveshark").join("keys"))
+        Some(common::platform::config_dir()?.join("keys"))
     }
 
     /// Load from disk, or empty if there is no file yet. Unlike the scanners,
@@ -119,7 +116,7 @@ impl KeyStore {
         let Some(path) = Self::path() else {
             return Self::default();
         };
-        match std::fs::read_to_string(&path) {
+        match common::store::read(&path) {
             Ok(text) => Self::parse(&text),
             Err(_) => Self::default(),
         }
@@ -130,10 +127,7 @@ impl KeyStore {
         let Some(path) = Self::path() else {
             return Err(std::io::Error::other("no config directory"));
         };
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, self.render())
+        common::store::write(&path, &self.render())
     }
 
     /// The key for a cell, if one is known.

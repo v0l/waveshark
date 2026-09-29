@@ -6,9 +6,8 @@
 //! bus the chip bridges through block 6. Every value here is from librtlsdr.
 
 use crate::error::{Error, Result};
-use nusb::MaybeFuture;
-use nusb::transfer::{ControlIn, ControlOut, ControlType, Recipient};
 use std::time::Duration;
+use usbio::transfer::{ControlIn, ControlOut, ControlType, Recipient};
 
 const CTRL_TIMEOUT: Duration = Duration::from_millis(300);
 
@@ -41,15 +40,15 @@ pub const EEPROM_ADDR: u8 = 0xa0;
 /// Control endpoint of one open dongle
 #[derive(Clone)]
 pub struct Transport {
-    iface: nusb::Interface,
+    iface: usbio::Interface,
 }
 
 impl Transport {
-    pub fn new(iface: nusb::Interface) -> Self {
+    pub fn new(iface: usbio::Interface) -> Self {
         Self { iface }
     }
 
-    pub fn interface(&self) -> &nusb::Interface {
+    pub fn interface(&self) -> &usbio::Interface {
         &self.iface
     }
 
@@ -66,7 +65,6 @@ impl Transport {
                 },
                 CTRL_TIMEOUT,
             )
-            .wait()
             .map_err(|e| Error::usb("read", e))
     }
 
@@ -83,7 +81,6 @@ impl Transport {
                 },
                 CTRL_TIMEOUT,
             )
-            .wait()
             .map_err(|e| Error::usb("write", e))?;
         Ok(())
     }
@@ -117,7 +114,6 @@ impl Transport {
                 },
                 CTRL_TIMEOUT,
             )
-            .wait()
             .map_err(|e| Error::usb("demod read", e))?;
         Ok(match d.len() {
             0 => 0,
@@ -157,7 +153,6 @@ impl Transport {
                 },
                 CTRL_TIMEOUT,
             )
-            .wait()
             .map_err(|e| Error::usb("demod write", e))
     }
 

@@ -42,7 +42,7 @@ fn zoomed(native: f64, zoom: usize) -> crate::chain::Receiver {
 /// How long one chain takes to eat a second of signal.
 fn seconds_to_process(rx: &mut crate::chain::Receiver, sig: &[C32]) -> f64 {
     rx.process(&sig[..1024]).unwrap();
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     rx.process(sig).unwrap();
     t.elapsed().as_secs_f64()
 }
@@ -302,10 +302,10 @@ fn every_capture_runs_at_twice_real_time() {
                 if chunk.len() < BLOCK {
                     break;
                 }
-                let t = std::time::Instant::now();
+                let t = common::time::Instant::now();
                 rx.process(chunk).expect(&name);
                 us.push(t.elapsed().as_secs_f64() * 1e6);
-                let at = block_start(std::time::Instant::now(), chunk.len(), rate);
+                let at = block_start(common::time::Instant::now(), chunk.len(), rate);
                 let _ = harvest(&mut rx, at);
                 if us.len() >= WARM + TIMED {
                     break 'passes;
@@ -380,14 +380,14 @@ fn screen_at_744(mode: Option<&str>) -> Option<ScreenRun> {
             .expect("a mode the table knows");
     }
     let mut speeds = Vec::new();
-    let started = std::time::Instant::now();
+    let started = common::time::Instant::now();
     for (i, chunk) in buf.samples.chunks_exact(BLOCK).enumerate() {
-        let due = started + std::time::Duration::from_secs_f64(i as f64 * block_secs / PACE_X);
-        std::thread::sleep(due.saturating_duration_since(std::time::Instant::now()));
-        let t = std::time::Instant::now();
+        let due = started + common::time::Duration::from_secs_f64(i as f64 * block_secs / PACE_X);
+        std::thread::sleep(due.saturating_duration_since(common::time::Instant::now()));
+        let t = common::time::Instant::now();
         rx.process(chunk).expect(NAME);
         speeds.push(block_secs / t.elapsed().as_secs_f64().max(1e-9));
-        let _ = harvest(&mut rx, block_start(std::time::Instant::now(), chunk.len(), rate));
+        let _ = harvest(&mut rx, block_start(common::time::Instant::now(), chunk.len(), rate));
         if started.elapsed().as_secs_f64() > 20.0 {
             break;
         }

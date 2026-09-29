@@ -1,10 +1,10 @@
+use common::time::Duration;
 use nostr_directory::{Config, NostrDirectory};
 use parking_lot::Mutex;
 use sdr_directory::probe::{Heard, Reached, Said};
 use sdr_directory::{Author, Listing, SdrDirectory};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
 
 const RELAY_WAIT: Duration = Duration::from_secs(10);
 
@@ -76,7 +76,7 @@ pub fn refresh() {
         f.attempted = true;
         f.error = None;
     }
-    let started = std::thread::Builder::new().name("iqstream-find".into()).spawn(move || {
+    let started = common::thread::Builder::new().name("iqstream-find".into()).spawn(move || {
         let listed = read_directory();
         let mut f = finder().lock();
         match listed {

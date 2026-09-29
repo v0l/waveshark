@@ -353,7 +353,7 @@ impl TxSinkNode {
 
     /// Hand it a radio: the key going down.
     pub fn attach(&mut self, stream: Box<dyn common::TxStream>) {
-        self.finish(std::time::Duration::from_millis(200));
+        self.finish(common::time::Duration::from_millis(200));
         self.written = 0;
         self.failed = 0;
         self.stream = Some(stream);
@@ -400,7 +400,7 @@ impl TxSinkNode {
     ///
     /// The stage stays in the graph: what it loses is the radio, which is
     /// also what hands a half duplex one back to the receiver.
-    pub fn finish(&mut self, timeout: std::time::Duration) {
+    pub fn finish(&mut self, timeout: common::time::Duration) {
         if let Some(s) = &mut self.stream {
             s.drain(timeout);
             s.stop();

@@ -5,10 +5,14 @@
 //! single notch: one detent moved the dial ten decades. The raw `MouseWheel`
 //! events arrive once each, which is what a stepped control wants.
 
-use egui::{Event, MouseWheelUnit, Ui};
+use egui::{Event, Ui};
 
-/// Points of scroll a typical detent produces when the backend reports pixels.
-const POINTS_PER_NOTCH: f32 = 50.0;
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "wheel/native.rs"]
+mod platform;
+#[cfg(target_arch = "wasm32")]
+#[path = "wheel/web.rs"]
+mod platform;
 
 /// Accumulator so partial notches from a trackpad still eventually step,
 /// instead of being rounded away every frame.
@@ -24,11 +28,7 @@ impl Wheel {
             i.events
                 .iter()
                 .map(|e| match e {
-                    Event::MouseWheel { unit, delta, .. } => match unit {
-                        MouseWheelUnit::Line => delta.y,
-                        MouseWheelUnit::Point => delta.y / POINTS_PER_NOTCH,
-                        MouseWheelUnit::Page => delta.y * 8.0,
-                    },
+                    Event::MouseWheel { unit, delta, .. } => platform::notches(*unit, delta.y),
                     _ => 0.0,
                 })
                 .sum()

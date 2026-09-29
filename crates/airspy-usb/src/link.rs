@@ -1,9 +1,8 @@
 use crate::error::{Error, Result};
-use nusb::MaybeFuture;
-use nusb::transfer::{Buffer, Bulk, ControlIn, ControlOut, ControlType, In, Recipient};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use usbio::transfer::{Buffer, Bulk, ControlIn, ControlOut, ControlType, In, Recipient};
 
 const RX_ENDPOINT: u8 = 0x81;
 const TRANSFERS: usize = 16;
@@ -20,7 +19,7 @@ pub struct Enumerated {
 }
 
 pub(crate) fn enumerate(vid: u16, pid: u16) -> Vec<Enumerated> {
-    let Ok(devices) = nusb::list_devices().wait() else { return Vec::new() };
+    let Ok(devices) = usbio::list_devices() else { return Vec::new() };
     devices
         .filter(|d| d.vendor_id() == vid && d.product_id() == pid)
         .enumerate()
@@ -39,7 +38,7 @@ pub fn serial_of(descriptor: &str) -> String {
     tail.trim().to_string()
 }
 
-fn port_path(d: &nusb::DeviceInfo) -> String {
+fn port_path(d: &usbio::DeviceInfo) -> String {
     let ports: Vec<String> = d.port_chain().iter().map(|p| p.to_string()).collect();
     match ports.is_empty() {
         true => format!("{}-?", d.bus_id()),
@@ -48,27 +47,26 @@ fn port_path(d: &nusb::DeviceInfo) -> String {
 }
 
 pub(crate) struct Link {
-    iface: nusb::Interface,
+    iface: usbio::Interface,
     streaming: Arc<AtomicBool>,
 }
 
 impl Link {
     pub(crate) fn open(found: &Enumerated, vid: u16, pid: u16) -> Result<Self> {
-        let info = nusb::list_devices()
-            .wait()
+        let info = usbio::list_devices()
             .map_err(|e| Error::usb("list", e))?
             .find(|d| d.vendor_id() == vid && d.product_id() == pid && port_path(d) == found.port)
             .ok_or(Error::NoDevice)?;
-        let device = info.open().wait().map_err(|e| match e.kind() {
-            nusb::ErrorKind::PermissionDenied => Error::Permission,
-            nusb::ErrorKind::Busy => Error::Busy,
+        let device = info.open().map_err(|e| match e.kind() {
+            usbio::ErrorKind::PermissionDenied => Error::Permission,
+            usbio::ErrorKind::Busy => Error::Busy,
             _ => Error::usb("open", e),
         })?;
         #[cfg(target_os = "linux")]
         let _ = device.detach_kernel_driver(0);
-        let iface = device.claim_interface(0).wait().map_err(|e| match e.kind() {
-            nusb::ErrorKind::Busy => Error::Busy,
-            nusb::ErrorKind::PermissionDenied => Error::Permission,
+        let iface = device.claim_interface(0).map_err(|e| match e.kind() {
+            usbio::ErrorKind::Busy => Error::Busy,
+            usbio::ErrorKind::PermissionDenied => Error::Permission,
             _ => Error::usb("claim", e),
         })?;
         let me = Self { iface, streaming: Arc::new(AtomicBool::new(false)) };
@@ -89,7 +87,6 @@ impl Link {
                 },
                 CTRL_TIMEOUT,
             )
-            .wait()
             .map_err(|e| Error::usb(&format!("request {request}"), e))
     }
 
@@ -110,7 +107,7 @@ impl Link {
         if !self.streaming.load(Ordering::SeqCst)
             && let Ok(mut ep) = self.iface.endpoint::<Bulk, In>(RX_ENDPOINT)
         {
-            let _ = ep.clear_halt().wait();
+            let _ = ep.clear_halt();
         }
     }
 
@@ -135,7 +132,7 @@ impl Link {
             .iface
             .endpoint::<Bulk, In>(RX_ENDPOINT)
             .map_err(|e| Error::usb("open endpoint", e))?;
-        let _ = ep.clear_halt().wait();
+        let _ = ep.clear_halt();
         self.set_receiver_mode(true)?;
         for _ in 0..TRANSFERS {
             ep.submit(Buffer::new(transfer_bytes));
@@ -158,7 +155,7 @@ impl Drop for Link {
     }
 }
 
-fn write(iface: &nusb::Interface, request: u8, value: u16, index: u16, data: &[u8]) -> Result<()> {
+fn write(iface: &usbio::Interface, request: u8, value: u16, index: u16, data: &[u8]) -> Result<()> {
     iface
         .control_out(
             ControlOut {
@@ -171,7 +168,6 @@ fn write(iface: &nusb::Interface, request: u8, value: u16, index: u16, data: &[u
             },
             CTRL_TIMEOUT,
         )
-        .wait()
         .map_err(|e| Error::usb(&format!("request {request}"), e))
 }
 
@@ -185,7 +181,7 @@ pub(crate) fn text(bytes: &[u8]) -> String {
 }
 
 pub struct Reader {
-    ep: nusb::Endpoint<Bulk, In>,
+    ep: usbio::Endpoint<Bulk, In>,
     transfer_bytes: usize,
     stopper: Stopper,
     streaming: Arc<AtomicBool>,
@@ -193,7 +189,7 @@ pub struct Reader {
 
 #[derive(Clone)]
 pub struct Stopper {
-    iface: nusb::Interface,
+    iface: usbio::Interface,
     stopped: Arc<AtomicBool>,
 }
 

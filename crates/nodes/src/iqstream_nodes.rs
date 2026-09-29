@@ -76,6 +76,16 @@ pub fn running(addr: SocketAddr) -> Option<Arc<iqstream::Server>> {
 ///
 /// A port of zero is never shared: it asks the kernel for a free port, so two
 /// of them are two servers however the request was written.
+#[cfg(feature = "iqstream")]
+fn door() -> Option<Arc<dyn iqstream::Door>> {
+    Some(remote::door::Doors::shared())
+}
+
+#[cfg(not(feature = "iqstream"))]
+fn door() -> Option<Arc<dyn iqstream::Door>> {
+    None
+}
+
 pub fn server(addr: SocketAddr) -> Result<Arc<iqstream::Server>> {
     if addr.port() != 0
         && let Ok(map) = servers().lock()
@@ -86,7 +96,7 @@ pub fn server(addr: SocketAddr) -> Result<Arc<iqstream::Server>> {
     let cfg = iqstream::ServerConfig {
         name: "waveshark".into(),
         streams: Vec::new(),
-        door: Some(remote::door::Doors::shared()),
+        door: door(),
     };
     let s = iqstream::Server::start(addr, cfg)?;
     if addr.port() != 0

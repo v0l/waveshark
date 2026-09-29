@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// How long one completion may take. Long, because a local model on a CPU
 /// answers in minutes and the request is what holds the conversation open.
-const PATIENCE: std::time::Duration = std::time::Duration::from_secs(600);
+const PATIENCE: common::time::Duration = common::time::Duration::from_secs(600);
 
 /// What the pane draws, in the order it happened.
 pub enum Turn {
@@ -107,7 +107,7 @@ impl Chat {
     }
 
     /// Ask, and start the loop that answers.
-    pub fn ask(&mut self, text: &str, desk: Desk, rt: &tokio::runtime::Handle) {
+    pub fn ask(&mut self, text: &str, desk: Desk, rt: &crate::task::Spawner) {
         let text = text.trim();
         if text.is_empty() || self.busy() {
             return;
@@ -379,10 +379,11 @@ impl Worker {
     }
 
     /// Server-sent events into a reply.
-    async fn read_stream(&self, mut resp: reqwest::Response) -> Result<Reply, String> {
+    async fn read_stream(&self, resp: reqwest::Response) -> Result<Reply, String> {
         let mut reply = Reply::default();
         let mut buf = String::new();
-        while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        let mut chunks = httpc::Chunks::of(resp);
+        while let Some(chunk) = chunks.next().await.map_err(|e| e.to_string())? {
             if self.stop.load(Ordering::Relaxed) {
                 return Err("stopped".into());
             }
@@ -607,7 +608,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
         let url = format!("http://{}/v1", listener.local_addr().expect("an address"));
         let (seen, asked) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             use std::io::{Read, Write};
             let mut left = replies.into_iter();
             for stream in listener.incoming() {
@@ -675,7 +676,7 @@ mod tests {
         ]);
         let (desk, asks) = Desk::new();
         // The interface, in as much as the test needs one.
-        let radio = std::thread::spawn(move || {
+        let radio = common::thread::spawn(move || {
             let ask = asks.recv().expect("one tool call");
             assert!(matches!(ask.action, super::super::Action::Status));
             let _ = ask.reply.send(Ok(json!({ "center_hz": 446_050_000.0 })));
@@ -736,7 +737,7 @@ mod tests {
     fn a_server_that_refuses_is_reported() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
         let url = format!("http://{}/v1", listener.local_addr().expect("an address"));
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             use std::io::{Read, Write};
             if let Some(Ok(mut s)) = listener.incoming().next() {
                 let mut buf = [0u8; 4096];
@@ -784,7 +785,7 @@ mod tests {
         chat.config.model.clear();
         let rt = tokio::runtime::Builder::new_current_thread().build().expect("a runtime");
         let (desk, _asks) = Desk::new();
-        chat.ask("what is on the air", desk, rt.handle());
+        chat.ask("what is on the air", desk, &crate::task::Spawner::of(&rt));
         assert_eq!(chat.turns.len(), 2);
         assert!(matches!(chat.turns[1], Turn::Fault(_)));
         assert!(!chat.busy(), "nothing was started");

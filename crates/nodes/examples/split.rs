@@ -1,7 +1,7 @@
 //! Where does the time go: channelizer, transpose, or the per-channel graphs?
 use common::C32;
+use common::time::Instant;
 use dsp::Channelizer;
-use std::time::Instant;
 
 fn main() {
     let rate = 50e6;

@@ -178,11 +178,11 @@ const TRAIL_MAX: usize = 128;
 
 /// The two halves of an ADS-B position must be near each other in time to be
 /// the same place: an aircraft at 500 knots moves a mile in seven seconds.
-const PAIR_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+const PAIR_WINDOW: common::time::Duration = common::time::Duration::from_secs(10);
 
 /// How long an ADS-B position stays usable as the reference for the next
 /// frame. An aircraft cannot leave the zone it was in within this.
-const REFERENCE_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+const REFERENCE_AGE: common::time::Duration = common::time::Duration::from_secs(60);
 
 /// What sort of thing a track is. Decides how it is drawn, how long it is
 /// remembered, and how fast it is allowed to have moved.
@@ -214,23 +214,23 @@ impl Kind {
     /// of range rather than that the receiver blinked. A Class B vessel
     /// reports every thirty seconds and a station every few minutes, so the
     /// same minute would forget them between transmissions.
-    pub fn forget(self) -> std::time::Duration {
+    pub fn forget(self) -> common::time::Duration {
         match self {
-            Kind::Aircraft => std::time::Duration::from_secs(60),
-            Kind::Vessel => std::time::Duration::from_secs(600),
+            Kind::Aircraft => common::time::Duration::from_secs(60),
+            Kind::Vessel => common::time::Duration::from_secs(600),
             // An APRS station beacons every few minutes at best, and a
             // stationary one every twenty. Forgetting it on the aircraft's
             // schedule would empty the map between transmissions.
-            Kind::Vehicle => std::time::Duration::from_secs(1800),
-            Kind::Station => std::time::Duration::from_secs(3600),
+            Kind::Vehicle => common::time::Duration::from_secs(1800),
+            Kind::Station => common::time::Duration::from_secs(3600),
             // One frame a second from 35 km, so a gap is terrain or a fade
             // rather than a landing. It stays on the map long enough to be
             // found again as it comes down.
-            Kind::Sonde => std::time::Duration::from_secs(600),
+            Kind::Sonde => common::time::Duration::from_secs(600),
             // Whatever it is, it said so once: a distress beacon transmits
             // every fifty seconds and is worth keeping on the map long after
             // the last burst.
-            Kind::Transmitter => std::time::Duration::from_secs(3600),
+            Kind::Transmitter => common::time::Duration::from_secs(3600),
         }
     }
 
@@ -488,7 +488,7 @@ pub struct Track {
     /// Where it has been, oldest first.
     pub trail: Vec<(f64, f64)>,
     pub messages: u64,
-    pub last: std::time::Instant,
+    pub last: common::time::Instant,
     /// How high it said it was, in metres, whatever sort of thing it is.
     ///
     /// Beside the detail rather than inside it, because a height arrives
@@ -510,11 +510,11 @@ pub struct Track {
     /// When the confirmed position was established, which decides whether it
     /// can still resolve the next ADS-B frame. Bookkeeping rather than
     /// something a table shows, so it stays private.
-    pos_at: Option<std::time::Instant>,
+    pos_at: Option<common::time::Instant>,
 }
 
 impl Track {
-    pub(crate) fn new(id: TrackId, detail: Detail, at: std::time::Instant) -> Self {
+    pub(crate) fn new(id: TrackId, detail: Detail, at: common::time::Instant) -> Self {
         Self {
             id,
             label: None,
@@ -538,7 +538,7 @@ impl Track {
         self.detail.kind()
     }
 
-    pub fn age(&self, now: std::time::Instant) -> std::time::Duration {
+    pub fn age(&self, now: common::time::Instant) -> common::time::Duration {
         now.saturating_duration_since(self.last)
     }
 
@@ -586,7 +586,7 @@ impl Track {
     /// have moved discards the trail rather than drawing a line to it: one of
     /// the two is wrong, the new one came from better evidence, and a line
     /// across the map to a place it never was is worse than no line.
-    fn set_position(&mut self, p: (f64, f64), at: std::time::Instant, confirmed: bool) {
+    fn set_position(&mut self, p: (f64, f64), at: common::time::Instant, confirmed: bool) {
         if !confirmed {
             self.position = Some(p);
             self.confirmed = false;
@@ -630,8 +630,8 @@ impl Track {
 /// touches it is never entered for one.
 #[derive(Default)]
 struct Cpr {
-    even: Option<((u32, u32), std::time::Instant)>,
-    odd: Option<((u32, u32), std::time::Instant)>,
+    even: Option<((u32, u32), common::time::Instant)>,
+    odd: Option<((u32, u32), common::time::Instant)>,
 }
 
 struct Entry {
@@ -666,12 +666,12 @@ impl Tracks {
     /// Not by how recently each was heard: things transmit several times a
     /// second and the order of the last few changes constantly, so a list
     /// sorted that way reshuffles faster than it can be read.
-    pub fn active(&self, now: std::time::Instant) -> Vec<&Track> {
+    pub fn active(&self, now: common::time::Instant) -> Vec<&Track> {
         self.seen.iter().map(|e| &e.track).filter(|t| t.age(now) < t.kind().forget()).collect()
     }
 
     /// Find or create the entry for an identity.
-    fn entry(&mut self, id: TrackId, detail: Detail, at: std::time::Instant) -> usize {
+    fn entry(&mut self, id: TrackId, detail: Detail, at: common::time::Instant) -> usize {
         if let Some(i) = self.seen.iter().position(|e| e.track.id == id) {
             return i;
         }
@@ -699,7 +699,7 @@ impl Tracks {
     /// per frame, so the packet carries the compact halves and the pairing
     /// happens here, where what this aircraft was doing a second ago is
     /// known.
-    pub fn update(&mut self, p: &common::packet::Packet, at: std::time::Instant) -> bool {
+    pub fn update(&mut self, p: &common::packet::Packet, at: common::time::Instant) -> bool {
         use common::packet::{Fact, Quantity};
         let Some(who) = p.subject().filter(|e| e.identifies()) else { return false };
         let Some(id) = track_id(who) else {
@@ -915,7 +915,7 @@ fn place_aircraft(
     e: &mut Entry,
     half: common::Cpr,
     reference: Option<(f64, f64)>,
-    at: std::time::Instant,
+    at: common::time::Instant,
 ) {
     let cpr = (half.lat, half.lon);
     if half.odd {
@@ -993,7 +993,7 @@ impl TracksNode {
     }
 
     /// The tracks heard recently, as the table wants them.
-    pub fn rows(&self, now: std::time::Instant) -> Vec<Track> {
+    pub fn rows(&self, now: common::time::Instant) -> Vec<Track> {
         self.tracks.active(now).into_iter().cloned().collect()
     }
 }
@@ -1023,7 +1023,7 @@ impl pipeline::node::Simple for TracksNode {
         // Stamped once for the block: things transmit several times a second
         // and the table shows ages in seconds, so splitting hairs inside a
         // seven millisecond block would be false precision.
-        let at = std::time::Instant::now();
+        let at = common::time::Instant::now();
         for packet in i.as_packets().unwrap_or(&[]) {
             // What the packet decoded to, decided once on the bus. This used
             // to be five parsers here, run on a guess from the frequency, so
@@ -1052,7 +1052,7 @@ mod tests {
 
     /// Real frames, from an hour of traffic over Ireland and the Irish Sea,
     /// with the times they arrived.
-    fn recorded_frames() -> Vec<(std::time::Duration, Vec<u8>)> {
+    fn recorded_frames() -> Vec<(common::time::Duration, Vec<u8>)> {
         let text = include_str!("../testdata/adsb_tracks.hex");
         text.lines()
             .filter_map(|l| {
@@ -1060,7 +1060,7 @@ mod tests {
                 let bytes = (0..hex.len() / 2)
                     .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok())
                     .collect::<Option<Vec<u8>>>()?;
-                Some((std::time::Duration::from_millis(ms.parse().ok()?), bytes))
+                Some((common::time::Duration::from_millis(ms.parse().ok()?), bytes))
             })
             .collect()
     }
@@ -1075,8 +1075,8 @@ mod tests {
         assert!(frames.len() > 2000, "fixture did not load");
         let mut fl = Tracks::new();
         fl.set_reference(53.35, -6.26);
-        let t0 = std::time::Instant::now();
-        let mut last: std::collections::HashMap<u32, ((f64, f64), std::time::Instant)> =
+        let t0 = common::time::Instant::now();
+        let mut last: std::collections::HashMap<u32, ((f64, f64), common::time::Instant)> =
             Default::default();
         let mut worst = 0.0f64;
         for (offset, bytes) in &frames {
@@ -1118,7 +1118,7 @@ mod tests {
     }
 
     /// Through the Mode S decoder, the way the bus feeds the map.
-    fn feed_adsb(t: &mut Tracks, f: &adsb::Frame, at: std::time::Instant) {
+    fn feed_adsb(t: &mut Tracks, f: &adsb::Frame, at: common::time::Instant) {
         t.update(&heard(1_090_000_000, decode::adsb::read(f)), at);
     }
 
@@ -1157,7 +1157,7 @@ mod tests {
 
     /// Through the decoder the bus runs, which is the only way into the
     /// tracker now: the map reads what the protocols concluded.
-    fn feed_ais(t: &mut Tracks, payload: &[u8], at: std::time::Instant) {
+    fn feed_ais(t: &mut Tracks, payload: &[u8], at: common::time::Instant) {
         let f = ais_frame(payload);
         assert!(
             t.update(&heard(162_025_000, decode::ais::read(&f)), at),
@@ -1165,7 +1165,7 @@ mod tests {
         );
     }
 
-    fn feed_aprs(t: &mut Tracks, frame: &ax25::Frame, at: std::time::Instant) -> bool {
+    fn feed_aprs(t: &mut Tracks, frame: &ax25::Frame, at: common::time::Instant) -> bool {
         t.update(&heard(144_800_000, decode::aprs::read(frame)), at)
     }
 
@@ -1179,7 +1179,7 @@ mod tests {
 
     #[test]
     fn frames_from_one_aircraft_become_one_row() {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut f = Tracks::new();
         feed_adsb(&mut f, &ident(), now);
         feed_adsb(&mut f, &ident(), now);
@@ -1192,11 +1192,11 @@ mod tests {
 
     #[test]
     fn a_pair_of_position_frames_resolves_without_a_reference() {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut f = Tracks::new();
         feed_adsb(&mut f, &pos_even(), now);
         assert!(f.active(now)[0].position.is_none(), "one parity says nothing");
-        feed_adsb(&mut f, &pos_odd(), now + std::time::Duration::from_millis(500));
+        feed_adsb(&mut f, &pos_odd(), now + common::time::Duration::from_millis(500));
         let (lat, lon) = f.active(now)[0].position.expect("a position");
         assert!((lat - 52.2657).abs() < 0.01, "latitude {lat}");
         assert!((lon - 3.9389).abs() < 0.01, "longitude {lon}");
@@ -1204,7 +1204,7 @@ mod tests {
 
     #[test]
     fn velocity_and_altitude_land_on_the_same_row() {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut f = Tracks::new();
         feed_adsb(&mut f, &velocity(), now);
         let a = &f.active(now)[0];
@@ -1217,7 +1217,7 @@ mod tests {
     /// position, which is the whole difference from ADS-B.
     #[test]
     fn one_ais_message_is_a_position_on_its_own() {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut t = Tracks::new();
         // Deliberately no reference set: an AIS fix must not need one.
         feed_ais(&mut t, &ais_position(), now);
@@ -1237,7 +1237,7 @@ mod tests {
     /// and an altitude for an aircraft.
     #[test]
     fn a_name_and_a_position_from_two_messages_become_one_vessel() {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut t = Tracks::new();
         feed_ais(&mut t, &ais_position(), now);
         // A static report for the same MMSI, built by hand: type 5 with the
@@ -1272,7 +1272,7 @@ mod tests {
     /// same thing. This is why the identity is a pair and not a number.
     #[test]
     fn an_icao_and_an_mmsi_with_the_same_value_are_different_tracks() {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut t = Tracks::new();
         feed_adsb(&mut t, &ident(), now);
         let icao = match t.active(now)[0].id {
@@ -1305,25 +1305,25 @@ mod tests {
     /// slow traffic between transmissions.
     #[test]
     fn each_kind_is_forgotten_on_its_own_schedule() {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut t = Tracks::new();
         feed_adsb(&mut t, &ident(), now);
         feed_ais(&mut t, &ais_position(), now);
         assert_eq!(t.active(now).len(), 2);
 
-        let later = now + std::time::Duration::from_secs(120);
+        let later = now + common::time::Duration::from_secs(120);
         let left = t.active(later);
         assert_eq!(left.len(), 1, "the aircraft should have aged out and the vessel not");
         assert_eq!(left[0].kind(), Kind::Vessel);
 
-        assert!(t.active(now + std::time::Duration::from_secs(3600)).is_empty());
+        assert!(t.active(now + common::time::Duration::from_secs(3600)).is_empty());
     }
 
     /// A base station is a fixed thing, and the map should not draw it as
     /// something under way.
     #[test]
     fn a_base_station_is_a_station_rather_than_a_vessel() {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut t = Tracks::new();
         // The Norfolk base station, the payload `decode::ais` is tested on.
         let payload = [
@@ -1360,7 +1360,7 @@ mod tests {
     /// neither of the other two protocols' shapes.
     #[test]
     fn one_aprs_frame_is_a_named_station_on_its_own() {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut t = Tracks::new();
         feed_aprs(&mut t, &aprs_frame("EI2ABC", 9, b"!5338.00N/00615.00W>088/036on the road"), now);
         let active = t.active(now);
@@ -1384,7 +1384,7 @@ mod tests {
     /// the map draws it accordingly, so the symbol has to be read.
     #[test]
     fn the_aprs_symbol_decides_what_kind_of_thing_it_is() {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         for (sym, want) in [
             ('>', Kind::Vehicle),
             // A balloon, which the map draws as what it is rather than as
@@ -1407,7 +1407,7 @@ mod tests {
     /// collide with a number.
     #[test]
     fn the_three_protocols_do_not_share_an_identity_space() {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut t = Tracks::new();
         feed_adsb(&mut t, &ident(), now);
         feed_ais(&mut t, &ais_position(), now);
@@ -1423,7 +1423,7 @@ mod tests {
     /// already has one.
     #[test]
     fn a_status_frame_does_not_move_a_station() {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut t = Tracks::new();
         feed_aprs(&mut t, &aprs_frame("EI2ABC", 0, b"!5338.00N/00615.00W>"), now);
         let before = t.active(now)[0].position;
@@ -1435,13 +1435,16 @@ mod tests {
 
     #[test]
     fn a_contradicted_position_drops_the_trail_rather_than_drawing_to_it() {
-        let mut a =
-            Track::new(TrackId::Icao(0x4ca748), Detail::new_aircraft(), std::time::Instant::now());
-        let t = std::time::Instant::now();
+        let mut a = Track::new(
+            TrackId::Icao(0x4ca748),
+            Detail::new_aircraft(),
+            common::time::Instant::now(),
+        );
+        let t = common::time::Instant::now();
         a.set_position((53.4, -6.3), t, true);
-        a.set_position((53.5, -6.4), t + std::time::Duration::from_secs(10), true);
+        a.set_position((53.5, -6.4), t + common::time::Duration::from_secs(10), true);
         assert_eq!(a.trail.len(), 2, "a plausible move extends the trail");
-        a.set_position((53.5, 3.6), t + std::time::Duration::from_secs(11), true);
+        a.set_position((53.5, 3.6), t + common::time::Duration::from_secs(11), true);
         assert_eq!(a.trail, vec![(53.5, 3.6)], "the old track was not where it was");
     }
 
@@ -1450,7 +1453,7 @@ mod tests {
         // Weather and a callsign from replies to a radar. An aircraft that
         // never sends an extended squitter is still on the list with an
         // altitude, and this is the only place a wind reading comes from.
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut t = Tracks::new();
         feed_adsb(&mut t, &frame("A0001692185BD5CF400000DFC696"), now);
         feed_adsb(&mut t, &frame("A0001838201584F23468207CDFA5"), now);
@@ -1475,7 +1478,7 @@ mod tests {
     /// and labelled as MeshCore beside the aircraft and ships.
     #[test]
     fn a_meshcore_advert_places_a_node() {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut key = [0u8; 32];
         key[0] = 0x22;
         key[1..4].copy_from_slice(&[0x7a, 0xa8, 0x8f]);
@@ -1513,7 +1516,7 @@ mod tests {
     /// distress beacon here, and whatever the next one turns out to be.
     #[test]
     fn a_protocol_the_tracker_has_never_heard_of_is_still_a_track() {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut t = Tracks::new();
         let beacon = || Entity::new("epirb", Id::Text("1D043C4802FFBFF".into())).named("EPIRB");
         let placed = common::packet::Proto::new("epirb", "distress")
@@ -1534,7 +1537,7 @@ mod tests {
 
         // The same beacon again, two minutes later and a mile away: one
         // track with a trail, not two marks.
-        let later = now + std::time::Duration::from_secs(120);
+        let later = now + common::time::Duration::from_secs(120);
         let moved = common::packet::Proto::new("epirb", "distress")
             .by(beacon())
             .saying(Fact::Position(Fix { lat: 53.38, lon: -10.19, precision_bits: None }));
@@ -1555,7 +1558,7 @@ mod tests {
     /// aircraft as an unknown transmitter, with no height and no name.
     #[test]
     fn a_drone_gathers_what_its_separate_messages_said() {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut t = Tracks::new();
         let aircraft = || Entity::new("odid", Id::Text("1596F3".into()));
         let placed = common::packet::Proto::new("opendroneid", "adv_nonconn_ind")
@@ -1601,7 +1604,7 @@ mod tests {
     /// transmitter at a position with nothing to say what was wrong.
     #[test]
     fn a_beacon_in_distress_says_so_on_the_map() {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut t = Tracks::new();
         let beacon = common::packet::Proto::new("epirb", "distress")
             .by(Entity::new("epirb", Id::Text("1D043C4802FFBFF".into())))
@@ -1623,7 +1626,7 @@ mod tests {
     /// is stays off the map: a pager, a meter, a tyre valve.
     #[test]
     fn a_device_that_reports_no_position_is_not_a_track() {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut t = Tracks::new();
         let d = common::packet::Proto::new("pocsag", "alpha")
             .by(Entity::new("pocsag", Id::Text("1234567".into())));
@@ -1633,7 +1636,7 @@ mod tests {
 
     #[test]
     fn packets_that_are_not_tracks_are_ignored() {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut f = Tracks::new();
         feed_adsb(&mut f, &frame("5D4007FB3E0376"), now);
         assert!(f.active(now).is_empty());
@@ -1641,7 +1644,7 @@ mod tests {
 
     #[test]
     fn a_meshtastic_node_is_placed_and_named() {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut t = Tracks::new();
         let node = || Entity::new("meshtastic", Id::Hex(0x050d_3664));
         let position = common::packet::Proto::new("meshtastic", "position")
@@ -1671,7 +1674,7 @@ mod tests {
             "4CA068;EI-CJX;B752;00;BOEING 757-200;;;\n".as_bytes(),
         )
         .unwrap();
-        let at = std::time::Instant::now();
+        let at = common::time::Instant::now();
         let plane = Track::new(TrackId::Icao(0x4ca068), Detail::new_aircraft(), at);
         assert_eq!(
             plane.airframe(Some(&fleet)).map(|a| a.summary()).as_deref(),
@@ -1686,7 +1689,7 @@ mod tests {
 
     #[test]
     fn a_vessel_links_to_vesselfinder_and_a_shore_station_does_not() {
-        let at = std::time::Instant::now();
+        let at = common::time::Instant::now();
         let ship = Track::new(TrackId::Mmsi(250002345), vessel(), at);
         assert_eq!(
             ship.vesselfinder().as_deref(),

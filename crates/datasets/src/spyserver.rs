@@ -1,9 +1,9 @@
 use crate::cache::{Cache, Error, Source, When};
+use common::time::Duration;
 use sdr_directory::{
     Accuracy, Author, Dial, Entry, Hardware, Listing, Location, Protocol, Station, Tuner,
 };
 use serde::Deserialize;
-use std::time::Duration;
 
 pub fn source() -> Source {
     Source::http(

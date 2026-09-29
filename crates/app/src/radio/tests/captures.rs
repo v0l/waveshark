@@ -26,7 +26,7 @@ fn a_sensor_heard_by_the_receiver_reaches_the_house() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
     let port = listener.local_addr().unwrap().port();
     let (tx, seen) = std::sync::mpsc::channel::<(String, String)>();
-    std::thread::spawn(move || {
+    common::thread::spawn(move || {
         let (mut sock, _) = listener.accept().expect("a connection");
         let mut held = Vec::new();
         let mut chunk = [0u8; 4096];
@@ -67,11 +67,11 @@ fn a_sensor_heard_by_the_receiver_reaches_the_house() {
         buses: true,
     });
     rx.apply_settings(&plan);
-    let up = std::time::Instant::now();
+    let up = common::time::Instant::now();
     while !rx.homeassistant_status().is_some_and(|s| s.connected)
-        && up.elapsed() < std::time::Duration::from_secs(5)
+        && up.elapsed() < common::time::Duration::from_secs(5)
     {
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(common::time::Duration::from_millis(10));
     }
     let st = rx.homeassistant_status();
     assert!(st.as_ref().is_some_and(|s| s.connected), "never connected: {st:?}");
@@ -83,7 +83,7 @@ fn a_sensor_heard_by_the_receiver_reaches_the_house() {
     assert_eq!(st.dropped, 0, "{st:?}");
 
     let mut got: Vec<(String, String)> = Vec::new();
-    while let Ok(m) = seen.recv_timeout(std::time::Duration::from_secs(2)) {
+    while let Ok(m) = seen.recv_timeout(common::time::Duration::from_secs(2)) {
         got.push(m);
         if got.iter().any(|(t, _)| t.ends_with("/state")) {
             break;
@@ -373,7 +373,7 @@ fn a_radiosonde_is_found_and_tracked_through_the_receiver() {
     // this is the test that a balloon is drawn: one track, labelled with
     // the serial, with a trail behind it. It drifted 900 m east across
     // the capture, which is the whole of the trail.
-    let tracks = rx.tracks(std::time::Instant::now());
+    let tracks = rx.tracks(common::time::Instant::now());
     assert_eq!(tracks.len(), 1, "{tracks:?}");
     let t = &tracks[0];
     assert_eq!(t.id, crate::tracks::TrackId::Sonde("S1720982".into()));
@@ -436,7 +436,7 @@ fn each_barge_on_the_waal_links_to_vesselfinder() {
         .fronts(crate::scanners::Span::new(buf.center.as_f64(), buf.rate.as_f64()));
     let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
     let _ = replay_blocks(&mut rx, &buf);
-    let tracks = rx.tracks(std::time::Instant::now());
+    let tracks = rx.tracks(common::time::Instant::now());
     let mut vessels: Vec<(u32, Option<String>)> = tracks
         .iter()
         .filter_map(|t| match t.id {

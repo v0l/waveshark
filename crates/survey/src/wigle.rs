@@ -188,7 +188,7 @@ pub fn row_of(d: &Device, s: &Sighting) -> Option<String> {
     row(&d.protocol, &d.ident, d.name.as_deref(), d.vendor.as_deref(), s)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "db"))]
 mod tests {
     use super::*;
     use crate::Report;

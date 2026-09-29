@@ -268,8 +268,8 @@ fn describe(r: &Reception, rate: f64, samples: usize) -> sources::sigmf::Recordi
 }
 
 fn now_us() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    common::time::SystemTime::now()
+        .duration_since(common::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
         .unwrap_or(0)
 }
@@ -356,7 +356,7 @@ mod tests {
             return;
         }
         let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
-        let dir = std::env::temp_dir().join(format!("sr-record-{}", std::process::id()));
+        let dir = common::platform::scratch_dir().join(format!("sr-record-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
         let rec = Recorder::new(&dir, buf.rate.as_f64(), buf.center).unwrap();
@@ -422,7 +422,7 @@ mod tests {
             return;
         }
         let buf = sources::FileSource::open(&p).unwrap().read_all().unwrap();
-        let dir = std::env::temp_dir().join(format!("sr-short-{}", std::process::id()));
+        let dir = common::platform::scratch_dir().join(format!("sr-short-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let rec = Recorder::new(&dir, buf.rate.as_f64(), buf.center).unwrap().with_pre_roll(0.1);
         crate::radio::scan_with_recorder(&buf, rec);
@@ -442,7 +442,7 @@ mod tests {
     fn a_capture_carries_its_tuning_in_its_name() {
         // The filename is the only metadata a replay reads, so it has to
         // survive the parser that reads it. It did not, once.
-        let dir = std::env::temp_dir().join(format!("sr-name-{}", std::process::id()));
+        let dir = common::platform::scratch_dir().join(format!("sr-name-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut r = Recorder::new(&dir, 250_000.0, Hz::mhz(434)).unwrap();
         r.push(&ramp(4096, 0.0));
@@ -458,7 +458,7 @@ mod tests {
 
     #[test]
     fn every_capture_carries_its_decode_as_a_sigmf_annotation() {
-        let dir = std::env::temp_dir().join(format!("sr-index-{}", std::process::id()));
+        let dir = common::platform::scratch_dir().join(format!("sr-index-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut r = Recorder::new(&dir, 250_000.0, Hz::mhz(434)).unwrap();
         r.push(&ramp(4096, 0.0));

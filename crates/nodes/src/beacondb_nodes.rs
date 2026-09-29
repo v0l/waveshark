@@ -14,6 +14,7 @@
 //! places this receiver has been.
 
 use common::Result;
+use common::time::{Duration, Instant};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
@@ -21,7 +22,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
 
 /// A spool file is closed once it holds this many observations.
 const ITEMS_PER_FILE: usize = 500;
@@ -93,7 +93,8 @@ impl Sender {
             return;
         }
         let s = self.clone();
-        let _ = std::thread::Builder::new().name("beacondb-submit".into()).spawn(move || s.run());
+        let _ =
+            common::thread::Builder::new().name("beacondb-submit".into()).spawn(move || s.run());
     }
 
     pub fn set_on(&self, on: bool) {
@@ -141,7 +142,7 @@ impl Sender {
                 continue;
             }
             let Some(path) = oldest(&self.dir()) else { continue };
-            let Ok(body) = std::fs::read(&path) else {
+            let Ok(body) = common::fs::blocking::read(&path) else {
                 self.say(Some(format!("{}: unreadable", path.display())));
                 continue;
             };
@@ -151,7 +152,7 @@ impl Sender {
                     // Deleted only now: a file sent but not acknowledged is
                     // one this will send again, which is the failure worth
                     // having.
-                    let _ = std::fs::remove_file(&path);
+                    let _ = common::fs::blocking::remove_file(&path);
                     self.sent_files.fetch_add(1, Ordering::Relaxed);
                     self.sent_items.fetch_add(items, Ordering::Relaxed);
                     self.say(None);
@@ -187,10 +188,10 @@ fn items_in(path: &Path) -> u64 {
 /// Closed spool files, oldest first by name, which is the order they were
 /// written in: the name carries the time.
 fn spooled(dir: &Path) -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+    let mut files: Vec<PathBuf> = common::fs::blocking::read_dir(dir)
         .into_iter()
         .flatten()
-        .filter_map(|e| e.ok().map(|e| e.path()))
+        .map(|e| e.path().to_path_buf())
         .filter(|p| p.extension().is_some_and(|e| e == "json"))
         .collect();
     files.sort();
@@ -297,7 +298,7 @@ impl BeaconDbNode {
             return;
         }
         let dir = self.spool.clone();
-        if std::fs::create_dir_all(&dir).is_err() {
+        if common::fs::blocking::create_dir_all(&dir).is_err() {
             return;
         }
         self.seq += 1;
@@ -307,8 +308,8 @@ impl BeaconDbNode {
         // Written whole and then moved into place, so the sender never reads
         // a file that is still being written.
         let part = dir.join(format!("{name}.part"));
-        if std::fs::write(&part, body).is_ok() {
-            let _ = std::fs::rename(&part, dir.join(name));
+        if common::fs::blocking::write(&part, body).is_ok() {
+            let _ = common::fs::blocking::rename(&part, dir.join(name));
         }
         self.counted.borrow_mut().0 = None;
         self.opened = Instant::now();
@@ -369,16 +370,14 @@ impl Simple for BeaconDbNode {
 
 /// `$XDG_DATA_HOME/waveshark/beacondb`, beside the packet log and the survey.
 pub fn default_spool_dir() -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(std::env::temp_dir)
-        .join("waveshark/beacondb")
+    common::platform::data_dir()
+        .unwrap_or_else(|| common::platform::scratch_dir().join("waveshark"))
+        .join("beacondb")
 }
 
 fn now_s() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    common::time::SystemTime::now()
+        .duration_since(common::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
@@ -419,7 +418,7 @@ mod tests {
     }
 
     fn spool() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = common::platform::scratch_dir().join(format!(
             "waveshark-beacondb-{}-{:?}",
             std::process::id(),
             std::thread::current().id()

@@ -14,10 +14,7 @@ pub const SUBPROTOCOL: &str = "iqstream";
 pub type Read = Box<dyn AsyncRead + Send + Unpin>;
 pub type Write = Box<dyn AsyncWrite + Send + Unpin>;
 
-pub fn is_url(s: &str) -> bool {
-    let s = s.trim_start().to_ascii_lowercase();
-    s.starts_with("ws://") || s.starts_with("wss://")
-}
+pub use crate::url::is_url;
 
 pub struct Reader<S> {
     stream: SplitStream<WebSocketStream<S>>,

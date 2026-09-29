@@ -40,7 +40,7 @@ pub(super) enum Action {
 
 impl Transcript<'_> {
     pub(super) fn show(mut self, ui: &mut egui::Ui) -> Option<Action> {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut act = None;
 
         ui.add_space(8.0);
@@ -118,7 +118,7 @@ impl Transcript<'_> {
         // Newest at the bottom and stuck there, which is how a conversation
         // reads: the line being spoken now is where the eye already is, and
         // a partial that grows is the same row getting taller.
-        let wall = std::time::SystemTime::now();
+        let wall = common::time::SystemTime::now();
         let width = ui.available_width().max(COLS.iter().map(|(_, w)| w).sum::<f32>() + 300.0);
         let text_w = width - 24.0 - COLS.iter().map(|(_, w)| w).sum::<f32>();
         let (rect, _) = ui.allocate_exact_size(Vec2::new(width, table::ROW_H), Sense::hover());
@@ -464,8 +464,8 @@ fn row(
     ui: &mut egui::Ui,
     u: &Utterance,
     n: usize,
-    now: std::time::Instant,
-    wall: std::time::SystemTime,
+    now: common::time::Instant,
+    wall: common::time::SystemTime,
     width: f32,
     text_w: f32,
 ) {
@@ -515,7 +515,7 @@ fn row(
     // clock somebody can read.
     let when = wall
         .checked_sub(age)
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|t| t.duration_since(common::time::UNIX_EPOCH).ok())
         .map(|d| crate::sats::utc_hms(d.as_secs() as i64))
         .unwrap_or_default();
     let freq = if u.key.channel_hz > 0 {

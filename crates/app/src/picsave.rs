@@ -30,7 +30,7 @@ const ABANDON_S: f64 = 5.0;
 pub fn pictures_dir() -> PathBuf {
     crate::wspkt::PacketLog::default_dir()
         .map(|d| d.with_file_name("pictures"))
-        .unwrap_or_else(|| std::env::temp_dir().join("waveshark-pictures"))
+        .unwrap_or_else(|| common::platform::scratch_dir().join("waveshark-pictures"))
 }
 
 /// One picture being watched for completion.
@@ -70,7 +70,7 @@ impl PictureSaveNode {
     }
 
     fn write(&mut self, f: &VideoFrame) {
-        let path = self.dir.join(name_of(f, std::time::SystemTime::now()));
+        let path = self.dir.join(name_of(f, common::time::SystemTime::now()));
         match save_png(f, &path) {
             Ok(()) => {
                 tracing::info!("picture saved: {}", path.display());
@@ -164,10 +164,10 @@ impl Simple for PictureSaveNode {
 /// The sender's own clock where the transmission carried one, because a
 /// picture is written when it ends: a satellite pass is a quarter of an hour
 /// long, and the file's own time is the time it stopped arriving.
-fn name_of(f: &VideoFrame, now: std::time::SystemTime) -> String {
+fn name_of(f: &VideoFrame, now: common::time::SystemTime) -> String {
     let secs = match f.sent_at_us {
         Some(us) => us / 1_000_000,
-        None => now.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+        None => now.duration_since(common::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
     };
     let stamp = stamp(secs);
     let what = f.label.clone().unwrap_or_else(|| f.system.to_string());
@@ -194,7 +194,7 @@ fn stamp(secs: u64) -> String {
 /// Write a picture as a PNG, making the directory if it is not there.
 fn save_png(f: &VideoFrame, path: &std::path::Path) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+        common::fs::blocking::create_dir_all(dir)?;
     }
     let rgb = f.rgb();
     let buf = image::RgbImage::from_raw(f.width as u32, f.height as u32, rgb.into_owned())
@@ -261,7 +261,8 @@ mod tests {
     /// block the bus republishes it on.
     #[test]
     fn a_finished_picture_is_written_once() {
-        let dir = std::env::temp_dir().join(format!("waveshark-pic-{}", std::process::id()));
+        let dir =
+            common::platform::scratch_dir().join(format!("waveshark-pic-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut n = PictureSaveNode::new(dir.clone());
 
@@ -285,7 +286,8 @@ mod tests {
     /// name saying so: it is the only copy of what was received.
     #[test]
     fn a_picture_that_stopped_is_written_with_what_arrived() {
-        let dir = std::env::temp_dir().join(format!("waveshark-pic-part-{}", std::process::id()));
+        let dir = common::platform::scratch_dir()
+            .join(format!("waveshark-pic-part-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut n = PictureSaveNode::new(dir.clone());
 
@@ -302,7 +304,8 @@ mod tests {
     /// and say no more than one does.
     #[test]
     fn fields_are_not_written() {
-        let dir = std::env::temp_dir().join(format!("waveshark-pic-live-{}", std::process::id()));
+        let dir = common::platform::scratch_dir()
+            .join(format!("waveshark-pic-live-{}", std::process::id()));
         let mut n = PictureSaveNode::new(dir.clone());
         let mut f = still(8, 8);
         f.cadence = Cadence::Live;
@@ -316,7 +319,7 @@ mod tests {
     fn the_name_says_when_what_and_where() {
         let f = still(8, 8);
         // 2023-11-14 22:13:20 UTC.
-        let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let when = common::time::UNIX_EPOCH + common::time::Duration::from_secs(1_700_000_000);
         let name = name_of(&f, when);
         assert_eq!(name, "20231114-221320_Martin-1_144.500MHz.png");
     }
@@ -328,7 +331,7 @@ mod tests {
     fn a_picture_is_filed_under_the_clock_the_sender_sent() {
         let mut f = still(8, 8);
         f.sent_at_us = Some(1_700_000_000_000_000 - 900 * 1_000_000);
-        let written = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let written = common::time::UNIX_EPOCH + common::time::Duration::from_secs(1_700_000_000);
         let name = name_of(&f, written);
         assert_eq!(name, "20231114-215820_Martin-1_144.500MHz.png");
     }

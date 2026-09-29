@@ -101,7 +101,7 @@ const FORMAT: Format = Format {
     // of frames a second, so the buffer holds a busy second rather than a
     // single burst.
     buf_bytes: 256 << 10,
-    flush_every: std::time::Duration::from_millis(250),
+    flush_every: common::time::Duration::from_millis(250),
 };
 
 const TAG_CARRIER: u8 = 1;
@@ -134,10 +134,7 @@ pub struct PacketLog {
 impl PacketLog {
     /// `$XDG_DATA_HOME/waveshark/packets`, or `~/.local/share` when unset
     pub fn default_dir() -> Option<PathBuf> {
-        let base = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
-        Some(base.join("waveshark").join("packets"))
+        Some(common::platform::data_dir()?.join("packets"))
     }
 
     /// Beside the log folder, where the device database lives
@@ -657,7 +654,7 @@ pub fn parse(buf: &[u8]) -> Vec<Packet> {
 /// writer and is tested against it. A truncated final record, which is what a
 /// receiver killed mid-write leaves, ends the iteration rather than failing.
 pub fn read(path: impl AsRef<std::path::Path>) -> std::io::Result<Vec<Packet>> {
-    let mut f = std::fs::File::open(path)?;
+    let mut f = common::fs::blocking::File::open(path)?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf)?;
     Ok(parse(&buf))
@@ -716,7 +713,8 @@ mod tests {
     const AT: u64 = 1_788_177_600_000_000;
 
     fn dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("sr-wspkt-{name}-{}", std::process::id()));
+        let d =
+            common::platform::scratch_dir().join(format!("sr-wspkt-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
     }

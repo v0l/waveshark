@@ -60,19 +60,19 @@ fn main() {
 
     let mut air = Vec::new();
     let mut sent = 0usize;
-    let (mut in_source, mut in_mod) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+    let (mut in_source, mut in_mod) = (common::time::Duration::ZERO, common::time::Duration::ZERO);
     for _ in 0..((seconds * radio_hz / block as f64).ceil() as usize) {
         let mut ts = Payload::empty_of(PortKind::Bytes);
         let mut iq = Payload::empty_of(PortKind::Iq);
         let ins = [clock];
         let (tags, mut events, mut new_tags) = (Vec::new(), Vec::new(), Vec::new());
         let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
-        let t = std::time::Instant::now();
+        let t = common::time::Instant::now();
         Simple::process(&mut source, &Payload::Real(vec![0.0; block]), &mut ts, &mut ctx)
             .expect("the source runs");
         in_source += t.elapsed();
         sent += ts.as_bytes().map(<[u8]>::len).unwrap_or(0);
-        let t = std::time::Instant::now();
+        let t = common::time::Instant::now();
         Simple::process(&mut modulator, &ts, &mut iq, &mut ctx).expect("the modulator runs");
         in_mod += t.elapsed();
         air.extend_from_slice(iq.as_iq().unwrap_or(&[]));

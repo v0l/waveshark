@@ -165,7 +165,7 @@ impl Enumerated {
 
     pub fn label(&self) -> String {
         let name = if self.name.is_empty() { "LimeSDR" } else { &self.name };
-        let tail = short_serial(&self.serial);
+        let tail = common::serial_tail(&self.serial);
         if tail.is_empty() { name.to_string() } else { format!("{name} {tail}") }
     }
 }
@@ -187,12 +187,6 @@ pub fn enumerate() -> Vec<Enumerated> {
         return Vec::new();
     }
     list.iter().take(n as usize).enumerate().map(|(i, s)| Enumerated::parse(i, cstr(s))).collect()
-}
-
-/// Serial tails identify a unit; the leading zeros do not.
-fn short_serial(s: &str) -> String {
-    let t = s.trim_start_matches('0');
-    if t.len() > 8 { t[t.len() - 8..].to_string() } else { t.to_string() }
 }
 
 /// Raw device pointer. LimeSuite has no thread affinity requirement, only a
@@ -1597,11 +1591,5 @@ mod tests {
         // Whatever else the list holds is passed through untouched: NONE and
         // the Mini's own Auto are not connectors.
         assert_eq!(connector("LimeSDR-USB", 0, "NONE"), "NONE");
-    }
-
-    #[test]
-    fn serials_shorten_to_the_identifying_tail() {
-        assert_eq!(short_serial("0000000000000000457863dc3579c1df"), "3579c1df");
-        assert_eq!(short_serial(""), "");
     }
 }

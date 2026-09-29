@@ -20,9 +20,9 @@
 //! than interpreted.
 
 use crate::cache::{Error, When};
+use common::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// One repository arrives in one response; a limit well above that guards
 /// against a redirect to something else entirely rather than bounding
@@ -45,6 +45,7 @@ pub const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 pub struct Repo {
     /// What the repository is called, for the row and the browser.
     pub name: &'static str,
+    pub cross_origin: bool,
     /// Directory name under the cache, and the metadata key.
     pub dir: &'static str,
     /// Where the branch's HEAD commit id is answered. Expected to return
@@ -215,14 +216,13 @@ pub fn status(repo: &'static Repo, cache: &crate::cache::Cache) -> Status {
 
 /// What a tree occupies, added up from the files themselves.
 fn tree_bytes(dir: &Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let Ok(entries) = common::fs::blocking::read_dir(dir) else { return 0 };
     let mut total = 0;
-    for e in entries.flatten() {
-        let p = e.path();
-        match e.metadata() {
-            Ok(m) if m.is_dir() => total += tree_bytes(&p),
-            Ok(m) => total += m.len(),
-            Err(_) => {}
+    for e in entries {
+        if e.is_dir() {
+            total += tree_bytes(e.path());
+        } else if let Ok(m) = common::fs::blocking::metadata(e.path()) {
+            total += m.len();
         }
     }
     total
@@ -245,11 +245,11 @@ pub fn files_with(repo: &'static Repo, cache: &crate::cache::Cache, ext: &str) -
 }
 
 fn walk(root: &Path, dir: &Path, ext: &str, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for e in entries.flatten() {
+    let Ok(entries) = common::fs::blocking::read_dir(dir) else { return };
+    for e in entries {
         let p = e.path();
-        if p.is_dir() {
-            walk(root, &p, ext, out);
+        if e.is_dir() {
+            walk(root, p, ext, out);
         } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case(ext))
             && let Ok(rel) = p.strip_prefix(root)
         {
@@ -263,9 +263,7 @@ fn fetch(
     cache: &crate::cache::Cache,
     have: &Option<String>,
 ) -> Result<Option<Tree>, Error> {
-    let client = httpc::blocking(Duration::from_secs(600))
-        .map_err(|e| Error::Fetch(repo.tarball.into(), e.to_string()))?;
-    let commit = head_commit(repo, &client)?;
+    let commit = head_commit(repo)?;
     if have.as_deref() == Some(commit.as_str()) {
         return Ok(None);
     }
@@ -274,26 +272,22 @@ fn fetch(
     let git = cache.dir().join("git");
     let dir = repo.cache_dir(cache);
     let tmp = git.join(format!("{}.part", repo.dir));
-    std::fs::create_dir_all(&git).map_err(|e| Error::Io(git.display().to_string(), e))?;
-    let _ = std::fs::remove_dir_all(&tmp);
-    let resp = client
-        .get(repo.tarball)
-        .send()
-        .map_err(|e| Error::Fetch(repo.tarball.into(), e.to_string()))?;
-    if resp.status().as_u16() != 200 {
-        return Err(Error::Status(repo.tarball.into(), resp.status().as_u16()));
+    common::fs::blocking::create_dir_all(&git)
+        .map_err(|e| Error::Io(git.display().to_string(), e))?;
+    let _ = common::fs::blocking::remove_dir_all(&tmp);
+    let resp = httpc::get(repo.tarball)
+        .timeout(Duration::from_secs(600))
+        .wait()
+        .map_err(|e| Error::Fetch(repo.tarball.into(), e))?;
+    if resp.status != 200 {
+        return Err(Error::Status(repo.tarball.into(), resp.status));
     }
     // Counted on the compressed side, where the length the forge declared
     // applies: what comes out of the decoder is several times what came
     // down the wire, and a bar past its end reads as a fault.
     let progress = crate::progress::of(repo.dir);
     progress.start();
-    if let Some(n) = resp
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse().ok())
-    {
+    if let Some(n) = resp.header("content-length").and_then(|v| v.parse().ok()) {
         progress.expect(n);
     }
     let body = crate::cache::Capped::new(resp, repo.max_bytes.max(MAX_BYTES));
@@ -309,11 +303,12 @@ fn fetch(
         }
     };
     if files == 0 {
-        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = common::fs::blocking::remove_dir_all(&tmp);
         return Err(Error::Parse(repo.dir.into(), "the tarball holds no files".into()));
     }
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::rename(&tmp, &dir).map_err(|e| Error::Io(dir.display().to_string(), e))?;
+    let _ = common::fs::blocking::remove_dir_all(&dir);
+    common::fs::blocking::rename(&tmp, &dir)
+        .map_err(|e| Error::Io(dir.display().to_string(), e))?;
     let meta = Meta {
         commit: Some(commit.clone()),
         files,
@@ -327,13 +322,15 @@ fn fetch(
 }
 
 /// The branch's current commit id, from the `head` URL's JSON.
-fn head_commit(repo: &'static Repo, client: &httpc::BlockingClient) -> Result<String, Error> {
-    let resp =
-        client.get(repo.head).send().map_err(|e| Error::Fetch(repo.head.into(), e.to_string()))?;
-    if resp.status().as_u16() != 200 {
-        return Err(Error::Status(repo.head.into(), resp.status().as_u16()));
+fn head_commit(repo: &'static Repo) -> Result<String, Error> {
+    let resp = httpc::get(repo.head)
+        .timeout(Duration::from_secs(600))
+        .wait()
+        .map_err(|e| Error::Fetch(repo.head.into(), e))?;
+    if resp.status != 200 {
+        return Err(Error::Status(repo.head.into(), resp.status));
     }
-    let body = resp.text().map_err(|e| Error::Fetch(repo.head.into(), e.to_string()))?;
+    let body = resp.text().map_err(|e| Error::Fetch(repo.head.into(), e))?;
     let v: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| Error::Parse(repo.head.into(), e.to_string()))?;
     v["commit"]["sha"]
@@ -353,7 +350,7 @@ fn head_commit(repo: &'static Repo, client: &httpc::BlockingClient) -> Result<St
 /// Unpack, writing only the files whose extension is in `keep`. An empty
 /// `keep` writes everything.
 fn unpack_kept(gz: &mut dyn Read, to: &Path, keep: &[&str]) -> Result<u64, Error> {
-    std::fs::create_dir_all(to).map_err(|e| Error::Io(to.display().to_string(), e))?;
+    common::fs::blocking::create_dir_all(to).map_err(|e| Error::Io(to.display().to_string(), e))?;
     let mut header = [0u8; 512];
     let mut buf = Vec::new();
     let mut files = 0u64;
@@ -396,7 +393,8 @@ fn unpack_kept(gz: &mut dyn Read, to: &Path, keep: &[&str]) -> Result<u64, Error
         };
         let path = join_under(to, &rel_path(&name, &prefix, &header))?;
         if let Some(d) = dir {
-            std::fs::create_dir_all(&d).map_err(|e| Error::Io(d.display().to_string(), e))?;
+            common::fs::blocking::create_dir_all(&d)
+                .map_err(|e| Error::Io(d.display().to_string(), e))?;
             prefix.clear();
             continue;
         }
@@ -410,10 +408,11 @@ fn unpack_kept(gz: &mut dyn Read, to: &Path, keep: &[&str]) -> Result<u64, Error
             continue;
         }
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
+            common::fs::blocking::create_dir_all(parent)
                 .map_err(|e| Error::Io(parent.display().to_string(), e))?;
         }
-        std::fs::write(&path, &buf).map_err(|e| Error::Io(path.display().to_string(), e))?;
+        common::fs::blocking::write(&path, &buf)
+            .map_err(|e| Error::Io(path.display().to_string(), e))?;
         files += 1;
         prefix.clear();
     }
@@ -501,13 +500,13 @@ fn take(r: &mut dyn Read, n: usize, buf: &mut Vec<u8>) -> Result<(), Error> {
 }
 
 fn read_meta(repo: &'static Repo, cache: &crate::cache::Cache) -> Option<Meta> {
-    let raw = std::fs::read(repo.meta_file(cache)).ok()?;
-    serde_json::from_slice(&raw).ok()
+    let raw = common::store::read(&repo.meta_file(cache)).ok()?;
+    serde_json::from_str(&raw).ok()
 }
 
 fn write_meta(repo: &'static Repo, cache: &crate::cache::Cache, meta: &Meta) {
-    if let Ok(raw) = serde_json::to_vec(meta) {
-        let _ = std::fs::write(repo.meta_file(cache), raw);
+    if let Ok(raw) = serde_json::to_string(meta) {
+        let _ = common::store::write(&repo.meta_file(cache), &raw);
     }
 }
 
@@ -534,6 +533,7 @@ fn now() -> u64 {
 /// gateway host files: each is published, refreshed and credited on its
 /// own.
 pub static NULLSEC: Repo = Repo {
+    cross_origin: false,
     name: "NullSec Flipper Suite",
     dir: "nullsec-flipper-suite",
     head: "https://api.github.com/repos/bad-antics/nullsec-flipper-suite/branches/main",
@@ -556,6 +556,7 @@ pub static NULLSEC: Repo = Repo {
 const SUB: &[&str] = &["sub"];
 
 pub static UBERGUIDOZ: Repo = Repo {
+    cross_origin: false,
     name: "UberGuidoZ Flipper",
     dir: "uberguidoz-flipper",
     head: "https://api.github.com/repos/UberGuidoZ/Flipper/branches/main",
@@ -574,6 +575,7 @@ pub static UBERGUIDOZ: Repo = Repo {
 };
 
 pub static ZERO_SPLOIT: Repo = Repo {
+    cross_origin: false,
     name: "Zero-Sploit SubGHz DB",
     dir: "zero-sploit-subghz-db",
     head: "https://api.github.com/repos/Zero-Sploit/FlipperZero-Subghz-DB/branches/main",
@@ -589,6 +591,7 @@ pub static ZERO_SPLOIT: Repo = Repo {
 };
 
 pub static ROCKETGOD: Repo = Repo {
+    cross_origin: false,
     name: "RocketGod Flipper Zero",
     dir: "rocketgod-flipper-zero",
     head: "https://api.github.com/repos/RocketGod-git/Flipper_Zero/branches/main",
@@ -606,6 +609,7 @@ pub static ROCKETGOD: Repo = Repo {
 };
 
 pub static MUDDLEDBOX: Repo = Repo {
+    cross_origin: false,
     name: "MuddledBox Sub-GHz",
     dir: "muddledbox-subghz",
     head: "https://api.github.com/repos/MuddledBox/FlipperZeroSub-GHz/branches/main",
@@ -621,6 +625,7 @@ pub static MUDDLEDBOX: Repo = Repo {
 };
 
 pub static TOUCHTUNES: Repo = Repo {
+    cross_origin: false,
     name: "TouchTunes remotes",
     dir: "flipperzero-touchtunes",
     head: "https://api.github.com/repos/jimilinuxguy/flipperzero-touchtunes/branches/master",
@@ -637,6 +642,7 @@ pub static TOUCHTUNES: Repo = Repo {
 };
 
 pub static EVILPETE: Repo = Repo {
+    cross_origin: false,
     name: "evilpete Flipper toolbox",
     dir: "evilpete-flipper-toolbox",
     head: "https://api.github.com/repos/evilpete/flipper_toolbox/branches/main",
@@ -652,6 +658,7 @@ pub static EVILPETE: Repo = Repo {
 };
 
 pub static FLIPPER_PLAYLIST: Repo = Repo {
+    cross_origin: false,
     name: "flipper-playlist test set",
     dir: "flipper-playlist",
     head: "https://api.github.com/repos/darmiel/flipper-playlist/branches/feat%2Fplaylist",
@@ -672,6 +679,7 @@ pub static FLIPPER_PLAYLIST: Repo = Repo {
 /// receiver without a release. Nothing is built in, so a receiver that
 /// never fetches reads no ISM sensor at all.
 pub static PROTOCOLS: Repo = Repo {
+    cross_origin: false,
     name: "Protocol descriptions",
     dir: "waveshark-protocols",
     head: "https://api.github.com/repos/v0l/waveshark-protocols/branches/main",
@@ -706,7 +714,8 @@ mod tests {
     use std::io::Write as _;
 
     fn tmpdir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("waveshark-git-{name}-{}", std::process::id()));
+        let d = common::platform::scratch_dir()
+            .join(format!("waveshark-git-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -887,7 +896,8 @@ mod network {
     #[test]
     #[ignore = "fetches from GitHub"]
     fn the_real_repository_downloads_and_lists_its_subs() {
-        let d = std::env::temp_dir().join(format!("waveshark-git-net-{}", std::process::id()));
+        let d = common::platform::scratch_dir()
+            .join(format!("waveshark-git-net-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let cache = Cache::new(&d);

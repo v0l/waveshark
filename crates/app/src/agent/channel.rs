@@ -14,9 +14,9 @@
 //! no ears while it transmits.
 
 use super::{Desk, chat, config::Config, voice};
+use common::time::{Duration, Instant};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
 
 /// Longest a single answer may hold the channel, in seconds.
 ///
@@ -455,7 +455,7 @@ impl AgentChannel {
         &mut self,
         config: &Config,
         desk: &Desk,
-        rt: &tokio::runtime::Handle,
+        rt: &crate::task::Spawner,
         at: Instant,
         from: Option<&str>,
         text: &str,
@@ -551,7 +551,7 @@ impl AgentChannel {
     fn answer_the_call(
         &mut self,
         config: &Config,
-        rt: &tokio::runtime::Handle,
+        rt: &crate::task::Spawner,
         at: Instant,
         from: Option<&str>,
         text: &str,
@@ -578,7 +578,7 @@ impl AgentChannel {
     pub fn say(
         &mut self,
         config: &Config,
-        rt: &tokio::runtime::Handle,
+        rt: &crate::task::Spawner,
         text: &str,
     ) -> Result<String, String> {
         if self.on.is_none() {
@@ -605,7 +605,7 @@ impl AgentChannel {
     fn speak_line(
         &mut self,
         config: &Config,
-        rt: &tokio::runtime::Handle,
+        rt: &crate::task::Spawner,
         said: String,
         heard: String,
     ) {
@@ -882,11 +882,32 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread().build().expect("a runtime");
         let mut a = AgentChannel { on: Some(1), ..Default::default() };
         let at = Instant::now();
-        assert!(a.heard(&c, &desk, rt.handle(), at, None, "shark what is on the air"));
+        assert!(a.heard(
+            &c,
+            &desk,
+            &crate::task::Spawner::of(&rt),
+            at,
+            None,
+            "shark what is on the air"
+        ));
         assert_eq!(a.state, State::Asking, "it has the question and is asking the model");
         // The same over read again, and a second question while it is busy.
-        assert!(!a.heard(&c, &desk, rt.handle(), at, None, "shark what is on the air"));
-        assert!(!a.heard(&c, &desk, rt.handle(), at + Duration::from_secs(1), None, "shark again"));
+        assert!(!a.heard(
+            &c,
+            &desk,
+            &crate::task::Spawner::of(&rt),
+            at,
+            None,
+            "shark what is on the air"
+        ));
+        assert!(!a.heard(
+            &c,
+            &desk,
+            &crate::task::Spawner::of(&rt),
+            at + Duration::from_secs(1),
+            None,
+            "shark again"
+        ));
     }
 
     /// Two overs in the window are answered once each, not round and round.
@@ -908,25 +929,67 @@ mod tests {
         let second = t0 + Duration::from_secs(20);
 
         // The first is taken; the agent is busy, so the second waits.
-        assert!(a.heard(&c, &desk, rt.handle(), first, None, "shark how is it going"));
-        assert!(!a.heard(&c, &desk, rt.handle(), second, None, "shark how is it going"));
+        assert!(a.heard(
+            &c,
+            &desk,
+            &crate::task::Spawner::of(&rt),
+            first,
+            None,
+            "shark how is it going"
+        ));
+        assert!(!a.heard(
+            &c,
+            &desk,
+            &crate::task::Spawner::of(&rt),
+            second,
+            None,
+            "shark how is it going"
+        ));
 
         // Free again, and the window offered whole on the next frame. The
         // second is new, the first is not.
         a.state = State::Listening;
         a.pending = None;
         assert!(
-            !a.heard(&c, &desk, rt.handle(), first, None, "shark how is it going"),
+            !a.heard(
+                &c,
+                &desk,
+                &crate::task::Spawner::of(&rt),
+                first,
+                None,
+                "shark how is it going"
+            ),
             "answered twice"
         );
-        assert!(a.heard(&c, &desk, rt.handle(), second, None, "shark how is it going"));
+        assert!(a.heard(
+            &c,
+            &desk,
+            &crate::task::Spawner::of(&rt),
+            second,
+            None,
+            "shark how is it going"
+        ));
 
         // And round again: neither is new now.
         a.state = State::Listening;
         a.pending = None;
         for _ in 0..3 {
-            assert!(!a.heard(&c, &desk, rt.handle(), first, None, "shark how is it going"));
-            assert!(!a.heard(&c, &desk, rt.handle(), second, None, "shark how is it going"));
+            assert!(!a.heard(
+                &c,
+                &desk,
+                &crate::task::Spawner::of(&rt),
+                first,
+                None,
+                "shark how is it going"
+            ));
+            assert!(!a.heard(
+                &c,
+                &desk,
+                &crate::task::Spawner::of(&rt),
+                second,
+                None,
+                "shark how is it going"
+            ));
         }
     }
 
@@ -952,7 +1015,7 @@ mod tests {
             !a.heard(
                 &c,
                 &desk,
-                rt.handle(),
+                &crate::task::Spawner::of(&rt),
                 mid,
                 None,
                 "shark here, the receiver is idle and ready"
@@ -968,13 +1031,27 @@ mod tests {
         // this over was thrown away.
         let up = t0 + Duration::from_secs(4);
         assert_eq!(a.poll(&c, up, false), Some(Move::Unkey));
-        assert!(a.heard(&c, &desk, rt.handle(), mid, None, "shark what about the decode settings"));
+        assert!(a.heard(
+            &c,
+            &desk,
+            &crate::task::Spawner::of(&rt),
+            mid,
+            None,
+            "shark what about the decode settings"
+        ));
 
         // And promptly after the key, the same.
         a.state = State::Listening;
         a.pending = None;
         let after = up + Duration::from_secs_f64(0.2);
-        assert!(a.heard(&c, &desk, rt.handle(), after, None, "shark how is it going"));
+        assert!(a.heard(
+            &c,
+            &desk,
+            &crate::task::Spawner::of(&rt),
+            after,
+            None,
+            "shark how is it going"
+        ));
     }
 
     /// Having answered, it goes on answering without being named, until the
@@ -989,7 +1066,14 @@ mod tests {
 
         // Nothing has been said yet, so the name is still wanted.
         assert!(a.following(&c, t0).is_none());
-        assert!(!a.heard(&c, &desk, rt.handle(), t0, None, "what is on the air"));
+        assert!(!a.heard(
+            &c,
+            &desk,
+            &crate::task::Spawner::of(&rt),
+            t0,
+            None,
+            "what is on the air"
+        ));
         assert_eq!(a.last.as_ref().and_then(|h| h.passed), Some(Passed::NotAddressed));
 
         // It says something, and the window opens at the key coming up.
@@ -1000,7 +1084,14 @@ mod tests {
 
         // The next over is the question whole, name or no name.
         let next = up + Duration::from_secs(4);
-        assert!(a.heard(&c, &desk, rt.handle(), next, None, "and what about 145.5"));
+        assert!(a.heard(
+            &c,
+            &desk,
+            &crate::task::Spawner::of(&rt),
+            next,
+            None,
+            "and what about 145.5"
+        ));
         assert_eq!(a.asked, "and what about 145.5", "the whole over, with nothing taken off");
         assert!(a.following(&c, next).is_some_and(|left| left > 20.0 && left < 30.0));
 
@@ -1010,13 +1101,20 @@ mod tests {
         a.pending = None;
         let late = up + Duration::from_secs_f64(31.0);
         assert!(a.following(&c, late).is_none());
-        assert!(!a.heard(&c, &desk, rt.handle(), late, None, "anybody about on this channel"));
+        assert!(!a.heard(
+            &c,
+            &desk,
+            &crate::task::Spawner::of(&rt),
+            late,
+            None,
+            "anybody about on this channel"
+        ));
         assert_eq!(a.last.as_ref().and_then(|h| h.passed), Some(Passed::NotAddressed));
         // And the name still works after it.
         assert!(a.heard(
             &c,
             &desk,
-            rt.handle(),
+            &crate::task::Spawner::of(&rt),
             late + Duration::from_secs(1),
             None,
             "shark you there"
@@ -1030,7 +1128,7 @@ mod tests {
         assert!(!strict.heard(
             &named,
             &desk,
-            rt.handle(),
+            &crate::task::Spawner::of(&rt),
             up + Duration::from_secs(1),
             None,
             "go on"
@@ -1050,7 +1148,7 @@ mod tests {
         let mut a = AgentChannel { on: Some(1), ..Default::default() };
         let at = Instant::now();
 
-        assert!(a.heard(&c, &desk, rt.handle(), at, None, "hey shark"));
+        assert!(a.heard(&c, &desk, &crate::task::Spawner::of(&rt), at, None, "hey shark"));
         assert_eq!(a.last.as_ref().and_then(|h| h.passed), None, "it was taken");
         // Straight to the speech: the model is not asked to say go ahead.
         assert_eq!(a.state, State::Speaking);
@@ -1119,7 +1217,7 @@ mod tests {
         let mut clock = Instant::now();
         let mut say = |a: &mut AgentChannel, c: &Config, text: &str| {
             clock += Duration::from_secs(1);
-            a.heard(c, &desk, rt.handle(), clock, None, text)
+            a.heard(c, &desk, &crate::task::Spawner::of(&rt), clock, None, text)
         };
 
         // Somebody talking on the channel, to somebody else.
@@ -1162,7 +1260,14 @@ mod tests {
         assert_eq!(a.state.label(), "listening");
         assert!(!a.state.busy());
 
-        assert!(a.heard(&c, &desk, rt.handle(), Instant::now(), None, "shark what is on the air"));
+        assert!(a.heard(
+            &c,
+            &desk,
+            &crate::task::Spawner::of(&rt),
+            Instant::now(),
+            None,
+            "shark what is on the air"
+        ));
         assert_eq!(a.state, State::Asking);
         assert!(a.state.busy(), "a second question must not be taken while one is running");
         assert_eq!(a.state.label(), "asking the model");
@@ -1188,7 +1293,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
         let url = format!("http://{}/v1", listener.local_addr().expect("an address"));
         let (seen, asked) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             use std::io::{Read, Write};
             let Some(Ok(mut s)) = listener.incoming().next() else { return };
             let mut head = Vec::new();
@@ -1277,7 +1382,14 @@ mod tests {
         let (desk, _asks) = Desk::new();
         let mut a = AgentChannel { on: Some(4), ..Default::default() };
         let t0 = Instant::now();
-        assert!(a.heard(&c, &desk, rt.handle(), t0, None, "shark, what frequency are we on"));
+        assert!(a.heard(
+            &c,
+            &desk,
+            &crate::task::Spawner::of(&rt),
+            t0,
+            None,
+            "shark, what frequency are we on"
+        ));
 
         // The channel is busy while the other station finishes its over, so
         // nothing keys however quickly the answer comes back.
@@ -1347,7 +1459,14 @@ mod tests {
         let (desk, _asks) = Desk::new();
         let rt = tokio::runtime::Builder::new_current_thread().build().expect("a runtime");
         let mut a = AgentChannel { on: Some(1), ..Default::default() };
-        assert!(!a.heard(&c, &desk, rt.handle(), Instant::now(), None, "shark hello"));
+        assert!(!a.heard(
+            &c,
+            &desk,
+            &crate::task::Spawner::of(&rt),
+            Instant::now(),
+            None,
+            "shark hello"
+        ));
         assert_eq!(a.state, State::Listening);
     }
 }

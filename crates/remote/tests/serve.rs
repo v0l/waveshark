@@ -1,7 +1,7 @@
 use common::device::Device as _;
 use common::{C32, Hz, Sps};
 use dsp::spectrum::{Detector, Spectrum};
-use iqstream::server::{Server, ServerConfig, StreamConfig};
+use iqstream::{Server, ServerConfig, StreamConfig};
 use remote::door::Doors;
 use std::io::{Read, Write};
 use std::net::TcpStream;

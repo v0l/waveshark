@@ -8,7 +8,17 @@
 
 use decode::script::{self, Installed};
 use parking_lot::RwLock;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "protocols/fetched.rs"]
+mod published;
+#[cfg(target_arch = "wasm32")]
+#[path = "protocols/bundled.rs"]
+mod published;
+
+#[cfg(target_arch = "wasm32")]
+pub use published::fetch;
 
 static LAST: RwLock<Option<Installed>> = RwLock::new(None);
 
@@ -24,25 +34,18 @@ pub fn user_dir() -> Option<PathBuf> {
 
 /// Read every description on disk and install it, later sources winning
 pub fn load() -> Installed {
-    let mut files: Vec<(String, String)> = Vec::new();
-    if let Some(cache) = crate::data::cache() {
-        let repo = &datasets::git::PROTOCOLS;
-        let root = repo.cache_dir(cache);
-        for rel in datasets::git::files_with(repo, cache, "yaml") {
-            read_into(&root.join(&rel), &mut files);
-        }
-    }
-    if let Some(dir) = user_dir()
-        && let Ok(entries) = std::fs::read_dir(&dir)
-    {
-        let mut paths: Vec<PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("yaml")))
-            .collect();
-        paths.sort();
-        for p in paths {
-            read_into(&p, &mut files);
+    let mut files = published::files();
+    if let Some(dir) = user_dir() {
+        let yaml = common::store::list(&dir)
+            .into_iter()
+            .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("yaml")));
+        for p in yaml {
+            match common::store::read(&p) {
+                Ok(text) => files.push((p.display().to_string(), text)),
+                Err(e) => {
+                    tracing::warn!(path = %p.display(), "unreadable protocol description: {e}")
+                }
+            }
         }
     }
     let got = script::install(&files);
@@ -56,11 +59,4 @@ pub fn load() -> Installed {
     );
     *LAST.write() = Some(got.clone());
     got
-}
-
-fn read_into(path: &Path, files: &mut Vec<(String, String)>) {
-    match std::fs::read_to_string(path) {
-        Ok(text) => files.push((path.display().to_string(), text)),
-        Err(e) => tracing::warn!(path = %path.display(), "unreadable protocol description: {e}"),
-    }
 }

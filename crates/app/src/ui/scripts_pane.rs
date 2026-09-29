@@ -29,6 +29,8 @@ pub(super) struct ScriptsState {
     /// thousand files sixty times a second to draw a list that changes when
     /// a dataset is downloaded.
     scanned: bool,
+    scanning: Option<poll_promise::Promise<Vec<Root>>>,
+    opening: Option<(std::path::PathBuf, poll_promise::Promise<Result<SubFile, String>>)>,
     /// Directories drawn open, by their path under a root. A directory
     /// starts closed, so a repository of hundreds of files opens as a
     /// handful of folders.
@@ -49,38 +51,50 @@ impl ScriptsState {
     }
 
     fn scan(&mut self) {
-        self.roots.clear();
-        if let Some(cache) = crate::data::cache() {
-            for repo in datasets::git::REPOS {
-                let files = datasets::git::files_with(repo, cache, ".sub");
-                if files.is_empty() {
-                    continue;
-                }
-                self.roots.push(Root {
-                    name: repo.name.to_string(),
-                    dir: repo.cache_dir(cache),
-                    files,
-                });
-            }
+        if self.scanning.is_none() {
+            self.scanning = Some(crate::task::thread("scan scripts", roots));
         }
-        let saved = crate::chain::default_sub_dir();
-        let mut files = Vec::new();
-        walk(&saved, &saved, &mut files);
-        files.sort();
-        if !files.is_empty() {
-            self.roots.push(Root { name: "Saved here".into(), dir: saved, files });
+        if let Some(found) = self.scanning.take_if(|p| p.ready().is_some()) {
+            self.roots = found.block_and_take();
+            self.scanned = true;
         }
-        self.scanned = true;
     }
+
+    fn opened(&mut self) {
+        if let Some((path, parsed)) = self.opening.take_if(|(_, p)| p.ready().is_some()) {
+            self.picked = Some((path, parsed.block_and_take()));
+        }
+    }
+}
+
+fn roots() -> Vec<Root> {
+    let mut out = Vec::new();
+    if let Some(cache) = crate::data::cache() {
+        for repo in datasets::git::REPOS {
+            let files = datasets::git::files_with(repo, cache, ".sub");
+            if files.is_empty() {
+                continue;
+            }
+            out.push(Root { name: repo.name.to_string(), dir: repo.cache_dir(cache), files });
+        }
+    }
+    let saved = crate::chain::default_sub_dir();
+    let mut files = Vec::new();
+    walk(&saved, &saved, &mut files);
+    files.sort();
+    if !files.is_empty() {
+        out.push(Root { name: "Saved here".into(), dir: saved, files });
+    }
+    out
 }
 
 /// Every `.sub` under `dir`, relative to `root`.
 fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for e in entries.flatten() {
+    let Ok(entries) = common::fs::blocking::read_dir(dir) else { return };
+    for e in entries {
         let p = e.path();
-        if p.is_dir() {
-            walk(root, &p, out);
+        if e.is_dir() {
+            walk(root, p, out);
         } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("sub"))
             && let Ok(rel) = p.strip_prefix(root)
         {
@@ -115,6 +129,7 @@ impl<'a> Scripts<'a> {
         if !self.st.scanned {
             self.st.scan();
         }
+        self.st.opened();
         Panel::left("scripts")
             .default_size(250.0)
             .max_size(360.0)
@@ -285,8 +300,11 @@ impl<'a> Scripts<'a> {
             }
         }
         if let Some(p) = pick {
-            let parsed = SubFile::open(&p).map_err(|e| e.to_string());
-            self.st.picked = Some((p, parsed));
+            let path = p.clone();
+            let parsed = crate::task::thread("open sub", move || {
+                SubFile::open(&p).map_err(|e| e.to_string())
+            });
+            self.st.opening = Some((path, parsed));
         }
     }
 
@@ -426,8 +444,8 @@ mod tests {
     use super::*;
 
     fn tmpdir(name: &str) -> std::path::PathBuf {
-        let d =
-            std::env::temp_dir().join(format!("waveshark-scripts-{name}-{}", std::process::id()));
+        let d = common::platform::scratch_dir()
+            .join(format!("waveshark-scripts-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("garage")).unwrap();
         d
@@ -457,7 +475,7 @@ mod tests {
             preset: decode::subghz::Preset::Ook,
             body: decode::subghz::key_of_decode("Princeton", 0xa1_3f_08).unwrap(),
         };
-        let path = d.join(format!("{}.sub", save.file_stem("Princeton", std::time::UNIX_EPOCH)));
+        let path = d.join(format!("{}.sub", save.file_stem("Princeton", common::time::UNIX_EPOCH)));
         std::fs::write(&path, save.text()).unwrap();
         let mut out = Vec::new();
         walk(&d, &d, &mut out);

@@ -6,6 +6,6 @@ license.workspace = true
 description = "Airspy R2 and Mini over USB, with no system library"
 
 [dependencies]
-nusb.workspace = true
+usbio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

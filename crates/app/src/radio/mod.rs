@@ -33,7 +33,7 @@ pub struct Radio {
     /// Packets decoded anywhere in the span, in the order they were found.
     pub decodes: Receiver<Vec<crate::row::Reception>>,
     pub status: Arc<Status>,
-    handle: Option<std::thread::JoinHandle<()>>,
+    handle: Option<common::thread::JoinHandle<()>>,
 }
 
 /// How many devices have been opened since the process started.
@@ -73,7 +73,7 @@ impl Radio {
         let st = status.clone();
         OPENED.fetch_add(1, Ordering::Relaxed);
 
-        let handle = std::thread::Builder::new()
+        let handle = common::thread::Builder::new()
             .name("radio".into())
             .spawn(move || {
                 if let Err(e) =
@@ -114,7 +114,7 @@ impl Radio {
         let (dec_tx, dec_rx) = bounded(64);
         let status = Arc::new(Status::default());
         let st = status.clone();
-        let handle = std::thread::Builder::new()
+        let handle = common::thread::Builder::new()
             .name("radio".into())
             .spawn(move || {
                 let built = RadioThread::with_device(
@@ -161,7 +161,7 @@ impl Radio {
 /// that stopped responding took the whole interface with it; leaving it means
 /// a thread and a USB claim are held until the process exits, and the
 /// operator can carry on, change device, or close the window.
-const STOP_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+const STOP_GRACE: common::time::Duration = common::time::Duration::from_millis(1500);
 
 impl Drop for Radio {
     fn drop(&mut self) {
@@ -171,14 +171,14 @@ impl Drop for Radio {
         // handle is moved in, so abandoning it leaks a thread rather than
         // leaving a dangling join.
         let (tx, rx) = bounded::<()>(1);
-        let waiter = std::thread::Builder::new().name("radio-stop".into()).spawn(move || {
+        let waiter = common::thread::Builder::new().name("radio-stop".into()).spawn(move || {
             let _ = h.join();
             let _ = tx.send(());
         });
         if waiter.is_err() {
             return;
         }
-        if rx.recv_timeout(STOP_GRACE).is_err() {
+        if crate::task::within(&rx, STOP_GRACE).is_none() {
             tracing::warn!(
                 "the radio did not stop within {:?}; abandoning its thread and USB claim",
                 STOP_GRACE

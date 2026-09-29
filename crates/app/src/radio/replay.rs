@@ -71,11 +71,11 @@ pub(crate) fn replay_plan(buf: &common::IqBuf, record: bool) -> Plan {
 /// those samples, and a stamp taken afterwards drifts by however long decoding
 /// took, which on a loaded machine is longer than the block itself.
 pub(super) fn block_start(
-    finished: std::time::Instant,
+    finished: common::time::Instant,
     samples: usize,
     rate: f64,
-) -> std::time::Instant {
-    finished - std::time::Duration::from_secs_f64(samples as f64 / rate.max(1.0))
+) -> common::time::Instant {
+    finished - common::time::Duration::from_secs_f64(samples as f64 / rate.max(1.0))
 }
 
 /// What one block decoded to, and what the recorder should keep of it.
@@ -87,7 +87,7 @@ pub(super) fn block_start(
 /// returns.
 pub(crate) fn harvest(
     rx: &mut crate::chain::Receiver,
-    at: std::time::Instant,
+    at: common::time::Instant,
 ) -> Vec<crate::row::Reception> {
     let found = rx.rows(at);
     if let Some(r) = rx.recorder_mut() {
@@ -113,14 +113,14 @@ pub(crate) fn replay_blocks(
         if rx.process(block).is_err() {
             break;
         }
-        let at = block_start(std::time::Instant::now(), block.len(), rate);
+        let at = block_start(common::time::Instant::now(), block.len(), rate);
         out.extend(harvest(rx, at));
     }
     // One block of nothing after the capture, because the auto node reads a
     // block one call behind finding it, and a radio never stops delivering.
     let quiet = vec![C32::default(); 16_384];
     if rx.process(&quiet).is_ok() {
-        let at = block_start(std::time::Instant::now(), quiet.len(), rate);
+        let at = block_start(common::time::Instant::now(), quiet.len(), rate);
         out.extend(harvest(rx, at));
     }
     out

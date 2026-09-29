@@ -1,6 +1,6 @@
+use common::time::{Duration, Instant};
 use nostr_directory::{Config, NostrDirectory};
 use sdr_directory::SdrDirectory;
-use std::time::{Duration, Instant};
 
 fn main() {
     let relays: Vec<String> = std::env::args().skip(1).collect();

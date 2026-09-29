@@ -6,13 +6,13 @@
 //! all, and one that answers for some datagram sizes and not others. A real
 //! client cannot be made to do any of those.
 
+use common::time::Duration;
 use iqstream::proto::{
     CONTROL_MAGIC, DATA_HEADER_LEN, DataHeader, Frame, PREAMBLE_LEN, Tlvs, Transport, decode_probe,
     encode_punch, msg, tag,
 };
 use iqstream::{Server, ServerConfig, Stream, StreamConfig};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 

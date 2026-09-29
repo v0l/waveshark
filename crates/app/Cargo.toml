@@ -31,9 +31,9 @@ egui-phosphor = { version = "0.13", default-features = false, features = ["regul
 common.workspace = true
 dsp.workspace = true
 audio.workspace = true
-rtlsdr.workspace = true
-hackrf.workspace = true
-airspy.workspace = true
+rtlsdr = { workspace = true, optional = true }
+hackrf = { workspace = true, optional = true }
+airspy = { workspace = true, optional = true }
 limesdr = { workspace = true, optional = true }
 remote.workspace = true
 sources.workspace = true
@@ -50,7 +50,7 @@ pipeline.workspace = true
 crossbeam-channel.workspace = true
 stt = { workspace = true, optional = true }
 tts = { workspace = true, optional = true }
-chrono.workspace = true
+chrono = { workspace = true, features = ["clock"] }
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true
@@ -64,8 +64,8 @@ zstd = { version = "0.13", default-features = false }
 # and no system libopus.
 opus-rs = "0.1"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
-poll-promise = { version = "0.3", features = ["tokio"] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs", "time", "net"] }
+poll-promise = "0.3"
+tokio = { version = "1", features = ["rt", "sync", "time", "io-util"] }
 # Driving the receiver from an agent: MCP over streamable HTTP, served from
 # inside the running interface. Optional, since a receiver nobody is
 # automating should not carry an HTTP stack.
@@ -88,19 +88,38 @@ flate2 = "1.1"
 reqwest.workspace = true
 csv.workspace = true
 httpc.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "fs"] }
+poll-promise = { version = "0.3", features = ["tokio"] }
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+poll-promise = { version = "0.3", features = ["web"] }
+usbio.workspace = true
+wasm-bindgen-futures = "0.4"
+wasm-bindgen = "0.2"
+wasm-bindgen-rayon = "1.3"
+js-sys = "0.3"
+futures-channel = "0.3"
+parking_lot_core = { version = "0.9", features = ["nightly"] }
+chrono = { workspace = true, features = ["clock", "wasmbind"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
 [dev-dependencies]
 hound = "3"
 pollster = "0.4"
 toml = "1"
 nostr-directory = { workspace = true, features = ["mock-relay"] }
+iqstream = { workspace = true, features = ["net"] }
+remote = { workspace = true, features = ["iqstream", "rtl_tcp", "spyserver", "kiwisdr", "pluto"] }
 
 [features]
 # LimeSuite is not packaged everywhere, and there is no vcpkg port of it, so
 # the Windows build is made without this. Everything else here works with the
 # driver absent: the device simply never appears in the list.
-default = ["limesdr", "stt", "tts", "cuda", "tea", "ambe", "mcp", "ffmpeg"]
+default = ["native", "limesdr", "stt", "tts", "cuda", "tea", "ambe", "mcp", "ffmpeg"]
 # Pictures off a broadcast multiplex, through the system ffmpeg libraries.
 # On by default; a build without it decodes the transport stream and its
 # tables and shows no picture.
@@ -110,6 +129,27 @@ ffmpeg = ["nodes/ffmpeg"]
 # binaries: nothing listens until an address is given on the command line.
 mcp = ["dep:rmcp", "dep:axum"]
 limesdr = ["dep:limesdr"]
+native = ["usb", "iqstream", "rtl_tcp", "spyserver", "kiwisdr", "homeassistant", "gps", "update", "survey", "artemis", "feeds"]
+usb = ["rtlsdr", "hackrf", "airspy", "pluto"]
+iqstream = [
+    "remote/iqstream",
+    "nodes/iqstream",
+    "iqstream/net",
+    "nostr-directory/relay",
+]
+rtl_tcp = ["remote/rtl_tcp"]
+spyserver = ["remote/spyserver"]
+kiwisdr = ["remote/kiwisdr"]
+homeassistant = ["nodes/homeassistant"]
+gps = []
+survey = ["survey/db"]
+artemis = ["datasets/artemis"]
+feeds = ["nodes/feeds"]
+update = []
+rtlsdr = ["dep:rtlsdr"]
+hackrf = ["dep:hackrf"]
+airspy = ["dep:airspy"]
+pluto = ["remote/usb"]
 # TETRA decryption and key recovery. On in a build from source, since a Keys
 # view that can only watch is half a receiver, and off in the binaries the
 # release workflow publishes.
@@ -203,3 +243,23 @@ required-features = ["limesdr"]
 [[example]]
 name = "txcheck"
 required-features = ["limesdr"]
+
+[[example]]
+name = "limerec"
+required-features = ["limesdr"]
+
+[[example]]
+name = "nfm_tx"
+required-features = ["limesdr", "hackrf"]
+
+[[example]]
+name = "hrf"
+required-features = ["hackrf"]
+
+[[example]]
+name = "hrfrec"
+required-features = ["hackrf"]
+
+[[example]]
+name = "key_test"
+required-features = ["hackrf"]

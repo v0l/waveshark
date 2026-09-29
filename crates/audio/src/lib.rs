@@ -4,6 +4,12 @@
 //! and returns the drained allocation for reuse.
 
 mod capture;
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "page/native.rs"]
+mod page;
+#[cfg(target_arch = "wasm32")]
+#[path = "page/web.rs"]
+mod page;
 mod resample;
 
 pub use capture::{AudioCapture, AudioSource, Canned, Speaker};
@@ -330,9 +336,11 @@ impl AudioPlayer {
     /// Open the default device at `want_rate` if supported, else the device
     /// default. Check [`Self::rate`] afterwards.
     pub fn open(want_rate: u32) -> Result<(Self, AudioSink), AudioError> {
-        let host = cpal::default_host();
-        let device = host.default_output_device().ok_or(AudioError::NoDevice)?;
-        Self::open_on(device, want_rate)
+        page::run(move || {
+            let host = cpal::default_host();
+            let device = host.default_output_device().ok_or(AudioError::NoDevice)?;
+            Self::open_on(device, want_rate)
+        })
     }
 
     /// Sound cards this machine has, without ALSA's plugin aliases.
@@ -350,14 +358,16 @@ impl AudioPlayer {
 
     /// Open a device whose name contains `needle`, case-insensitively.
     pub fn open_named(needle: &str, want_rate: u32) -> Result<(Self, AudioSink), AudioError> {
-        let host = cpal::default_host();
         let needle = needle.to_lowercase();
-        let device = host
-            .output_devices()
-            .map_err(|e| AudioError::Cpal(e.to_string()))?
-            .find(|d| d.to_string().to_lowercase().contains(&needle))
-            .ok_or(AudioError::NoDevice)?;
-        Self::open_on(device, want_rate)
+        page::run(move || {
+            let host = cpal::default_host();
+            let device = host
+                .output_devices()
+                .map_err(|e| AudioError::Cpal(e.to_string()))?
+                .find(|d| d.to_string().to_lowercase().contains(&needle))
+                .ok_or(AudioError::NoDevice)?;
+            Self::open_on(device, want_rate)
+        })
     }
 
     fn open_on(device: Device, want_rate: u32) -> Result<(Self, AudioSink), AudioError> {

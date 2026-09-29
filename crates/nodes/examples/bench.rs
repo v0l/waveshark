@@ -3,9 +3,9 @@
 //! Reports throughput as a multiple of real time, which is the number that
 //! matters: anything above 1.0x can keep up with a live radio at that rate.
 
+use common::time::Instant;
 use common::{C32, Hz};
 use nodes::{ChannelBank, Gating, NodeSpec, registry};
-use std::time::Instant;
 
 fn chain() -> Vec<NodeSpec> {
     vec![

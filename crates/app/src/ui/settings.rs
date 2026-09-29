@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::agent::config::{Reading, Speech};
+use crate::build::Feature;
 use egui_bench::form::{choice, field, field_then, footer, prose, row, row_help, secret, switch};
 use egui_bench::panel::{card, section, tabs};
 use egui_bench::readout::reading;
@@ -16,7 +17,7 @@ use egui_bench::text::hint;
 /// when its port is opened and there can be half a dozen ports.
 fn scan_for_modems() -> crate::ui::state::ModemScan {
     let (tx, done) = std::sync::mpsc::channel();
-    std::thread::Builder::new()
+    common::thread::Builder::new()
         .name("modem-scan".into())
         .spawn(move || {
             let _ = tx.send(gps::modem::discover());
@@ -262,15 +263,15 @@ impl App {
             return;
         }
         let ctx = ctx.clone();
-        self.memory_io = Some(poll_promise::Promise::spawn_thread("import channels", move || {
-            let picked = rfd::FileDialog::new()
+        self.memory_io = Some(crate::task::thread("import channels", move || {
+            let picked = crate::dialog::FileDialog::new()
                 .set_title("Import a frequency list")
                 .add_filter("Frequency lists", &["csv", "txt", "TXT", "xml", "channels"])
                 .add_filter("Anything", &["*"])
                 .pick_file();
-            ctx.request_repaint();
+            crate::window::repaint(&ctx);
             let Some(path) = picked else { return state::ListIo::Said(String::new()) };
-            let text = match std::fs::read_to_string(&path) {
+            let text = match common::fs::blocking::read_to_string(&path) {
                 Ok(t) => t,
                 Err(e) => return state::ListIo::Said(format!("{}: {e}", path.display())),
             };
@@ -290,15 +291,15 @@ impl App {
         let text = crate::memory::formats::write_csv(&self.memory);
         let count = self.memory.list.len();
         let ctx = ctx.clone();
-        self.memory_io = Some(poll_promise::Promise::spawn_thread("export channels", move || {
-            let picked = rfd::FileDialog::new()
+        self.memory_io = Some(crate::task::thread("export channels", move || {
+            let picked = crate::dialog::FileDialog::new()
                 .set_title("Export the memory bank")
                 .set_file_name(crate::memory::formats::export_name())
                 .add_filter("CSV", &["csv"])
                 .save_file();
-            ctx.request_repaint();
+            crate::window::repaint(&ctx);
             let Some(path) = picked else { return state::ListIo::Said(String::new()) };
-            state::ListIo::Said(match std::fs::write(&path, text) {
+            state::ListIo::Said(match common::fs::blocking::write(&path, text) {
                 Ok(()) => format!("{count} channels written to {}", path.display()),
                 Err(e) => format!("nothing written: {}: {e}", path.display()),
             })
@@ -893,7 +894,7 @@ impl App {
         // The listing arrives on a thread of its own, so the dialog has to
         // come back and look.
         if matches!(chat, Some(served::Served { state: served::State::Fetching })) {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+            ui.ctx().request_repaint_after(common::time::Duration::from_millis(300));
         }
 
         section(ui, "model", "any server speaking the OpenAI chat API with tool calls", |ui| {
@@ -1023,7 +1024,7 @@ impl App {
                  server needs an /audio/speech beside its chat, as OpenAI and OpenRouter \
                  have. A speech server is one of its own, with its own address and key.",
                 |ui| {
-                    for how in Speech::ALL {
+                    for how in Speech::ALL.into_iter().filter(|s| s.built()) {
                         if ui.selectable_label(c.speech == how, how.label()).clicked() {
                             c.speech = how;
                         }
@@ -1125,96 +1126,109 @@ impl App {
             }
         });
 
-        ui.add_space(8.0);
-
-        section(ui, "reading", "how speech heard on the air is read back into words", |ui| {
-            row_help(
-                ui,
-                "on",
-                "A model on this machine reads everything locally and wants the card and the \
-                 weights, chosen on the Transcript pane. The model's server, or one of its \
-                 own, reads it on an /audio/transcriptions instead, which is what a machine \
-                 with no card should use. Audio leaves this machine either way it is not local.",
-                |ui| {
-                    for how in Reading::ALL {
-                        if ui.selectable_label(c.reading == how, how.label()).clicked() {
-                            c.reading = how;
-                        }
-                    }
-                },
-            );
-            match c.reading {
-                Reading::Local => {
-                    hint(ui, "Which model and which device are on the Transcript pane.");
-                }
-                Reading::Chat => {
-                    let models = chat.as_ref().map(|s| s.reading_models()).unwrap_or_default();
-                    row_help(
-                        ui,
-                        "model",
-                        "As the model's server names it: whisper-1 on OpenAI.",
-                        |ui| {
-                            pick_or_type(ui, "read-model", &mut c.read_model, models, "whisper-1");
-                        },
-                    );
-                }
-                Reading::Server => {
-                    let own = served::served(&c.read_url);
-                    let models = own.as_ref().map(|s| s.reading_models()).unwrap_or_default();
-                    row_help(
-                        ui,
-                        "server",
-                        "An OpenAI-compatible /v1/audio/transcriptions: a hosted one, or a \
-                         whisper.cpp or faster-whisper server on the network.",
-                        |ui| {
-                            let mut ask = false;
-                            field_then(
-                                ui,
-                                &mut c.read_url,
-                                "http://127.0.0.1:9000/v1",
-                                60.0,
-                                |ui| {
-                                    ask = ui
-                                        .small_button("ASK")
-                                        .on_hover_text("List what it serves")
-                                        .clicked();
-                                },
-                            );
-                            if ask {
-                                let key = match c.read_key.trim() {
-                                    "" => c.key.clone(),
-                                    k => k.to_string(),
-                                };
-                                served::fetch(&c.read_url, &key, true);
+        if Feature::Stt.built() {
+            ui.add_space(8.0);
+            section(ui, "reading", "how speech heard on the air is read back into words", |ui| {
+                row_help(
+                    ui,
+                    "on",
+                    "A model on this machine reads everything locally and wants the card and the \
+                     weights, chosen on the Transcript pane. The model's server, or one of its \
+                     own, reads it on an /audio/transcriptions instead, which is what a machine \
+                     with no card should use. Audio leaves this machine either way it is not local.",
+                    |ui| {
+                        for how in Reading::ALL {
+                            if ui.selectable_label(c.reading == how, how.label()).clicked() {
+                                c.reading = how;
                             }
-                        },
-                    );
-                    row_help(ui, "model", "As that server names it.", |ui| {
-                        pick_or_type(ui, "own-read-model", &mut c.read_model, models, "whisper-1");
-                    });
-                    row_help(ui, "key", "Leave empty to use the model's key.", |ui| {
-                        secret(ui, &mut c.read_key);
-                    });
+                        }
+                    },
+                );
+                match c.reading {
+                    Reading::Local => {
+                        hint(ui, "Which model and which device are on the Transcript pane.");
+                    }
+                    Reading::Chat => {
+                        let models = chat.as_ref().map(|s| s.reading_models()).unwrap_or_default();
+                        row_help(
+                            ui,
+                            "model",
+                            "As the model's server names it: whisper-1 on OpenAI.",
+                            |ui| {
+                                pick_or_type(
+                                    ui,
+                                    "read-model",
+                                    &mut c.read_model,
+                                    models,
+                                    "whisper-1",
+                                );
+                            },
+                        );
+                    }
+                    Reading::Server => {
+                        let own = served::served(&c.read_url);
+                        let models = own.as_ref().map(|s| s.reading_models()).unwrap_or_default();
+                        row_help(
+                            ui,
+                            "server",
+                            "An OpenAI-compatible /v1/audio/transcriptions: a hosted one, or a \
+                             whisper.cpp or faster-whisper server on the network.",
+                            |ui| {
+                                let mut ask = false;
+                                field_then(
+                                    ui,
+                                    &mut c.read_url,
+                                    "http://127.0.0.1:9000/v1",
+                                    60.0,
+                                    |ui| {
+                                        ask = ui
+                                            .small_button("ASK")
+                                            .on_hover_text("List what it serves")
+                                            .clicked();
+                                    },
+                                );
+                                if ask {
+                                    let key = match c.read_key.trim() {
+                                        "" => c.key.clone(),
+                                        k => k.to_string(),
+                                    };
+                                    served::fetch(&c.read_url, &key, true);
+                                }
+                            },
+                        );
+                        row_help(ui, "model", "As that server names it.", |ui| {
+                            pick_or_type(
+                                ui,
+                                "own-read-model",
+                                &mut c.read_model,
+                                models,
+                                "whisper-1",
+                            );
+                        });
+                        row_help(ui, "key", "Leave empty to use the model's key.", |ui| {
+                            secret(ui, &mut c.read_key);
+                        });
+                    }
                 }
-            }
-            ui.add_space(4.0);
-            match (c.reading, c.reading_fault()) {
-                (_, Some(why)) => panel::status(ui, false, why),
-                (Reading::Local, _) => {
-                    panel::status(ui, true, "a model here, on the Transcript pane")
+                ui.add_space(4.0);
+                match (c.reading, c.reading_fault()) {
+                    (_, Some(why)) => panel::status(ui, false, why),
+                    (Reading::Local, _) => {
+                        panel::status(ui, true, "a model here, on the Transcript pane")
+                    }
+                    (Reading::Chat, _) => panel::status(
+                        ui,
+                        true,
+                        &format!("{} at {}", c.read_model.trim(), host_of(&c.url)),
+                    ),
+                    (Reading::Server, _) => panel::status(
+                        ui,
+                        true,
+                        &format!("{} at {}", c.read_model.trim(), host_of(&c.read_url)),
+                    ),
                 }
-                (Reading::Chat, _) => panel::status(
-                    ui,
-                    true,
-                    &format!("{} at {}", c.read_model.trim(), host_of(&c.url)),
-                ),
-                (Reading::Server, _) => panel::status(
-                    ui,
-                    true,
-                    &format!("{} at {}", c.read_model.trim(), host_of(&c.read_url)),
-                ),
-            }
-        });
+            });
+        }
 
         if *c != before {
             let _ = c.save();
@@ -1352,8 +1366,13 @@ impl App {
                 panel::status(ui, true, "writing");
             }
         });
-        ui.add_space(8.0);
+        if crate::build::Feature::Feeds.built() {
+            ui.add_space(8.0);
+            self.feeds_card(ui);
+        }
+    }
 
+    fn feeds_card(&mut self, ui: &mut egui::Ui) {
         let status = self.radio.as_ref().map(|r| r.status.feeds.lock().clone()).unwrap_or_default();
         let mut remove = None;
         let feeds = self.setting(|s| s.feeds.clone());
@@ -1467,8 +1486,10 @@ impl App {
                 (_, false, _) => panel::status(ui, false, "off: nothing is kept"),
             }
         });
-        ui.add_space(8.0);
-        self.reading_section(ui);
+        if Feature::Stt.built() {
+            ui.add_space(8.0);
+            self.reading_section(ui);
+        }
     }
 
     /// Speech into words, beside the recording it is read from.
@@ -1915,7 +1936,9 @@ impl App {
                     "right-click the map"
                 },
             );
-            self.gps_rows(ui);
+            if Feature::Gps.built() {
+                self.gps_rows(ui);
+            }
         });
         ui.add_space(8.0);
 
@@ -1929,8 +1952,10 @@ impl App {
     /// network, may read what this radio hears.
     fn setup_network(&mut self, ui: &mut egui::Ui) {
         self.kiss_section(ui);
-        ui.add_space(8.0);
-        self.iqstream_section(ui);
+        if Feature::IqStream.built() {
+            ui.add_space(8.0);
+            self.iqstream_section(ui);
+        }
     }
 
     /// What this build is, what the newest published release is, and the one
@@ -1982,7 +2007,7 @@ impl App {
                 }
                 crate::update::State::Newer(r) => {
                     panel::status(ui, true, &format!("{} is available", r.version));
-                    match &r.asset {
+                    match r.asset.as_ref().filter(|_| Feature::Update.built()) {
                         Some(a) => {
                             reading(
                                 ui,
@@ -1991,11 +2016,12 @@ impl App {
                             );
                             Self::install_row(ui, a);
                         }
-                        None => reading(
+                        None if Feature::Update.built() => reading(
                             ui,
                             "download",
                             format!("nothing for {} in that release", crate::update::platform()),
                         ),
+                        None => {}
                     }
                     if !r.page.is_empty() && ui.button(legend("OPEN THE RELEASE")).clicked() {
                         ui.ctx().open_url(egui::OpenUrl::new_tab(r.page.clone()));
@@ -2008,7 +2034,7 @@ impl App {
         // sits unshown until the pointer moves.
         if busy || matches!(crate::update::install_state(), crate::update::Install::Fetching { .. })
         {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+            ui.ctx().request_repaint_after(common::time::Duration::from_millis(200));
         }
     }
 
@@ -2151,7 +2177,7 @@ impl App {
         // The reader is not the radio's, so this pane keeps its own clock:
         // without it a fix arriving while nothing else is moving would sit
         // unshown until the pointer did.
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        ui.ctx().request_repaint_after(common::time::Duration::from_millis(500));
     }
 
     /// What DETECT found, offered rather than applied.
@@ -2171,7 +2197,7 @@ impl App {
         }
         let Some(found) = scan.found.clone() else {
             hint(ui, "asking the serial ports for a modem");
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+            ui.ctx().request_repaint_after(common::time::Duration::from_millis(250));
             return;
         };
         if found.is_empty() {
@@ -2361,8 +2387,8 @@ impl App {
                 // A dataset that cannot be fetched is skipped rather than
                 // failed: refresh all is a convenience, not a demand for a
                 // token.
-                for w in crate::data::Which::all().iter().filter(|w| w.blocked().is_none()) {
-                    crate::data::refresh(*w);
+                for w in crate::data::Which::shown().filter(|w| w.blocked().is_none()) {
+                    crate::data::refresh(w);
                 }
             }
             help(ui, t("settings.data.help"));
@@ -2377,7 +2403,7 @@ impl App {
             // Often enough that a bar moves rather than steps: a download
             // is the one thing in this pane that changes while nobody
             // touches anything.
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+            ui.ctx().request_repaint_after(common::time::Duration::from_millis(100));
         }
     }
 
@@ -2800,14 +2826,14 @@ impl App {
                 modal_title(ui, "Add over the network");
                 section(ui, "source", "what is at the other end of the socket", |ui| {
                     row_help(ui, "brings", Over::HELP, |ui| {
-                        let opts = Over::ALL.iter().map(|o| (*o, o.label().to_string()));
+                        let opts = Over::shown().map(|o| (o, o.label().to_string()));
                         choice(ui, "remote-over", &mut edit.over, opts);
                     });
                     match edit.over {
                         Over::Samples => {
                             row_help(ui, "protocol", edit.proto.help(), |ui| {
                                 let opts =
-                                    remote::Proto::ALL.iter().map(|p| (*p, p.name().to_string()));
+                                    remote::Proto::built_all().map(|p| (p, p.name().to_string()));
                                 choice(ui, "remote-proto", &mut edit.proto, opts);
                             });
                             row_help(ui, "serves it", edit.proto.help(), |ui| {
@@ -3147,7 +3173,7 @@ impl App {
                             self.cmds.push(crate::radio::Cmd::TxCapture(tx));
                         }
                         false => {
-                            crate::devices::add_capture(c.path.clone(), c.rate, c.center, c.format);
+                            crate::devices::keep_capture(c.clone());
                             self.devices = crate::devices::list();
                             if let Some(e) = self
                                 .devices
@@ -3236,8 +3262,8 @@ impl App {
         let start = crate::chain::default_capture_dir();
         let _ = std::fs::create_dir_all(&start);
         let ctx = ctx.clone();
-        self.picking = Some(poll_promise::Promise::spawn_thread("open capture", move || {
-            let picked = rfd::FileDialog::new()
+        self.picking = Some(crate::task::thread("open capture", move || {
+            let picked = crate::dialog::FileDialog::new()
                 .set_title("Replay a capture")
                 .set_directory(&start)
                 .add_filter(
@@ -3247,8 +3273,18 @@ impl App {
                 .pick_file();
             // Nothing is drawing while the dialog is up, so the frame that
             // reads this has to be asked for.
-            ctx.request_repaint();
-            picked
+            crate::window::repaint(&ctx);
+            let path = picked?;
+            // A recording from another program is named for what it holds, not
+            // in the rtl_433 convention, so the common case of somebody else's
+            // file is a card asking what it is rather than a refusal.
+            let meta = crate::devices::describe_capture(&path);
+            Some(
+                meta.rate
+                    .zip(meta.format)
+                    .and_then(|(r, f)| crate::devices::add_capture(path.clone(), r, meta.center, f))
+                    .ok_or_else(|| CaptureEdit::new(path, false)),
+            )
         }));
     }
 
@@ -3257,20 +3293,13 @@ impl App {
         if self.picking.as_ref().is_none_or(|p| p.ready().is_none()) {
             return;
         }
-        let Some(path) = self.picking.take().and_then(|p| p.block_and_take()) else {
-            return;
-        };
-        // A recording from another program is named for what it holds, not
-        // in the rtl_433 convention, so the common case of somebody else's
-        // file is a card asking what it is rather than a refusal.
-        let meta = crate::devices::describe_capture(&path);
-        let Some(c) = meta
-            .rate
-            .zip(meta.format)
-            .and_then(|(r, f)| crate::devices::add_capture(path.clone(), r, meta.center, f))
-        else {
-            self.capture_edit = Some(CaptureEdit::new(path, false));
-            return;
+        let c = match self.picking.take().and_then(|p| p.block_and_take()) {
+            None => return,
+            Some(Err(edit)) => {
+                self.capture_edit = Some(edit);
+                return;
+            }
+            Some(Ok(c)) => c,
         };
         self.devices = crate::devices::list();
         if let Some(e) = self.devices.iter().find(|d| d.path.as_deref() == Some(c.path.as_path())) {
@@ -3680,9 +3709,9 @@ impl App {
         // Off the frame: a gigabyte read, measured and written back is
         // seconds of work, and a window that does not paint is a window the
         // compositor puts a "not responding" dialog over.
-        self.trimming = Some(poll_promise::Promise::spawn_thread("trim capture", move || {
+        self.trimming = Some(crate::task::thread("trim capture", move || {
             let r = sources::clip_file_as(&path, &out, &cut, meta).map_err(|e| e.to_string());
-            ctx.request_repaint();
+            crate::window::repaint(&ctx);
             r
         }));
     }
@@ -3964,6 +3993,17 @@ pub enum Over {
 impl Over {
     const ALL: &'static [Over] = &[Over::Samples, Over::Frames];
 
+    fn built(self) -> bool {
+        match self {
+            Over::Samples => remote::Proto::built_all().next().is_some(),
+            Over::Frames => crate::build::Feature::Feeds.built(),
+        }
+    }
+
+    pub fn shown() -> impl Iterator<Item = Over> {
+        Over::ALL.iter().copied().filter(|o| o.built())
+    }
+
     const HELP: &'static str = "Samples are a radio: the span, the spectrum, the decoders and \
                                 the audio all run here, on what its tuner hears. Frames are a \
                                 feed: another receiver has already demodulated them and only \
@@ -4039,6 +4079,7 @@ pub struct CaptureEdit {
     /// Samples per second, k and M understood.
     rate: String,
     format: common::SampleFormat,
+    len: Option<u64>,
 }
 
 impl CaptureEdit {
@@ -4051,6 +4092,10 @@ impl CaptureEdit {
             center: meta.center.map(|c| format!("{:.6}", c.as_f64() / 1e6)).unwrap_or_default(),
             rate: meta.rate.map(|r| r.0.to_string()).unwrap_or_default(),
             format: meta.format.unwrap_or(common::SampleFormat::Cu8),
+            len: common::fs::blocking::metadata(&path)
+                .ok()
+                .filter(|m| m.is_file())
+                .map(|m| m.len()),
             path,
             to_air,
         }
@@ -4072,11 +4117,7 @@ impl CaptureEdit {
             format: self.format,
             seconds: 0.0,
         };
-        let len = std::fs::metadata(&c.path)
-            .ok()
-            .filter(|m| m.is_file())
-            .map(|m| m.len())
-            .ok_or_else(|| format!("{} is not a file", c.path.display()))?;
+        let len = self.len.ok_or_else(|| format!("{} is not a file", c.path.display()))?;
         let samples = len / c.format.bytes_per_sample() as u64;
         if samples == 0 {
             return Err(format!("{} holds no whole samples in that format", c.path.display()));
@@ -4099,9 +4140,9 @@ impl Joining {
     fn start(ctx: &egui::Context, proto: remote::Proto, host: &str, label: &str) -> Self {
         let ctx = ctx.clone();
         let (h, l) = (host.to_string(), label.to_string());
-        let answer = poll_promise::Promise::spawn_thread("join remote", move || {
+        let answer = crate::task::thread("join remote", move || {
             let joined = join(proto, &h, &l);
-            ctx.request_repaint();
+            crate::window::repaint(&ctx);
             joined
         });
         Self { host: host.to_string(), answer }
@@ -4180,9 +4221,10 @@ impl FindEdit {
 
 impl Default for RemoteEdit {
     fn default() -> Self {
+        let proto = remote::Proto::built_all().next();
         Self {
-            over: Over::Samples,
-            proto: remote::Proto::IqStream,
+            over: Over::shown().next().unwrap_or(Over::Frames),
+            proto: proto.unwrap_or(remote::Proto::IqStream),
             feed: nodes::FEED_KINDS[0],
             host: String::new(),
             label: String::new(),
@@ -4321,7 +4363,7 @@ mod tests {
     use super::*;
 
     fn wrote(name: &str, bytes: usize) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join("sr_capture_card");
+        let dir = common::platform::scratch_dir().join("sr_capture_card");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         std::fs::write(&path, vec![0u8; bytes]).unwrap();
@@ -4388,7 +4430,7 @@ mod tests {
 
     #[test]
     fn a_spyserver_that_never_answers_leaves_the_window_painting() {
-        use std::time::{Duration, Instant};
+        use common::time::{Duration, Instant};
         let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let host = silent.local_addr().unwrap().to_string();
         let ctx = egui::Context::default();

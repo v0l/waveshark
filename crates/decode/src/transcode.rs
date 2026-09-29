@@ -45,7 +45,7 @@ pub struct ToTs {
     held: Vec<u8>,
     at: usize,
     stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    thread: Option<common::thread::JoinHandle<()>>,
 }
 
 impl ToTs {
@@ -89,7 +89,7 @@ impl ToTs {
         let (tx, bytes) = sync_channel::<Vec<u8>>(DEPTH);
         let stop = Arc::new(AtomicBool::new(false));
         let (going, what) = (stop.clone(), name.to_string());
-        let thread = std::thread::Builder::new()
+        let thread = common::thread::Builder::new()
             .name(name.into())
             .spawn(move || {
                 while !going.load(Ordering::Relaxed) {
@@ -159,7 +159,7 @@ impl Write for Sink {
                 Ok(()) => return Ok(buf.len()),
                 Err(std::sync::mpsc::TrySendError::Full(back)) => {
                     held = back;
-                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    std::thread::sleep(common::time::Duration::from_millis(2));
                 }
                 Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return Ok(buf.len()),
             }
@@ -603,8 +603,8 @@ mod tests {
         let mut packets = 0usize;
         let mut buf = vec![0u8; crate::mpegts::PACKET * 64];
         let mut named = false;
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while std::time::Instant::now() < until && packets < 20_000 {
+        let until = common::time::Instant::now() + common::time::Duration::from_secs(20);
+        while common::time::Instant::now() < until && packets < 20_000 {
             let n = ts.read(&mut buf).unwrap_or(0);
             if n == 0 {
                 break;

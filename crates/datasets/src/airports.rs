@@ -12,7 +12,7 @@
 //! made a receiver anywhere else stare at an empty map.
 
 use crate::cache::{Cache, Error, Source, When};
-use std::time::Duration;
+use common::time::Duration;
 
 /// OurAirports publishes a daily rebuild, so a check a day apart cannot miss
 /// much and a check every launch would be noise.
@@ -24,6 +24,7 @@ pub fn airports_source() -> Source {
         "https://davidmegginson.github.io/ourairports-data/airports.csv",
         MAX_AGE,
     )
+    .cross_origin()
 }
 
 pub fn frequencies_source() -> Source {
@@ -32,6 +33,7 @@ pub fn frequencies_source() -> Source {
         "https://davidmegginson.github.io/ourairports-data/airport-frequencies.csv",
         MAX_AGE,
     )
+    .cross_origin()
 }
 
 /// How an airport's frequencies are grouped in the tooltip, in the order a

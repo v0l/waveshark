@@ -167,7 +167,8 @@ fn a_survey_records_the_devices_heard_and_where_from() {
     plan.fronts = fronts;
     let mut rx = crate::chain::Receiver::build(&plan, crate::chain::Sinks::default()).unwrap();
 
-    let dir = std::env::temp_dir().join(format!("waveshark-survey-{}", std::process::id()));
+    let dir =
+        common::platform::scratch_dir().join(format!("waveshark-survey-{}", std::process::id()));
     let path = dir.join("survey.sqlite");
     let _ = std::fs::remove_file(&path);
     plan.settings.survey_path = Some(path.clone());

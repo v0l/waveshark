@@ -82,7 +82,27 @@ jobs:
       # What the release workflow ships on Linux is built without CUDA, so
       # that set has to keep building too, or a release breaks on a Tuesday.
       - name: Build the shipped feature set
-        run: cargo build --release -p app --no-default-features --features limesdr,stt,mcp
+        run: cargo build --release -p app --no-default-features --features native,limesdr,stt,mcp
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang libasound2-dev libudev-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+      - name: Every feature off
+        run: cargo +stable check -p app --no-default-features --all-targets
+      - name: The browser build
+        run: tools/web.sh check
 
   deps:
     runs-on: ubuntu-latest

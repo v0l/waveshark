@@ -6,6 +6,12 @@
 //! is a file rather than a dependency: what a map crate adds on top is a
 //! widget, and the widget here has to draw aircraft anyway.
 
+#[cfg(not(target_arch = "wasm32"))]
+mod disk;
+#[cfg(target_arch = "wasm32")]
+#[path = "map/disk_web.rs"]
+mod disk;
+
 use egui::{ColorImage, Context, TextureHandle, TextureOptions};
 use poll_promise::Promise;
 use std::collections::HashMap;
@@ -72,7 +78,7 @@ impl Tiles {
         // OSM's tile usage policy asks for an identifying agent with
         // contact information, and blocks clients that send a default or
         // absent one; `httpc` is where that name lives.
-        let http = httpc::client(std::time::Duration::from_secs(15)).unwrap_or_default();
+        let http = httpc::client(common::time::Duration::from_secs(15)).unwrap_or_default();
         Self {
             slots: HashMap::new(),
             order: Vec::new(),
@@ -122,7 +128,7 @@ impl Tiles {
 
     /// The texture for a tile, asking for it if this is the first time it has
     /// been wanted. `None` means it is on its way, or will never come.
-    pub fn get(&mut self, id: TileId, rt: &tokio::runtime::Handle) -> Option<&TextureHandle> {
+    pub fn get(&mut self, id: TileId, rt: &crate::task::Spawner) -> Option<&TextureHandle> {
         if !self.slots.contains_key(&id) {
             let promise = self.fetch(id, rt);
             self.slots.insert(id, Slot::Loading(promise));
@@ -137,22 +143,17 @@ impl Tiles {
 
     /// Start one tile: cache, then network, then decode, each waiting its
     /// turn behind the in-flight limit.
-    fn fetch(
-        &self,
-        id: TileId,
-        rt: &tokio::runtime::Handle,
-    ) -> Promise<Result<ColorImage, String>> {
+    fn fetch(&self, id: TileId, rt: &crate::task::Spawner) -> Promise<Result<ColorImage, String>> {
         let path = self.dir.as_ref().map(|d| d.join(format!("{}/{}/{}.png", id.z, id.x, id.y)));
         let http = self.http.clone();
         let limit = self.limit.clone();
         let ctx = self.ctx.clone();
-        let _enter = rt.enter();
-        Promise::spawn_async(async move {
+        rt.promise(async move {
             let out = load(http, limit, id, path).await;
             // Nothing else may be moving on screen, and a tile that arrives
             // into a still window has to ask for the frame that draws it.
             if let Some(ctx) = ctx {
-                ctx.request_repaint();
+                crate::window::repaint(&ctx);
             }
             out
         })
@@ -172,10 +173,7 @@ impl Tiles {
 }
 
 fn cache_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-    let dir = base.join("waveshark").join("tiles");
+    let dir = common::platform::cache_dir()?.join("tiles");
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir)
 }
@@ -192,7 +190,7 @@ async fn load(
     path: Option<PathBuf>,
 ) -> Result<ColorImage, String> {
     if let Some(p) = path.as_deref()
-        && let Ok(bytes) = tokio::fs::read(p).await
+        && let Some(bytes) = disk::read(p).await
         && let Ok(img) = decode_off_thread(bytes).await
     {
         return Ok(img);
@@ -206,10 +204,7 @@ async fn load(
     };
     let img = decode_off_thread(bytes.to_vec()).await.map_err(|e| format!("{url}: {e}"))?;
     if let Some(p) = path {
-        if let Some(parent) = p.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
-        }
-        let _ = tokio::fs::write(p, &bytes).await;
+        disk::write(&p, &bytes).await;
     }
     Ok(img)
 }
@@ -217,7 +212,7 @@ async fn load(
 /// PNG decoding is milliseconds of CPU per tile, which is long enough to
 /// stall the other fetches sharing the runtime's two workers.
 async fn decode_off_thread(bytes: Vec<u8>) -> Result<ColorImage, String> {
-    tokio::task::spawn_blocking(move || decode(&bytes)).await.map_err(|e| e.to_string())?
+    crate::task::blocking(move || decode(&bytes)).await.ok_or("the decoder stopped")?
 }
 
 fn decode(bytes: &[u8]) -> Result<ColorImage, String> {

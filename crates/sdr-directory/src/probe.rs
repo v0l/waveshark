@@ -235,7 +235,7 @@ mod tests {
     use super::*;
     use crate::model::fixtures::{airband, entry, hf};
     use crate::{Author, Station};
-    use std::time::Duration;
+    use web_time::Duration;
 
     fn listed(name: &str, port: u16, tuners: Vec<crate::Tuner>) -> Listing {
         let mut entry = entry("203.0.113.9", tuners);
@@ -341,7 +341,7 @@ mod tests {
     fn ten_servers_are_asked_at_a_time() {
         let v: Vec<Listing> = (0..30u16).map(|i| listed("x", 5000 + i, vec![airband()])).collect();
         let (now, peak) = (AtomicUsize::new(0), AtomicUsize::new(0));
-        let started = std::time::Instant::now();
+        let started = web_time::Instant::now();
         let probes = Mutex::new(Probes::default());
         let asked = sweep(&probes, &v, 0, WORKERS, |_| {
             peak.fetch_max(now.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);

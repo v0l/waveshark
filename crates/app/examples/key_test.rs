@@ -52,7 +52,7 @@ fn main() -> common::Result<()> {
     )?;
 
     println!("--- transmitting ---");
-    let start = std::time::Instant::now();
+    let start = common::time::Instant::now();
     let (mut rx_samples, mut blocks) = (0u64, 0u64);
     while start.elapsed().as_secs_f64() < secs {
         let buf = match rx.read() {
@@ -63,7 +63,7 @@ fn main() -> common::Result<()> {
             }
         };
         rx_samples += buf.samples.len() as u64;
-        let t = std::time::Instant::now();
+        let t = common::time::Instant::now();
         {
             let b = g.input_buf();
             b.clear();
@@ -100,11 +100,11 @@ fn main() -> common::Result<()> {
     if let Some(n) = g.node_mut(id)
         && let Some(s) = n.as_any_mut().downcast_mut::<nodes::TxSinkNode>()
     {
-        s.finish(std::time::Duration::from_secs(1));
+        s.finish(common::time::Duration::from_secs(1));
     }
     drop(g);
 
-    let after = std::time::Instant::now();
+    let after = common::time::Instant::now();
     let (mut n, mut real) = (0u64, 0u64);
     while after.elapsed().as_secs_f64() < 3.0 {
         match rx.read() {

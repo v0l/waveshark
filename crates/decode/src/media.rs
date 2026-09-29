@@ -112,7 +112,7 @@ pub struct Media {
     watching: Option<u16>,
     out: Receiver<Out>,
     heard: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    thread: Option<common::thread::JoinHandle<()>>,
     /// What the thread last said it could not do, so a caller can show it
     /// rather than watching an empty pane.
     fault: std::sync::Arc<parking_lot::Mutex<Option<String>>>,
@@ -134,7 +134,7 @@ impl Media {
         let clock = heard.clone();
         let engine = std::sync::Arc::new(parking_lot::Mutex::new(None));
         let said = engine.clone();
-        let thread = std::thread::Builder::new()
+        let thread = common::thread::Builder::new()
             .name("mpegts decode".into())
             .spawn(move || {
                 if let Err(e) = run(blocks, asked, send, &clock, decoding, &said) {
@@ -755,7 +755,7 @@ mod tests {
         let mut out = Vec::new();
         for block in ts.chunks(PACKET * 64) {
             media.push(block);
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            std::thread::sleep(common::time::Duration::from_millis(2));
         }
         media.finish(&mut out);
         assert_eq!(media.fault(), None);
@@ -773,15 +773,15 @@ mod tests {
         let mut media = Media::new();
         for block in ts.chunks(PACKET * 64) {
             media.push(block);
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            std::thread::sleep(common::time::Duration::from_millis(2));
         }
         let (done, dropped) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             drop(media);
             let _ = done.send(());
         });
         assert!(
-            dropped.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
+            dropped.recv_timeout(common::time::Duration::from_secs(5)).is_ok(),
             "the decode thread was left blocked on a full picture queue"
         );
     }
@@ -795,7 +795,7 @@ mod tests {
         let mut blocks = ts.chunks(PACKET * 64);
         for block in blocks.by_ref() {
             media.push(block);
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            std::thread::sleep(common::time::Duration::from_millis(2));
             media.take(&mut out);
             if pictures(&out, 1) >= 10 {
                 break;
@@ -806,7 +806,7 @@ mod tests {
         let changed = out.len();
         for block in blocks {
             media.push(block);
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            std::thread::sleep(common::time::Duration::from_millis(2));
             media.take(&mut out);
         }
         media.finish(&mut out);
@@ -831,7 +831,7 @@ mod tests {
         let mut all = Vec::new();
         for block in ts.chunks(PACKET * 64) {
             probe.push(block);
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            std::thread::sleep(common::time::Duration::from_millis(2));
         }
         probe.finish(&mut all);
         let first = all
@@ -847,7 +847,7 @@ mod tests {
         let mut early = Vec::new();
         for block in ts.chunks(PACKET * 64) {
             media.push(block);
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            std::thread::sleep(common::time::Duration::from_millis(2));
             media.take(&mut early);
         }
         let shown: Vec<f64> = early
@@ -870,7 +870,7 @@ mod tests {
         let mut out = Vec::new();
         for block in ts.chunks(PACKET * 64) {
             media.push(block);
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            std::thread::sleep(common::time::Duration::from_millis(2));
         }
         media.finish(&mut out);
         let at = |o: &Out| match o {

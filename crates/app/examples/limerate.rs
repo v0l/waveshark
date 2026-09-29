@@ -14,7 +14,7 @@ fn main() {
         for _ in 0..10 {
             let _ = s.read();
         }
-        let t = std::time::Instant::now();
+        let t = common::time::Instant::now();
         let mut n = 0u64;
         while t.elapsed().as_secs_f64() < 3.0 {
             match s.read() {

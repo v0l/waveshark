@@ -1,12 +1,9 @@
 use crate::event::{Event, KIND};
 use crate::socket::{Socket, Url};
+use common::time::{Duration, Instant};
 use sdr_directory::{Error, Published};
 use serde_json::{Value, json};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
-
-pub const RELAYS: [&str; 4] =
-    ["wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net", "wss://relay.snort.social"];
 
 struct Relay {
     url: String,

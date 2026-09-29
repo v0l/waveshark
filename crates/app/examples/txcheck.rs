@@ -31,8 +31,8 @@ fn main() {
         as usize;
 
     let mut s = d.start_rx().unwrap();
-    let t = std::time::Instant::now();
-    let mut next = std::time::Duration::ZERO;
+    let t = common::time::Instant::now();
+    let mut next = common::time::Duration::ZERO;
     println!(
         "watching {:.4} MHz at {:.3} MS/s, bin {bin} of {N}",
         (freq as f64 + offset) / 1e6,
@@ -45,7 +45,7 @@ fn main() {
         if !spec.process(&b.samples) || t.elapsed() < next {
             continue;
         }
-        next = t.elapsed() + std::time::Duration::from_millis(100);
+        next = t.elapsed() + common::time::Duration::from_millis(100);
 
         let db = spec.power_db();
         let tone = db[bin];

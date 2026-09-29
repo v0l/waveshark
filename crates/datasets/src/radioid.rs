@@ -12,8 +12,8 @@
 //! changed.
 
 use crate::cache::{Cache, Error, Source, When};
+use common::time::Duration;
 use std::path::Path;
-use std::time::Duration;
 
 /// The dumps are rebuilt daily. Checking once a day costs one conditional
 /// request per file and the file is unchanged nearly every time.
@@ -200,7 +200,7 @@ mod wire {
 
 fn parse_users(path: &Path) -> Result<Users, Error> {
     let name = || path.display().to_string();
-    let f = std::fs::File::open(path).map_err(|e| Error::Io(name(), e))?;
+    let f = common::fs::blocking::File::open(path).map_err(|e| Error::Io(name(), e))?;
     let doc: wire::Users = serde_json::from_reader(std::io::BufReader::with_capacity(1 << 20, f))
         .map_err(|e| Error::Parse(name(), e.to_string()))?;
     if doc.users.is_empty() {

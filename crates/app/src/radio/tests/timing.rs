@@ -48,16 +48,16 @@ fn a_block_of_no_samples_costs_half_a_percent_of_a_block_that_has_some() {
     rx.process(&sig).expect("a block of samples");
 
     let turns = 3_000;
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     for _ in 0..turns {
         rx.process(&[]).expect("a block of no samples");
         let _ = rx.spectrum_ready();
-        let _ = rx.rows(std::time::Instant::now());
+        let _ = rx.rows(common::time::Instant::now());
     }
     let empty = t.elapsed().as_secs_f64() / turns as f64;
 
     let runs = 20;
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     for _ in 0..runs {
         rx.process(&sig).expect("a block of samples");
     }
@@ -91,7 +91,7 @@ fn a_minute_of_blocks_with_no_samples_decodes_nothing_and_keeps_the_graph() {
     let mut rows = 0;
     for _ in 0..3_000 {
         rx.process(&[]).expect("a block of no samples");
-        rows += rx.rows(std::time::Instant::now()).len();
+        rows += rx.rows(common::time::Instant::now()).len();
     }
     assert_eq!(rows, 0, "{rows} rows came out of blocks with no samples in them");
     // And the chain still reads its own span afterwards rather than
@@ -118,10 +118,10 @@ fn blocks_with_no_samples_between_the_real_ones_change_nothing_that_is_read() {
         // capture.
         for _ in 0..50 {
             rx.process(&[]).expect("a block of no samples");
-            out.extend(harvest(&mut rx, std::time::Instant::now()));
+            out.extend(harvest(&mut rx, common::time::Instant::now()));
         }
         rx.process(blk).expect("a block of samples");
-        let at = block_start(std::time::Instant::now(), blk.len(), rate);
+        let at = block_start(common::time::Instant::now(), blk.len(), rate);
         out.extend(harvest(&mut rx, at));
     }
     // The same one packet the capture gives up when it is replayed
@@ -146,7 +146,7 @@ fn a_decode_is_stamped_when_the_block_started_not_when_it_finished() {
     // worth of signal. On a loaded machine, or in a debug build, it failed
     // for a reason that had nothing to do with stamping, which is the
     // other test's job.
-    let finished = std::time::Instant::now();
+    let finished = common::time::Instant::now();
     let at = block_start(finished, 16_384, 250_000.0);
     // 16384 samples at 250 kS/s is 65.536 ms of signal.
     let back = finished.duration_since(at).as_secs_f64();
@@ -170,7 +170,7 @@ fn a_replayed_decode_is_not_stamped_in_the_future() {
     };
     let mut rx = replay_receiver(&buf, None).unwrap();
     let out = replay_blocks(&mut rx, &buf);
-    let done = std::time::Instant::now();
+    let done = common::time::Instant::now();
     let rec = out.first().expect("a decode");
     assert!(rec.at < done, "a decode is stamped after the replay that produced it");
 }
@@ -187,7 +187,7 @@ fn retuning_clears_state_rather_than_carrying_it_across() {
     }];
     rx.rebuild(&plan).unwrap();
     rx.process(&block(8192)).unwrap();
-    let out = rx.rows(std::time::Instant::now());
+    let out = rx.rows(common::time::Instant::now());
     assert!(out.is_empty(), "a steady tone decoded as {out:?}");
 }
 
@@ -207,7 +207,7 @@ fn the_scanner_keeps_up_with_the_stream() {
     // One pass to warm the filters and the pool.
     rx.process(&b).unwrap();
 
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     let blocks = 20;
     for _ in 0..blocks {
         rx.process(&b).unwrap();
@@ -236,7 +236,7 @@ fn scratch_buffers_do_not_grow_across_blocks() {
     let cost = |a: &mut Audio| {
         (0..3)
             .map(|_| {
-                let t = std::time::Instant::now();
+                let t = common::time::Instant::now();
                 for _ in 0..10 {
                     a.process(&b, 0.5);
                 }
@@ -288,7 +288,7 @@ fn every_mode_runs_faster_than_real_time() {
     for mode in [Demod::Wfm, Demod::Nfm, Demod::Am, Demod::Usb, Demod::Cw] {
         let mut a = Audio::new(120_000.0, rate, mode, 48_000.0);
         a.process(&b, 0.5);
-        let t = std::time::Instant::now();
+        let t = common::time::Instant::now();
         for _ in 0..4 {
             a.process(&b, 0.5);
         }

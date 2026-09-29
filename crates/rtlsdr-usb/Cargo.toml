@@ -6,7 +6,7 @@ license.workspace = true
 description = "RTL2832U and R82xx driver over USB, with no system library"
 
 [dependencies]
-nusb.workspace = true
+usbio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

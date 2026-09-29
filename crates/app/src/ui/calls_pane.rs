@@ -116,7 +116,7 @@ pub(super) struct CallList<'a> {
 impl CallList<'_> {
     /// Draw the list, and say what a click asked for.
     pub(super) fn show(mut self, ui: &mut egui::Ui) -> Option<Action> {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let calls: Vec<Call> = self.st.list.active(now).into_iter().cloned().collect();
         let levels = self.radio.map(|r| r.status.call_levels()).unwrap_or_default();
         let mut act = None;
@@ -246,7 +246,7 @@ impl CallList<'_> {
         &mut self,
         ui: &mut egui::Ui,
         calls: &[Call],
-        now: std::time::Instant,
+        now: common::time::Instant,
         levels: &[(common::ConversationKey, f32)],
     ) -> Option<Action> {
         if calls.is_empty() {
@@ -680,12 +680,12 @@ impl CallList<'_> {
             return;
         }
         let (entries, start, ctx) = (shown.to_vec(), dir.to_path_buf(), ctx.clone());
-        self.st.saving = Some(poll_promise::Promise::spawn_thread("export calls", move || {
-            let picked = rfd::FileDialog::new()
+        self.st.saving = Some(crate::task::thread("export calls", move || {
+            let picked = crate::dialog::FileDialog::new()
                 .set_title("Export the recordings listed")
                 .set_directory(&start)
                 .pick_folder();
-            ctx.request_repaint();
+            crate::window::repaint(&ctx);
             let Some(into) = picked else { return String::new() };
             match crate::calllog::export(&entries, &into) {
                 Ok((done, 0)) => format!("{done} written to {}", into.display()),
@@ -770,26 +770,25 @@ impl CallList<'_> {
                 );
                 let start = crate::calllog::calls_dir();
                 let ctx = ctx.clone();
-                self.st.saving =
-                    Some(poll_promise::Promise::spawn_thread("export section", move || {
-                        let picked = rfd::FileDialog::new()
-                            .set_title("Export this stretch of the conversation")
-                            .set_directory(&start)
-                            .set_file_name(&name)
-                            .add_filter("Opus", &["opus"])
-                            .save_file();
-                        ctx.request_repaint();
-                        let Some(path) = picked else { return String::new() };
-                        match crate::oggopus::write(
-                            &path,
-                            &packets,
-                            crate::calllog::RATE as u32,
-                            crate::calllog::FRAME,
-                        ) {
-                            Ok(()) => format!("{} written", path.display()),
-                            Err(e) => format!("{}: {e}", path.display()),
-                        }
-                    }));
+                self.st.saving = Some(crate::task::thread("export section", move || {
+                    let picked = crate::dialog::FileDialog::new()
+                        .set_title("Export this stretch of the conversation")
+                        .set_directory(&start)
+                        .set_file_name(&name)
+                        .add_filter("Opus", &["opus"])
+                        .save_file();
+                    crate::window::repaint(&ctx);
+                    let Some(path) = picked else { return String::new() };
+                    match crate::oggopus::write(
+                        &path,
+                        &packets,
+                        crate::calllog::RATE as u32,
+                        crate::calllog::FRAME,
+                    ) {
+                        Ok(()) => format!("{} written", path.display()),
+                        Err(e) => format!("{}: {e}", path.display()),
+                    }
+                }));
             }
         }
     }
@@ -805,14 +804,14 @@ impl CallList<'_> {
         };
         let name = format!("{}.opus", crate::calllog::stem(&call, None));
         let (start, ctx) = (dir.to_path_buf(), ctx.clone());
-        self.st.saving = Some(poll_promise::Promise::spawn_thread("export over", move || {
-            let picked = rfd::FileDialog::new()
+        self.st.saving = Some(crate::task::thread("export over", move || {
+            let picked = crate::dialog::FileDialog::new()
                 .set_title("Save this over")
                 .set_directory(&start)
                 .set_file_name(&name)
                 .add_filter("Opus", &["opus"])
                 .save_file();
-            ctx.request_repaint();
+            crate::window::repaint(&ctx);
             let Some(path) = picked else { return String::new() };
             match crate::oggopus::write(
                 &path,
@@ -980,7 +979,7 @@ fn channel_cell(c: &Call) -> String {
 }
 
 /// One row's text and colours, from the system column onwards.
-fn row_cells(c: &Call, now: std::time::Instant, live: bool) -> Vec<(String, Color32)> {
+fn row_cells(c: &Call, now: common::time::Instant, live: bool) -> Vec<(String, Color32)> {
     let party = if c.group { theme::TRACE } else { theme::READOUT };
     let airtime = if c.seconds > 0.0 { format!("{:.1} s", c.seconds) } else { "-".to_string() };
     vec![
@@ -1062,7 +1061,7 @@ mod tests {
     /// did exactly that, painting the level meter over the codec.
     #[test]
     fn every_column_has_a_cell_behind_it() {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let call = Call {
             system: "Audio".into(),
             channel_hz: 446_050_000.0,

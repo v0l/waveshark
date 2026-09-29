@@ -23,7 +23,7 @@ pub(super) struct Keys<'a> {
     pub radio: Option<&'a Radio>,
     #[cfg_attr(not(feature = "tea"), allow(dead_code))]
     pub cmds: &'a mut Vec<Cmd>,
-    pub rt: tokio::runtime::Handle,
+    pub rt: crate::task::Spawner,
 }
 
 impl Keys<'_> {
@@ -177,11 +177,8 @@ impl Keys<'_> {
                     let ok = !busy && !self.st.node_host.trim().is_empty();
                     if ui.add_enabled(ok, egui::Button::new("Import channels")).clicked() {
                         let host = self.st.node_host.trim().to_string();
-                        let _enter = self.rt.enter();
                         self.st.node_result = None;
-                        self.st.node_fetch = Some(poll_promise::Promise::spawn_async(
-                            crate::meshnode::channels(host),
-                        ));
+                        self.st.node_fetch = Some(self.rt.promise(crate::meshnode::channels(host)));
                     }
                     if busy {
                         ui.spinner();

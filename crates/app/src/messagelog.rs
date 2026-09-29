@@ -23,13 +23,13 @@
 //! can see it, switch it off and wire it elsewhere.
 
 use common::Result;
+use common::time::Instant;
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 use crate::messages::{Message, Messages};
 
@@ -37,7 +37,7 @@ use crate::messages::{Message, Messages};
 pub fn messages_dir() -> PathBuf {
     crate::wspkt::PacketLog::default_dir()
         .map(|d| d.with_file_name("messages"))
-        .unwrap_or_else(|| std::env::temp_dir().join("waveshark-messages"))
+        .unwrap_or_else(|| common::platform::scratch_dir().join("waveshark-messages"))
 }
 
 /// How much of the folder is read back when the receiver starts.
@@ -56,13 +56,11 @@ fn path_for(dir: &Path, at_us: u64) -> PathBuf {
 /// and a message that failed to be written is still on screen and still in
 /// the packet log as the burst it was decoded from.
 pub fn append(dir: &Path, m: &Message) {
-    if std::fs::create_dir_all(dir).is_err() {
+    if common::fs::blocking::create_dir_all(dir).is_err() {
         return;
     }
     let line = line_of(m);
-    let Ok(mut f) =
-        std::fs::OpenOptions::new().create(true).append(true).open(path_for(dir, m.at_us))
-    else {
+    let Ok(mut f) = common::fs::blocking::File::append(path_for(dir, m.at_us)) else {
         return;
     };
     let _ = writeln!(f, "{line}");
@@ -84,7 +82,7 @@ fn line_of(m: &Message) -> String {
 
 /// Read a day's file back.
 pub fn read(path: &Path) -> Vec<Message> {
-    let Ok(body) = std::fs::read_to_string(path) else {
+    let Ok(body) = common::fs::blocking::read_to_string(path) else {
         return Vec::new();
     };
     let now = Instant::now();
@@ -99,7 +97,7 @@ pub fn recent(dir: &Path, days: u64) -> Vec<Message> {
     for back in (0..=days).rev() {
         let at = now_us.saturating_sub(back * 86_400 * 1_000_000);
         let path = path_for(dir, at);
-        if path.exists() {
+        if common::fs::blocking::exists(&path) {
             out.extend(read(&path));
         }
     }
@@ -117,7 +115,7 @@ fn message_of(line: &str, now: Instant, now_us: u64) -> Option<Message> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
     let at_us = v.get("at_us")?.as_u64()?;
     let text = v.get("text")?.as_str()?.to_string();
-    let ago = std::time::Duration::from_micros(now_us.saturating_sub(at_us));
+    let ago = common::time::Duration::from_micros(now_us.saturating_sub(at_us));
     let at = now.checked_sub(ago).unwrap_or(now);
     let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
     let channel_hz = v.get("channel_hz").and_then(|x| x.as_f64()).unwrap_or(0.0);
@@ -250,7 +248,8 @@ mod tests {
     use pipeline::node::Node;
 
     fn dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("sr-msglog-{name}-{}", std::process::id()));
+        let d = common::platform::scratch_dir()
+            .join(format!("sr-msglog-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
     }

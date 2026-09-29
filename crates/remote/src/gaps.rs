@@ -12,8 +12,8 @@
 //! down and a real loss leaves raised for good.
 
 use common::Sps;
+use common::time::{Duration, Instant};
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
 
 /// How far back the lowest lateness is looked for.
 ///

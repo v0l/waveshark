@@ -9,6 +9,10 @@
 pub mod acars_nodes;
 pub mod aero_nodes;
 pub mod ais_nodes;
+#[cfg(feature = "ambe")]
+mod ambe;
+#[cfg(not(feature = "ambe"))]
+#[path = "ambe_silent.rs"]
 mod ambe;
 pub mod aprs_nodes;
 pub mod apt_nodes;
@@ -85,6 +89,7 @@ pub mod tx_nodes;
 pub mod uat_nodes;
 pub mod vdl2_nodes;
 pub mod video_nodes;
+mod wait;
 pub mod walksnail_nodes;
 pub mod wefax_nodes;
 pub mod wfm;

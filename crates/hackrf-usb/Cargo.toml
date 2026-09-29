@@ -8,6 +8,7 @@ license = "MIT"
 description = "USB transport for HackRF One, receive and transmit"
 
 [dependencies]
-nusb.workspace = true
+usbio.workspace = true
+common.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

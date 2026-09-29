@@ -1,11 +1,11 @@
 //! Samples on the control connection, for a client no datagram reaches.
 
+use common::time::Duration;
 use iqstream::proto::Codec;
 use iqstream::{
     ClientConfig, IqStream, Prefer, Server, ServerConfig, Stream, StreamConfig, Transport,
 };
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::net::TcpListener;
 
 fn server() -> (Arc<Server>, Arc<Stream>) {

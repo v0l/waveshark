@@ -26,7 +26,7 @@
 //! stranger's database forever.
 
 use crate::Sighting;
-use std::time::Duration;
+use common::time::Duration;
 
 /// Where observations go.
 pub const SUBMIT_URL: &str = "https://api.beacondb.net/v2/geosubmit";
@@ -181,19 +181,17 @@ pub fn body(items: &[String]) -> String {
 /// An error is a submission that has not been taken and should be tried
 /// again: the caller keeps its spool file until this returns `Ok`.
 pub fn submit(body: &[u8]) -> Result<(), String> {
-    let http = httpc::blocking(TIMEOUT).map_err(|e| e.to_string())?;
-    let resp = http
-        .post(SUBMIT_URL)
+    let resp = httpc::post(SUBMIT_URL)
+        .timeout(TIMEOUT)
         .header("Content-Type", "application/json")
         .body(body.to_vec())
-        .send()
-        .map_err(|e| e.to_string())?;
-    let status = resp.status();
-    if status.is_success() {
+        .wait()?;
+    if resp.is_success() {
         return Ok(());
     }
+    let status = resp.status;
     let body = resp.text().unwrap_or_default();
-    Err(format!("beaconDB answered {}: {}", status.as_u16(), first_line(&body)))
+    Err(format!("beaconDB answered {status}: {}", first_line(&body)))
 }
 
 /// Where a receiver seeing this cell probably is, and how far out that may
@@ -210,20 +208,19 @@ pub fn locate_cell(c: Cell, radio: Radio) -> Result<Option<(f64, f64, f64)>, Str
         "considerIp": false,
         "cellTowers": [c.json(radio)],
     });
-    let http = httpc::blocking(LOOKUP_TIMEOUT).map_err(|e| e.to_string())?;
-    let resp = http
-        .post(LOCATE_URL)
+    let resp = httpc::post(LOCATE_URL)
+        .timeout(LOOKUP_TIMEOUT)
         .header("Content-Type", "application/json")
         .body(body.to_string())
-        .send()
-        .map_err(|e| e.to_string())?;
-    let status = resp.status();
+        .wait()?;
+    let status = resp.status;
+    let ok = resp.is_success();
     let text = resp.text().unwrap_or_default();
-    if status == reqwest::StatusCode::NOT_FOUND {
+    if status == 404 {
         return Ok(None);
     }
-    if !status.is_success() {
-        return Err(format!("beaconDB answered {}: {}", status.as_u16(), first_line(&text)));
+    if !ok {
+        return Err(format!("beaconDB answered {status}: {}", first_line(&text)));
     }
     let v: serde_json::Value = serde_json::from_str(&text)
         .map_err(|_| "beaconDB sent something that is not JSON".to_string())?;

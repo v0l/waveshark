@@ -188,7 +188,7 @@ fn pictures_keep_coming_after_a_frame_of_the_multiplex_is_lost() {
                 continue;
             }
             media.push(&chunk.concat());
-            std::thread::sleep(std::time::Duration::from_micros(500));
+            std::thread::sleep(common::time::Duration::from_micros(500));
             media.take(&mut out);
         }
         media.finish(&mut out);
@@ -227,7 +227,7 @@ fn a_symbol_rate_taken_off_a_spur_does_not_run_the_clock_away() {
 
 struct Live {
     frames_after: u64,
-    longest: std::time::Duration,
+    longest: common::time::Duration,
     lost_s: f64,
     states: Vec<(f64, Option<pipeline::Acquisition>)>,
     weak: Option<String>,
@@ -257,12 +257,12 @@ fn through_a_radio_that_cannot_wait(
     let mut events = Vec::new();
     let mut noise = 0x5EED_u64;
     let (mut next, mut lost, mut longest, mut before) =
-        (0usize, 0usize, std::time::Duration::ZERO, None);
-    let start = std::time::Instant::now();
+        (0usize, 0usize, common::time::Duration::ZERO, None);
+    let start = common::time::Instant::now();
     let end = (seconds * rate) as usize;
     while next < end {
-        let due = start + std::time::Duration::from_secs_f64((next + BLOCK) as f64 / rate);
-        std::thread::sleep(due.saturating_duration_since(std::time::Instant::now()));
+        let due = start + common::time::Duration::from_secs_f64((next + BLOCK) as f64 / rate);
+        std::thread::sleep(due.saturating_duration_since(common::time::Instant::now()));
         let heard = (start.elapsed().as_secs_f64() * rate) as usize / BLOCK * BLOCK;
         if heard > next + 4 * BLOCK {
             lost += heard - BLOCK - next;
@@ -294,7 +294,7 @@ fn through_a_radio_that_cannot_wait(
         let (tags, mut new_tags) = (Vec::new(), Vec::new());
         let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags)
             .with_block_seconds(BLOCK as f64 / rate);
-        let called = std::time::Instant::now();
+        let called = common::time::Instant::now();
         Node::process(&mut node, &[&payload], &mut out, &mut ctx).expect("the stage runs");
         longest = longest.max(called.elapsed());
         states.push((at, Node::acquisition(&node)));
@@ -322,7 +322,7 @@ fn a_carrier_lost_to_noise_on_a_radio_that_cannot_wait_is_found_again() {
         live.frames_after, live.longest, live.lost_s
     );
     assert!(live.frames_after >= 3_000, "floor 3000 of about 3300: {report}");
-    assert!(live.longest < std::time::Duration::from_millis(50), "{report}");
+    assert!(live.longest < common::time::Duration::from_millis(50), "{report}");
 }
 
 #[test]

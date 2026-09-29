@@ -13,10 +13,11 @@
 //! error it has to handle.
 
 use crate::nmea::{Assembler, Fix};
+use crate::serial::open_port;
+use common::time::Duration;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 /// Where the fixes come from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,7 +115,7 @@ impl Config {
 /// the next one arrived is not a loss: it is the same place.
 pub struct Source {
     cfg: Config,
-    state: Arc<Mutex<Option<(Fix, std::time::Instant)>>>,
+    state: Arc<Mutex<Option<(Fix, common::time::Instant)>>>,
     connected: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     fixes: Arc<std::sync::atomic::AtomicU64>,
@@ -149,7 +150,7 @@ impl Source {
             fixes: fixes.clone(),
             sky: sky.clone(),
         };
-        std::thread::Builder::new()
+        common::thread::Builder::new()
             .name("gps".into())
             .spawn(move || run(cfg, state, connected, stop, fixes, sky))
             .ok();
@@ -194,7 +195,7 @@ impl Drop for Source {
 
 fn run(
     cfg: Config,
-    state: Arc<Mutex<Option<(Fix, std::time::Instant)>>>,
+    state: Arc<Mutex<Option<(Fix, common::time::Instant)>>>,
     connected: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     fixes: Arc<std::sync::atomic::AtomicU64>,
@@ -223,8 +224,8 @@ fn run(
         }
         // A disconnect and a failed connect wait the same: the cable is out,
         // or the daemon is not up yet, and neither is worth a busy loop.
-        let until = std::time::Instant::now() + cfg.retry;
-        while !stop.load(Ordering::Relaxed) && std::time::Instant::now() < until {
+        let until = common::time::Instant::now() + cfg.retry;
+        while !stop.load(Ordering::Relaxed) && common::time::Instant::now() < until {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
@@ -232,7 +233,7 @@ fn run(
 
 fn read_stream(
     stream: Box<dyn Read + Send>,
-    state: &Arc<Mutex<Option<(Fix, std::time::Instant)>>>,
+    state: &Arc<Mutex<Option<(Fix, common::time::Instant)>>>,
     stop: &Arc<AtomicBool>,
     fixes: &Arc<std::sync::atomic::AtomicU64>,
     sky: &Arc<Mutex<Option<Sky>>>,
@@ -263,7 +264,7 @@ fn read_stream(
             }
             fixes.fetch_add(1, Ordering::Relaxed);
             if let Ok(mut g) = state.lock() {
-                *g = Some((f, std::time::Instant::now()));
+                *g = Some((f, common::time::Instant::now()));
             }
         }
     }
@@ -371,161 +372,6 @@ fn open_serial(path: &str, baud: u32) -> std::io::Result<Box<dyn Read + Send>> {
     Ok(Box::new(open_port(path, baud, Duration::from_secs(10))?))
 }
 
-/// Open a serial port and put it in the shape NMEA arrives in: eight bits, no
-/// parity, one stop bit, no flow control, and raw so that a line is a line.
-///
-/// The termios call is what makes this a serial port rather than a file. A
-/// USB CDC device ignores the baud rate and works either way, which is why
-/// leaving it out appears to work; a real UART on a header does not, and
-/// comes back as line noise that fails every checksum.
-///
-/// `idle` ends a read that has seen nothing, so a port with nothing on it
-/// does not hang the thread forever. A feed wants ten seconds of patience; a
-/// probe wants a fifth of a second and several tries.
-pub(crate) struct Port {
-    file: std::fs::File,
-    #[cfg(unix)]
-    was: libc::termios,
-}
-
-impl Read for Port {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.file.read(buf)
-    }
-}
-
-impl Write for Port {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.file.write(buf)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.file.flush()
-    }
-}
-
-#[cfg(unix)]
-impl Drop for Port {
-    fn drop(&mut self) {
-        use std::os::unix::io::AsRawFd;
-        let fd = self.file.as_raw_fd();
-        // SAFETY: `fd` is open until `file` drops after this, and `was` is the
-        // termios `tcgetattr` filled in when the port was opened.
-        unsafe {
-            libc::tcflush(fd, libc::TCIOFLUSH);
-            libc::tcsetattr(fd, libc::TCSANOW, &self.was);
-        }
-    }
-}
-
-#[cfg(unix)]
-pub(crate) fn open_port(path: &str, baud: u32, idle: Duration) -> std::io::Result<Port> {
-    use std::os::unix::fs::OpenOptionsExt;
-    use std::os::unix::io::AsRawFd;
-    let speed = match baud {
-        4_800 => libc::B4800,
-        9_600 => libc::B9600,
-        19_200 => libc::B19200,
-        38_400 => libc::B38400,
-        57_600 => libc::B57600,
-        115_200 => libc::B115200,
-        other => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("unsupported baud rate {other}"),
-            ));
-        }
-    };
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
-        .open(path)?;
-    let fd = file.as_raw_fd();
-    // SAFETY: `fd` is open for the lifetime of `file`, and `tty` and `was`
-    // are valid termios the calls only ever fill in or read.
-    unsafe {
-        if libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::ResourceBusy,
-                format!("{path} is in use"),
-            ));
-        }
-        let mut was: libc::termios = std::mem::zeroed();
-        if libc::tcgetattr(fd, &mut was) != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let mut tty = was;
-        libc::cfmakeraw(&mut tty);
-        libc::cfsetispeed(&mut tty, speed);
-        libc::cfsetospeed(&mut tty, speed);
-        tty.c_cflag |= libc::CLOCAL | libc::CREAD;
-        tty.c_cflag &= !libc::CRTSCTS;
-        // VTIME is in tenths of a second, and a zero would mean no timeout at
-        // all, so anything under a tenth becomes one.
-        tty.c_cc[libc::VMIN] = 0;
-        tty.c_cc[libc::VTIME] = (idle.as_millis() / 100).clamp(1, 255) as _;
-        if libc::tcsetattr(fd, libc::TCSANOW, &tty) != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let port = Port { file, was };
-        let flags = libc::fcntl(fd, libc::F_GETFL);
-        if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(port)
-    }
-}
-
-/// The same port on Windows: a DCB instead of a termios, and read timeouts
-/// set on the handle rather than in the terminal's control characters.
-///
-/// The state is read back before it is changed so that flow control stays
-/// whatever the driver was installed with; only the four things NMEA fixes
-/// are written, and a driver that wanted RTS/CTS keeps it.
-#[cfg(windows)]
-pub(crate) fn open_port(path: &str, baud: u32, idle: Duration) -> std::io::Result<Port> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Devices::Communication::{
-        COMMTIMEOUTS, DCB, GetCommState, SetCommState, SetCommTimeouts,
-    };
-
-    // COM10 and above cannot be opened by name: only the first nine have a
-    // DOS device alias, and the rest need the device namespace prefix.
-    let name = if path.starts_with(r"\\.\") { path.to_string() } else { format!(r"\\.\{path}") };
-    let file = std::fs::OpenOptions::new().read(true).write(true).open(&name)?;
-    let handle = file.as_raw_handle() as isize as _;
-    // SAFETY: `handle` is open for the lifetime of `file`, and both structs
-    // are valid for the calls to fill in or read.
-    unsafe {
-        let mut dcb: DCB = std::mem::zeroed();
-        dcb.DCBlength = std::mem::size_of::<DCB>() as u32;
-        if GetCommState(handle, &mut dcb) == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        dcb.BaudRate = baud;
-        dcb.ByteSize = 8;
-        dcb.Parity = 0; // NOPARITY
-        dcb.StopBits = 0; // ONESTOPBIT
-        if SetCommState(handle, &dcb) == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        // Silence ends the read, as VTIME does on unix, so a port with
-        // nothing on it does not hang the thread forever.
-        let timeouts = COMMTIMEOUTS {
-            ReadIntervalTimeout: 0,
-            ReadTotalTimeoutMultiplier: 0,
-            ReadTotalTimeoutConstant: idle.as_millis().min(u32::MAX as u128) as u32,
-            WriteTotalTimeoutMultiplier: 0,
-            WriteTotalTimeoutConstant: 0,
-        };
-        if SetCommTimeouts(handle, &timeouts) == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    Ok(Port { file })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,7 +463,7 @@ mod tests {
             },
             state: Arc::new(Mutex::new(Some((
                 Fix { lat: 1.0, lon: 2.0, ..Default::default() },
-                std::time::Instant::now(),
+                common::time::Instant::now(),
             )))),
             connected: Arc::new(AtomicBool::new(true)),
             stop: Arc::new(AtomicBool::new(true)),

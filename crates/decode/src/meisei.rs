@@ -304,8 +304,8 @@ pub fn read(bytes: &[u8]) -> Option<Proto> {
 
 /// The year the receiver is running in, for the decade the sonde leaves off.
 pub fn this_year() -> u16 {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let secs = common::time::SystemTime::now()
+        .duration_since(common::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     use chrono::Datelike;

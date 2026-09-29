@@ -6,9 +6,9 @@ pub(super) const METER_FALL: f32 = 0.88;
 /// How often the running chain is republished, for the throughput on its
 /// wires. Fast enough to watch, slow enough that cloning the topology is
 /// nothing beside the DSP.
-pub(super) const CHAIN_PUBLISH: std::time::Duration = std::time::Duration::from_millis(250);
+pub(super) const CHAIN_PUBLISH: common::time::Duration = common::time::Duration::from_millis(250);
 
-pub(super) const DISPLAY_PUBLISH: std::time::Duration = std::time::Duration::from_millis(33);
+pub(super) const DISPLAY_PUBLISH: common::time::Duration = common::time::Duration::from_millis(33);
 
 /// Whether the radio thread carries on after a step, or is finished.
 pub(super) enum Flow {
@@ -82,10 +82,10 @@ pub(super) struct RadioThread<'a, R: Fn()> {
     pub(super) want_center: Option<Hz>,
     /// Samples still to be dropped after a retune, while the tuner settles.
     pub(super) settle: usize,
-    pub(super) last_tune: std::time::Instant,
-    pub(super) tune_gap: std::time::Duration,
-    pub(super) last_chain: std::time::Instant,
-    pub(super) last_display: std::time::Instant,
+    pub(super) last_tune: common::time::Instant,
+    pub(super) tune_gap: common::time::Duration,
+    pub(super) last_chain: common::time::Instant,
+    pub(super) last_display: common::time::Instant,
     /// The last edits that built, to fall back on when an edit does not.
     pub(super) last_edits: Option<crate::patch::Edits>,
     pub(super) needs_rebuild: bool,
@@ -272,10 +272,10 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             repaint,
             want_center: None,
             settle: 0,
-            last_tune: std::time::Instant::now() - gap,
+            last_tune: common::time::Instant::now() - gap,
             tune_gap: gap,
-            last_chain: std::time::Instant::now(),
-            last_display: std::time::Instant::now(),
+            last_chain: common::time::Instant::now(),
+            last_display: common::time::Instant::now(),
             last_edits: None,
             needs_rebuild: false,
             protocols_gen: decode::script::generation(),
@@ -314,7 +314,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             // Timed from here rather than around the loop: the read is where
             // the thread waits for the radio, so counting it would measure
             // real time against itself and always say exactly 1x.
-            let work = std::time::Instant::now();
+            let work = common::time::Instant::now();
             let block_secs = buf.samples.len() as f64 / self.plan.rate.max(1.0);
 
             let _b = tracing::info_span!("block").entered();
@@ -363,7 +363,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
 
             // Stamped at the start of the block rather than at the moment the
             // decode fell out of it, by the same arithmetic a replay uses.
-            let at = block_start(std::time::Instant::now(), buf.samples.len(), self.plan.rate);
+            let at = block_start(common::time::Instant::now(), buf.samples.len(), self.plan.rate);
             {
                 let _s = tracing::info_span!("harvest").entered();
                 if let Flow::Stop = self.harvest_decodes(at) {
@@ -504,7 +504,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 // next drag of the dial is a correction nobody can see
                 // themselves setting.
                 self.want_center = Some(self.plan.center);
-                self.last_tune = std::time::Instant::now() - self.tune_gap;
+                self.last_tune = common::time::Instant::now() - self.tune_gap;
                 self.status.set_radio(RadioControls::read(self.dev.as_ref()));
                 self.needs_rebuild = true;
             }
@@ -521,7 +521,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
                 // asked again, and a setting that only took effect on the
                 // next drag of the dial is one nobody can see themselves set.
                 self.want_center = Some(self.plan.center);
-                self.last_tune = std::time::Instant::now() - self.tune_gap;
+                self.last_tune = common::time::Instant::now() - self.tune_gap;
                 self.status.set_radio(RadioControls::read(self.dev.as_ref()));
                 self.needs_rebuild = true;
             }
@@ -909,7 +909,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         self.plan.center = self.dev.dial();
         self.needs_rebuild = true;
         self.want_center = None;
-        self.last_tune = std::time::Instant::now();
+        self.last_tune = common::time::Instant::now();
         self.settle = settle_samples(self.plan.rate, self.dev.settle());
         Ok(())
     }
@@ -1049,7 +1049,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         // one that stops has stopped.
         let entry = self.entry.clone();
         for attempt in entry.iter().flat_map(|_| 1..=3) {
-            std::thread::sleep(std::time::Duration::from_millis(400 * attempt));
+            std::thread::sleep(common::time::Duration::from_millis(400 * attempt));
             match restart(
                 || {
                     crate::devices::open(

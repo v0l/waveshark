@@ -7,7 +7,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         if !fresh && self.last_display.elapsed() < DISPLAY_PUBLISH {
             return Flow::Go;
         }
-        self.last_display = std::time::Instant::now();
+        self.last_display = common::time::Instant::now();
         // The fix is read at the display's rate rather than per block: a GPS
         // reports once a second and a block is seven milliseconds, so asking
         // per block is two hundred locks for one new number.
@@ -67,14 +67,11 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         // redrawn at the display's rate, and cloning it 140 times a second for
         // a pane nobody may be looking at is wasted work.
         if self.rx.tracking() {
-            let rows = self.rx.tracks(std::time::Instant::now());
+            let rows = self.rx.tracks(common::time::Instant::now());
             self.status.aircraft.store(rows.len() as u64, Ordering::Relaxed);
             *self.status.track_list.lock() = rows;
         }
-        #[cfg(feature = "stt")]
-        {
-            *self.status.transcriber.lock() = self.rx.transcriber();
-        }
+        *self.status.transcriber.lock() = self.rx.transcriber();
         *self.status.recorder.lock() = self.rx.recorder();
         if !self.plan.feeds.is_empty() {
             *self.status.feeds.lock() = self.rx.feed_status();
@@ -85,7 +82,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
         // any samples went through it, which is none.
         if self.last_chain.elapsed() >= CHAIN_PUBLISH {
             publish_chain(self.status, &self.rx);
-            self.last_chain = std::time::Instant::now();
+            self.last_chain = common::time::Instant::now();
             // And what the radio is set to, to whoever is reading the span
             // over the network. Read off the device rather than remembered
             // from a command, because a driver snaps a gain to its own step
@@ -178,7 +175,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
             .scan_channels_wide
             .store(chans.get(1).copied().unwrap_or(0) as u64, Ordering::Relaxed);
         self.status.sources_on.store(self.rx.has_sources(), Ordering::Relaxed);
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut seen = self.status.sources.lock();
         for e in seen.iter_mut() {
             e.live = false;
@@ -205,7 +202,7 @@ impl<'a, R: Fn()> RadioThread<'a, R> {
     }
 
     /// What the block decoded to, on its way to the packet list.
-    pub(super) fn harvest_decodes(&mut self, at: std::time::Instant) -> Flow {
+    pub(super) fn harvest_decodes(&mut self, at: common::time::Instant) -> Flow {
         self.records.clear();
         self.records.extend(harvest(&mut self.rx, at));
         if self.rx.recorder_mut().is_some_and(|r| r.is_full()) {

@@ -89,9 +89,9 @@ fn through_the_stage_in_real_time(iq: &[C32]) -> Heard {
     node.negotiate(&[spec]).expect("a carrier in the span");
     let mut heard = Heard { sound: Vec::new(), flashes: Vec::new(), pictures: 0 };
     let mut events = Vec::new();
-    let start = std::time::Instant::now();
+    let start = common::time::Instant::now();
     for (n, block) in iq.chunks(BLOCK).enumerate() {
-        let due = std::time::Duration::from_secs_f64(n as f64 * BLOCK as f64 / RATE);
+        let due = common::time::Duration::from_secs_f64(n as f64 * BLOCK as f64 / RATE);
         std::thread::sleep(due.saturating_sub(start.elapsed()));
         let payload = Payload::Iq(block.to_vec());
         let mut out = [

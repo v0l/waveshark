@@ -1,8 +1,8 @@
 use crate::cache::{Cache, Error, Source, When};
+use common::time::Duration;
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::Path;
-use std::time::Duration;
 
 const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 
@@ -13,6 +13,7 @@ pub fn source() -> Source {
         MAX_AGE,
     )
     .checked(gzipped)
+    .cross_origin()
 }
 
 pub fn types_source() -> Source {
@@ -22,6 +23,7 @@ pub fn types_source() -> Source {
         MAX_AGE,
     )
     .checked(gzipped)
+    .cross_origin()
 }
 
 fn gzipped(head: &[u8]) -> Result<(), String> {
@@ -142,7 +144,7 @@ pub fn refresh(cache: &Cache, when: When) -> Result<Option<Fleet>, Error> {
 
 fn parse_types(path: &Path) -> Result<HashMap<String, Class>, Error> {
     let name = path.display().to_string();
-    let f = std::fs::File::open(path).map_err(|e| Error::Io(name.clone(), e))?;
+    let f = common::fs::blocking::File::open(path).map_err(|e| Error::Io(name.clone(), e))?;
     read_types(&name, flate2::read::GzDecoder::new(f))
 }
 
@@ -165,7 +167,7 @@ pub fn read_types(name: &str, json: impl std::io::Read) -> Result<HashMap<String
 
 fn parse(path: &Path) -> Result<Fleet, Error> {
     let name = path.display().to_string();
-    let f = std::fs::File::open(path).map_err(|e| Error::Io(name.clone(), e))?;
+    let f = common::fs::blocking::File::open(path).map_err(|e| Error::Io(name.clone(), e))?;
     read(&name, flate2::read::GzDecoder::new(f))
 }
 

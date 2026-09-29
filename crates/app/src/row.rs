@@ -10,7 +10,7 @@
 //! list as it does anywhere else and a decoder gains a readable row by saying
 //! what it means rather than by formatting a string.
 
-use std::time::Instant;
+use common::time::Instant;
 
 use common::Modulation;
 use common::packet::{FactKind, Integrity, Packet, Symbols};

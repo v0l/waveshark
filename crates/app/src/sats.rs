@@ -135,7 +135,7 @@ fn recompute(
         COMPUTING.store(false, Ordering::SeqCst);
         return;
     };
-    let _ = std::thread::Builder::new().name("sat-passes".into()).spawn(move || {
+    let _ = common::thread::Builder::new().name("sat-passes".into()).spawn(move || {
         let mut out: Vec<Upcoming> = Vec::new();
         for s in sky.sats().iter().filter(|s| !s.stationary()) {
             for pass in s.passes(at, now_s, WINDOW_S, min_el_deg) {
@@ -214,8 +214,8 @@ pub fn computing() -> bool {
 }
 
 pub fn now_s() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    common::time::SystemTime::now()
+        .duration_since(common::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }

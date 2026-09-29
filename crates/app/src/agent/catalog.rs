@@ -18,9 +18,15 @@ pub struct Tool {
     /// JSON Schema of the arguments, always an object.
     pub schema: Value,
     parse: Box<dyn Fn(Value) -> Result<Action, String> + Send + Sync>,
+    needs: Option<crate::build::Feature>,
 }
 
 impl Tool {
+    fn needs(mut self, feature: crate::build::Feature) -> Self {
+        self.needs = Some(feature);
+        self
+    }
+
     /// The action this call is, or why the arguments are not it.
     pub fn action(&self, args: Value) -> Result<Action, String> {
         (self.parse)(args)
@@ -34,6 +40,7 @@ fn plain(name: &'static str, about: &'static str, make: fn() -> Action) -> Tool 
         about,
         schema: json!({ "type": "object", "properties": {} }),
         parse: Box::new(move |_| Ok(make())),
+        needs: None,
     }
 }
 
@@ -56,13 +63,14 @@ where
             let v = if v.is_null() { json!({}) } else { v };
             serde_json::from_value::<T>(v).map(make).map_err(|e| e.to_string())
         }),
+        needs: None,
     }
 }
 
 /// The tools, built once.
 pub fn all() -> &'static [Tool] {
     static ALL: std::sync::OnceLock<Vec<Tool>> = std::sync::OnceLock::new();
-    ALL.get_or_init(build)
+    ALL.get_or_init(|| build().into_iter().filter(|t| t.needs.is_none_or(|f| f.built())).collect())
 }
 
 pub fn find(name: &str) -> Option<&'static Tool> {
@@ -147,7 +155,8 @@ fn build() -> Vec<Tool> {
             "transcript",
             "What the local speech model read off the audio bus.",
             Action::Transcript,
-        ),
+        )
+        .needs(crate::build::Feature::Stt),
         takes(
             "messages",
             "Text sent over the air: pager messages, TETRA SDS, APRS, mesh traffic.",
@@ -431,7 +440,8 @@ fn build() -> Vec<Tool> {
              weights, where it runs, and the shortest speech worth reading. `transcript` is \
              what it produced. Called with nothing, reports what is set.",
             Action::SetTranscriber,
-        ),
+        )
+        .needs(crate::build::Feature::Stt),
         takes(
             "set_station",
             "Where this receiver is installed: the country and the band plan the dial names \
@@ -449,7 +459,8 @@ fn build() -> Vec<Tool> {
             "Record every device heard to a database, with where it was heard from, or stop. \
              This is what the wigle.net and beaconDB feeds upload.",
             Action::SetSurvey,
-        ),
+        )
+        .needs(crate::build::Feature::Survey),
         takes(
             "set_wigle",
             "Upload what is heard to wigle.net as an account, or stop.",
@@ -466,18 +477,21 @@ fn build() -> Vec<Tool> {
             "Publish every device heard to an MQTT broker so Home Assistant builds them, or \
              stop.",
             Action::SetHomeAssistant,
-        ),
+        )
+        .needs(crate::build::Feature::HomeAssistant),
         takes(
             "add_feed",
             "Take packets from another receiver over TCP, onto the same bus this one decodes \
              to.",
             Action::AddFeed,
-        ),
+        )
+        .needs(crate::build::Feature::Feeds),
         takes(
             "remove_feed",
             "Stop taking packets from a feed, by its address.",
             Action::RemoveFeed,
-        ),
+        )
+        .needs(crate::build::Feature::Feeds),
         takes(
             "set_calls",
             "What the audio bus mixes without a channel being open for it: talkgroups, callers, \

@@ -43,14 +43,14 @@ fn main() {
     let mut d = SourceDetector::new(rate, rate, cfg);
     let mut e = SourceExtractor::new(rate, 868e6, d.latency_samples(), cfg);
     let block = 16_384;
-    let t0 = std::time::Instant::now();
+    let t0 = common::time::Instant::now();
     for b in iq.chunks(block) {
         d.process(b);
     }
     let det = t0.elapsed().as_secs_f64();
     let mut d2 = SourceDetector::new(rate, rate, cfg);
     let mut out = Vec::new();
-    let t1 = std::time::Instant::now();
+    let t1 = common::time::Instant::now();
     for b in iq.chunks(block) {
         let ev = d2.process(b).to_vec();
         e.process(b, &ev, &mut out);

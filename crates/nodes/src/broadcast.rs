@@ -690,7 +690,7 @@ mod tests {
         let mut shown = 0;
         for chunk in ts.chunks(64) {
             tv.push(chunk, &mut Vec::new());
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            std::thread::sleep(common::time::Duration::from_millis(2));
             let mut video = Payload::empty_of(pipeline::port::PortKind::Video);
             let mut sound = Payload::empty_of(pipeline::port::PortKind::Real);
             tv.play(0.02, &mut video, &mut sound);

@@ -5,7 +5,16 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+web-time = "1"
 num-complex.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_yaml_ng.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rayon.workspace = true
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+futures-channel = "0.3"
+futures-core = "0.3"

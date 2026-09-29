@@ -29,9 +29,9 @@
 //! until a person presses refresh, the same way CelesTrak's does.
 
 use crate::cache::{Error, Fetch, Seen};
+use common::time::Duration;
 use std::io::{Read, Write};
 use std::sync::RwLock;
-use std::time::Duration;
 
 /// How long a copy is treated as current. Their catalogue is rebuilt several
 /// times a day; six hours is inside that and is as often as elements are
@@ -99,19 +99,17 @@ impl Fetch for Query {
         let Some(account) = account().filter(Account::is_complete) else {
             return Err(fail("no Space-Track login has been given".into()));
         };
-        let client = httpc::blocking(Duration::from_secs(600)).map_err(|e| fail(e.to_string()))?;
-
-        let login = client
-            .post(format!("{BASE}/ajaxauth/login"))
+        let login = httpc::post(format!("{BASE}/ajaxauth/login"))
+            .timeout(Duration::from_secs(600))
             .form(&[("identity", account.identity.trim()), ("password", &account.password)])
-            .send()
-            .map_err(|e| fail(e.to_string()))?;
-        if login.status().as_u16() != 200 {
-            return Err(Error::Status(format!("{BASE}/ajaxauth/login"), login.status().as_u16()));
+            .wait()
+            .map_err(fail)?;
+        if login.status != 200 {
+            return Err(Error::Status(format!("{BASE}/ajaxauth/login"), login.status));
         }
         // A wrong password is a 200 with a JSON complaint in the body, not a
         // 401, so the body is what says whether we are logged in.
-        let cookie = session_cookie(login.headers());
+        let cookie = session_cookie(login.all("set-cookie"));
         let mut said = String::new();
         let _ = crate::cache::Capped::new(login, 4096).read_to_string(&mut said);
         if said.contains("Failed") || said.contains("failed") {
@@ -121,20 +119,22 @@ impl Fetch for Query {
             return Err(fail("Space-Track gave no session cookie".into()));
         };
 
-        let resp = client
-            .get(&self.url)
+        let logout =
+            || httpc::get(format!("{BASE}/ajaxauth/logout")).header("Cookie", &cookie).wait();
+        let resp = httpc::get(&self.url)
+            .timeout(Duration::from_secs(600))
             .header("Cookie", &cookie)
-            .send()
-            .map_err(|e| fail(e.to_string()))?;
-        let code = resp.status().as_u16();
+            .wait()
+            .map_err(fail)?;
+        let code = resp.status;
         if code != 200 {
-            let _ = client.get(format!("{BASE}/ajaxauth/logout")).header("Cookie", &cookie).send();
+            let _ = logout();
             return Err(Error::Status(self.url.clone(), code));
         }
         let copied = std::io::copy(&mut crate::cache::Capped::new(resp, MAX_BYTES), to);
         // Logged out whether or not the copy worked: a failed download is
         // still a session held open on their server.
-        let _ = client.get(format!("{BASE}/ajaxauth/logout")).header("Cookie", &cookie).send();
+        let _ = logout();
         copied.map_err(|e| fail(e.to_string()))?;
         // Nothing to revalidate against: the answer is generated per query
         // and carries no entity tag or modification date, so freshness here
@@ -152,10 +152,9 @@ const MAX_BYTES: u64 = 1 << 30;
 /// Their cookie is called `chocolatechip`, but the name is taken from what
 /// was sent rather than assumed: a login that starts setting a second cookie
 /// would otherwise silently stop working.
-fn session_cookie(headers: &httpc::reqwest::header::HeaderMap) -> Option<String> {
+fn session_cookie<'a>(set: impl Iterator<Item = &'a str>) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
-    for v in headers.get_all("set-cookie") {
-        let Ok(text) = v.to_str() else { continue };
+    for text in set {
         let pair = text.split(';').next().unwrap_or_default().trim();
         if !pair.is_empty() && pair.contains('=') {
             parts.push(pair.to_string());
@@ -196,14 +195,11 @@ mod tests {
 
     #[test]
     fn the_session_cookie_is_whatever_was_set() {
-        use httpc::reqwest::header::{HeaderMap, HeaderValue, SET_COOKIE};
-        let mut set = HeaderMap::new();
-        set.append(SET_COOKIE, HeaderValue::from_static("chocolatechip=abc123; Path=/; HttpOnly"));
-        set.append(SET_COOKIE, HeaderValue::from_static("spacetrack_csrf_cookie=def; Path=/"));
+        let set = ["chocolatechip=abc123; Path=/; HttpOnly", "spacetrack_csrf_cookie=def; Path=/"];
         assert_eq!(
-            session_cookie(&set).as_deref(),
+            session_cookie(set.into_iter()).as_deref(),
             Some("chocolatechip=abc123; spacetrack_csrf_cookie=def")
         );
-        assert_eq!(session_cookie(&HeaderMap::new()), None);
+        assert_eq!(session_cookie(std::iter::empty()), None);
     }
 }

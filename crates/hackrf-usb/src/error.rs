@@ -65,19 +65,19 @@ impl HackRfErrorCode {
 pub enum Error {
     /// Failed to open USB device.
     #[error("failed to open USB device: {0}")]
-    OpenFailed(#[source] nusb::Error),
+    OpenFailed(#[source] usbio::Error),
 
     /// Failed to claim USB interface.
     #[error("failed to claim USB interface: {0}")]
-    ClaimFailed(#[source] nusb::Error),
+    ClaimFailed(#[source] usbio::Error),
 
     /// Control transfer failed.
     #[error("control transfer failed: {0}")]
-    ControlTransfer(#[source] nusb::transfer::TransferError),
+    ControlTransfer(#[source] usbio::transfer::TransferError),
 
     /// Bulk transfer failed.
     #[error("bulk transfer failed: {0}")]
-    BulkTransfer(#[source] nusb::transfer::TransferError),
+    BulkTransfer(#[source] usbio::transfer::TransferError),
 
     /// No HackRF device found.
     #[error("no HackRF device found")]

@@ -40,7 +40,7 @@ const CHUNK: usize = 16_384;
 
 /// A capture being replayed: the open file and where it is in it.
 struct Reading {
-    file: BufReader<std::fs::File>,
+    file: BufReader<common::fs::blocking::File>,
     format: SampleFormat,
     /// Samples handed to the chain since this pass of the file started, which
     /// is what says how far through it the transmission is. Not what has been
@@ -139,15 +139,14 @@ impl IqTxNode {
             self.fault = Some(format!("{}: nothing says what rate it was recorded at", self.path));
             return;
         }
-        let file = match std::fs::File::open(path) {
+        let file = match common::fs::blocking::File::open(path) {
             Ok(f) => f,
             Err(e) => {
                 self.fault = Some(format!("{}: {e}", self.path));
                 return;
             }
         };
-        let total =
-            file.metadata().map(|m| m.len()).unwrap_or(0) / format.bytes_per_sample() as u64;
+        let total = file.len() / format.bytes_per_sample() as u64;
         self.open = Some(Reading {
             file: BufReader::with_capacity(1 << 20, file),
             format,
@@ -384,7 +383,7 @@ mod tests {
     /// A ramp of `n` samples as an 8-bit unsigned capture, named so the
     /// format can be read off it.
     fn capture(name: &str, n: usize) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join("sr_iq_tx");
+        let dir = common::platform::scratch_dir().join("sr_iq_tx");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         let bytes: Vec<u8> = (0..n).flat_map(|i| [(i % 256) as u8, 128u8]).collect();

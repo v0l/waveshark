@@ -409,7 +409,7 @@ impl Device for AirspyHf {
         );
         let ctx =
             Ctx { tx, dropped: dropped.clone(), center: self.center, rate: self.rate, convert };
-        std::thread::Builder::new()
+        common::thread::Builder::new()
             .name("airspyhf-rx".into())
             .spawn(move || convert_loop(reader, ctx))?;
         Ok(Box::new(crate::AirspyStream { rx, dropped, stopper }))

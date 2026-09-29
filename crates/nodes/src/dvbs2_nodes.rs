@@ -23,7 +23,7 @@ const CHANNEL_HZ: &str = "channel_hz";
 const SYMBOL_RATE: &str = "symbol_rate";
 const WIDTH: &str = "width_hz";
 const QUEUE: usize = 16;
-const WAIT: std::time::Duration = std::time::Duration::from_millis(200);
+const WAIT: common::time::Duration = common::time::Duration::from_millis(200);
 const LOOK: usize = 1 << 18;
 const MARGIN: f64 = 1.3;
 const SPUR_WIDTH_HZ: f64 = 3_000.0;
@@ -162,7 +162,7 @@ struct Offloaded {
     next: u64,
     heard: Arc<Mutex<Heard>>,
     dropped: u64,
-    threads: Vec<std::thread::JoinHandle<()>>,
+    threads: Vec<common::thread::JoinHandle<()>>,
 }
 
 fn workers() -> usize {
@@ -179,25 +179,26 @@ impl Offloaded {
         let mut threads = Vec::new();
         for n in 0..count {
             let (fec_in, done) = (fec_in.clone(), done.clone());
-            let t = std::thread::Builder::new().name(format!("dvbs2-fec-{n}")).spawn(move || {
-                let mut fec = Fec::new();
-                while let Ok((seq, frame)) = fec_in.recv() {
-                    let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        fec.decode(&frame.demodulate())
-                    }));
-                    let outcome = read.unwrap_or_else(|_| {
-                        fec = Fec::new();
-                        Outcome::Unsupported
-                    });
-                    if done.send((seq, outcome)).is_err() {
-                        return;
+            let t =
+                common::thread::Builder::new().name(format!("dvbs2-fec-{n}")).spawn(move || {
+                    let mut fec = Fec::new();
+                    while let Ok((seq, frame)) = fec_in.recv() {
+                        let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            fec.decode(&frame.demodulate())
+                        }));
+                        let outcome = read.unwrap_or_else(|_| {
+                            fec = Fec::new();
+                            Outcome::Unsupported
+                        });
+                        if done.send((seq, outcome)).is_err() {
+                            return;
+                        }
                     }
-                }
-            });
+                });
             threads.extend(t.ok());
         }
         let mine = heard.clone();
-        let phy = std::thread::Builder::new().name("dvbs2".into()).spawn(move || {
+        let phy = common::thread::Builder::new().name("dvbs2".into()).spawn(move || {
             let mut front = Front::new(rate, shift, symbol_rate, within);
             let mut frames = Vec::new();
             let mut seq = 0u64;
@@ -205,7 +206,7 @@ impl Offloaded {
                 frames.clear();
                 front.push(&block, &mut frames);
                 for f in frames.drain(..) {
-                    match to_fec.send_timeout((seq, f), WAIT) {
+                    match crate::wait::send_within(&to_fec, (seq, f), WAIT) {
                         Ok(()) => {}
                         Err(crossbeam_channel::SendTimeoutError::Timeout(_)) => {
                             let _ = done.send((seq, Outcome::Shed));
@@ -231,7 +232,7 @@ impl Offloaded {
 
     fn push(&mut self, iq: &[C32]) {
         let Some(tx) = &self.iq else { return };
-        if tx.send_timeout(iq.to_vec(), WAIT).is_err() {
+        if crate::wait::send_within(&tx, iq.to_vec(), WAIT).is_err() {
             self.dropped += 1;
         }
     }
@@ -693,7 +694,7 @@ mod tests {
                 if n > 0 && node.heard().header.is_some() && node.told.is_some() {
                     break;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(5));
+                std::thread::sleep(common::time::Duration::from_millis(5));
             }
             let payload = Payload::Iq(block.to_vec());
             let mut out = [

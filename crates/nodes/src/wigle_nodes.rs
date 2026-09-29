@@ -27,6 +27,7 @@
 //! not yet written, and it writes those out when it is dropped.
 
 use common::Result;
+use common::time::{Duration, Instant};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
@@ -34,7 +35,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
 
 pub use survey::Account;
 
@@ -118,7 +118,7 @@ impl Uploader {
             return;
         }
         let up = self.clone();
-        let _ = std::thread::Builder::new().name("wigle-upload".into()).spawn(move || up.run());
+        let _ = common::thread::Builder::new().name("wigle-upload".into()).spawn(move || up.run());
     }
 
     pub fn set_account(&self, account: Option<Account>) {
@@ -166,7 +166,7 @@ impl Uploader {
             std::thread::sleep(POLL);
             let Some(account) = self.account() else { continue };
             let Some(path) = oldest(&self.dir()) else { continue };
-            match std::fs::read(&path) {
+            match common::fs::blocking::read(&path) {
                 Ok(bytes) => {
                     let rows = rows_in(&path);
                     let name = path
@@ -178,7 +178,7 @@ impl Uploader {
                             // Deleted only now: a file that was sent but not
                             // acknowledged is one this will send again, which
                             // is the failure worth having.
-                            let _ = std::fs::remove_file(&path);
+                            let _ = common::fs::blocking::remove_file(&path);
                             self.sent_files.fetch_add(1, Ordering::Relaxed);
                             self.sent_rows.fetch_add(rows, Ordering::Relaxed);
                             self.say(None);
@@ -224,10 +224,10 @@ fn rows_in(path: &Path) -> u64 {
 /// Closed spool files, oldest first by name, which is the order they were
 /// written in: the name carries the time.
 fn spooled(dir: &Path) -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+    let mut files: Vec<PathBuf> = common::fs::blocking::read_dir(dir)
         .into_iter()
         .flatten()
-        .filter_map(|e| e.ok().map(|e| e.path()))
+        .map(|e| e.path().to_path_buf())
         .filter(|p| p.extension().is_some_and(|e| e == "csv"))
         .collect();
     files.sort();
@@ -340,7 +340,7 @@ impl WigleNode {
             return;
         }
         let dir = self.spool.clone();
-        if std::fs::create_dir_all(&dir).is_err() {
+        if common::fs::blocking::create_dir_all(&dir).is_err() {
             return;
         }
         self.seq += 1;
@@ -355,8 +355,8 @@ impl WigleNode {
         // Written whole and then moved into place, so the uploader never
         // reads a file that is still being written.
         let part = dir.join(format!("{name}.part"));
-        if std::fs::write(&part, text).is_ok() {
-            let _ = std::fs::rename(&part, dir.join(name));
+        if common::fs::blocking::write(&part, text).is_ok() {
+            let _ = common::fs::blocking::rename(&part, dir.join(name));
         }
         // The count is stale the moment a file lands.
         self.counted.borrow_mut().0 = None;
@@ -428,16 +428,14 @@ impl Simple for WigleNode {
 
 /// `$XDG_DATA_HOME/waveshark/wigle`, beside the packet log and the survey.
 pub fn default_spool_dir() -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(std::env::temp_dir)
-        .join("waveshark/wigle")
+    common::platform::data_dir()
+        .unwrap_or_else(|| common::platform::scratch_dir().join("waveshark"))
+        .join("wigle")
 }
 
 fn now_s() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    common::time::SystemTime::now()
+        .duration_since(common::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
@@ -479,7 +477,7 @@ mod tests {
     }
 
     fn spool() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = common::platform::scratch_dir().join(format!(
             "waveshark-wigle-{}-{:?}",
             std::process::id(),
             std::thread::current().id()

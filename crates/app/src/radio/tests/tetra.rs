@@ -246,7 +246,7 @@ fn a_call_four_tetra_sites_send_is_heard_once_and_listed_once() {
         (buf.samples.len() as f64 / buf.rate.as_f64(), out_frames as f64 / crate::mix::OUT_HZ);
     assert!((air - heard).abs() < 0.001, "{air:.3} s of air made {heard:.3} s of sound");
     let sites = [390.85e6, 391.925e6, 392.55e6, 393.3e6];
-    let later = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let later = common::time::Instant::now() + common::time::Duration::from_secs(60);
     let rows = list.active(later);
     let networked: Vec<(&str, Option<&str>, usize)> = rows
         .iter()
@@ -302,7 +302,7 @@ fn a_clear_tetra_call_reaches_the_voice_port_through_the_receiver() {
             let pcm: Vec<u32> = v.pcm.iter().map(|s| s.to_bits()).collect();
             v.system == "TETRA" && once.insert((v.to.clone(), v.from.clone(), pcm))
         }));
-        let at = block_start(std::time::Instant::now(), block.len(), buf.rate.as_f64());
+        let at = block_start(common::time::Instant::now(), block.len(), buf.rate.as_f64());
         rows.extend(harvest(&mut rx, at));
     }
     let voice: Vec<&Reception> =

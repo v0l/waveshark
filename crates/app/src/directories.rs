@@ -1,9 +1,9 @@
 use crate::stations::Own;
+use common::time::Duration;
 use sdr_directory::probe::{self, Found, Heard, Probes, Said, Tally};
 use sdr_directory::{Dial, Listing, Query};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
-use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Directory {
@@ -30,6 +30,10 @@ static KIWISDR: LazyLock<Swept> = LazyLock::new(|| Swept::read(Directory::KiwiSd
 
 impl Directory {
     pub const ALL: [Directory; 3] = [Directory::IqStream, Directory::SpyServer, Directory::KiwiSdr];
+
+    pub fn built() -> impl Iterator<Item = Directory> {
+        Directory::ALL.into_iter().filter(|d| d.proto().built())
+    }
 
     pub fn proto(self) -> remote::Proto {
         match self {
@@ -172,7 +176,7 @@ impl Directory {
             return;
         }
         let name = format!("{}-probe", self.key());
-        let started = std::thread::Builder::new().name(name).spawn(move || {
+        let started = common::thread::Builder::new().name(name).spawn(move || {
             let home = crate::stations::home(&listings, own.as_ref());
             let asked = probe::sweep(&swept.probes, &listings, now, probe::WORKERS, |l| {
                 let heard = self.ask(l, own.as_ref(), home.as_deref());
@@ -197,7 +201,7 @@ impl Directory {
     fn ask(self, l: &Listing, own: Option<&Own>, home: Option<&str>) -> Heard {
         match self {
             Directory::IqStream => crate::stations::heard(l, own, home, |addr| {
-                remote::iqstream::probe_all(addr).is_ok()
+                remote::Proto::IqStream.probe_all(addr).is_ok()
             }),
             Directory::SpyServer => spyserver(&l.entry.addr(), remote::CONNECT_TIMEOUT),
             Directory::KiwiSdr => kiwisdr(&l.entry.addr()),
@@ -206,7 +210,7 @@ impl Directory {
 }
 
 fn spyserver(addr: &str, within: Duration) -> Heard {
-    match remote::spyserver::probe_within(addr, within) {
+    match remote::Proto::SpyServer.probe_within(addr, within) {
         Ok(p) => Heard::Answered(Said {
             center_hz: p.center.map(|c| c.0),
             dial: Some(match (p.tunable, p.tune_range) {
@@ -232,11 +236,11 @@ fn kiwisdr(addr: &str) -> Heard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::time::Instant;
     use sdr_directory::{Author, Entry, Hardware, Protocol, Station, Tuner};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::atomic::AtomicUsize;
-    use std::time::Instant;
     fn spyserver_message(kind: u32, body: &[u32]) -> Vec<u8> {
         [(2 << 24) | 1921, kind, 0, 0, (body.len() * 4) as u32]
             .iter()
@@ -250,7 +254,7 @@ mod tests {
         let addr = l.local_addr().unwrap().to_string();
         let accepted = Arc::new(AtomicUsize::new(0));
         let counted = accepted.clone();
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             let mut held = Vec::new();
             for mut sock in l.incoming().flatten() {
                 counted.fetch_add(1, Ordering::SeqCst);
@@ -351,7 +355,7 @@ mod tests {
     fn a_kiwisdr_that_answers_its_status_page_says_how_many_are_listening() {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap().to_string();
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             for (i, sock) in l.incoming().flatten().enumerate() {
                 let mut sock = sock;
                 let mut req = [0u8; 512];

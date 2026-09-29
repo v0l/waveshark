@@ -54,12 +54,15 @@ impl Devices<'_> {
             // What the position column means, said once at the top rather
             // than implied by empty cells: a survey with no fix is still
             // recording, and an operator should be able to see which it is.
-            let (legend, value) = match (self.gps_connected, self.fix) {
-                (_, Some(f)) => ("fix", format!("{:.5}, {:.5}", f.lat, f.lon)),
-                (true, None) => ("gps", "connected, no fix".into()),
-                (false, None) => ("gps", "nothing answering".into()),
+            let gps = crate::build::Feature::Gps.built();
+            let said = match (self.gps_connected, self.fix) {
+                (_, Some(f)) => Some(("fix", format!("{:.5}, {:.5}", f.lat, f.lon))),
+                (true, None) => Some(("gps", "connected, no fix".into())),
+                (false, None) => gps.then(|| ("gps", "nothing answering".into())),
             };
-            Line::new().legend(legend).value(value).size(11.0).show(ui);
+            if let Some((legend, value)) = said {
+                Line::new().legend(legend).value(value).size(11.0).show(ui);
+            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(12.0);
@@ -89,16 +92,18 @@ impl Devices<'_> {
                 if ui.button(label).clicked() {
                     act = Some(Action::BeaconDb);
                 }
-                let h = self.st.homeassistant.status.as_ref();
-                let label = match (self.settings.read(|s| s.ha_on), h) {
-                    (false, _) => "Home Assistant".to_string(),
-                    (true, Some(s)) if s.error.is_some() => "Home Assistant: failing".into(),
-                    (true, Some(s)) if !s.connected => "Home Assistant: connecting".into(),
-                    (true, Some(s)) => format!("Home Assistant: {} devices", s.devices),
-                    (true, None) => "Home Assistant: on".into(),
-                };
-                if ui.button(label).clicked() {
-                    act = Some(Action::HomeAssistant);
+                if crate::build::Feature::HomeAssistant.built() {
+                    let h = self.st.homeassistant.status.as_ref();
+                    let label = match (self.settings.read(|s| s.ha_on), h) {
+                        (false, _) => "Home Assistant".to_string(),
+                        (true, Some(s)) if s.error.is_some() => "Home Assistant: failing".into(),
+                        (true, Some(s)) if !s.connected => "Home Assistant: connecting".into(),
+                        (true, Some(s)) => format!("Home Assistant: {} devices", s.devices),
+                        (true, None) => "Home Assistant: on".into(),
+                    };
+                    if ui.button(label).clicked() {
+                        act = Some(Action::HomeAssistant);
+                    }
                 }
                 egui_bench::form::clipboard_menu(
                     ui.add(
@@ -222,8 +227,8 @@ fn cell(ui: &mut egui::Ui, text: &str) {
 /// with: the database outlives the process, so its times cannot be an
 /// `Instant`.
 pub(super) fn now_us() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    common::time::SystemTime::now()
+        .duration_since(common::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
         .unwrap_or(0)
 }

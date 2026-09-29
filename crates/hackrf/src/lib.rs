@@ -11,6 +11,8 @@ use common::{
     SampleFormat, Sps, TunerRange, TxInfo, TxStream,
 };
 use hackrf_usb::{AsyncReadControlHandle, AsyncReadHandle, AsyncWriteHandle, HackRf};
+
+pub use hackrf_usb::USB_IDS;
 use std::time::Duration;
 
 /// Datasheet tuning range.
@@ -140,7 +142,7 @@ impl HackRfDevice {
         let info = DeviceInfo {
             kind: DriverKind::HackRf,
             id: serial.clone(),
-            label: format!("{board} {}", short_serial(&serial)),
+            label: format!("{board} {}", common::serial_tail(&serial)),
             tuner: format!("MAX2837 / RFFC5072 (fw {version})"),
             ranges: vec![TunerRange { range: Hz(FREQ_MIN)..=Hz(FREQ_MAX), label: "1 MHz - 6 GHz" }],
             rates: Vec::new(),
@@ -304,13 +306,6 @@ impl HackRfDevice {
         }
         Ok(())
     }
-}
-
-fn short_serial(s: &str) -> String {
-    // Serials are 32 hex digits and mostly leading zeros; the tail identifies
-    // the unit and is what is printed on comparison tools.
-    let t = s.trim_start_matches('0');
-    if t.len() > 8 { t[t.len() - 8..].to_string() } else { t.to_string() }
 }
 
 impl Device for HackRfDevice {
@@ -516,7 +511,7 @@ impl Device for HackRfDevice {
             samples: Vec::new(),
             noise: 0x9E37_79B9_7F4A_7C15,
             silence_at: None,
-            last_real: std::time::Instant::now(),
+            last_real: common::time::Instant::now(),
             attempts: 0,
         }))
     }
@@ -663,10 +658,10 @@ pub struct HackRfStream {
     noise: u64,
     /// When the current run of silence started producing, so it is paced to
     /// the sample rate rather than run as fast as the caller asks.
-    silence_at: Option<std::time::Instant>,
+    silence_at: Option<common::time::Instant>,
     /// When a real block last arrived, which is what the watchdog measures
     /// against.
-    last_real: std::time::Instant,
+    last_real: common::time::Instant,
     /// Restarts tried since the last real block.
     attempts: u32,
 }
@@ -683,7 +678,7 @@ impl HackRfStream {
     /// the rate it would have.
     fn silence(&mut self) -> IqBuf {
         let n = (self.rate.as_f64() * 0.02) as usize;
-        let start = *self.silence_at.get_or_insert_with(std::time::Instant::now);
+        let start = *self.silence_at.get_or_insert_with(common::time::Instant::now);
         self.samples.clear();
         self.samples.reserve(n);
         for _ in 0..n {
@@ -701,7 +696,7 @@ impl HackRfStream {
         if want > elapsed {
             std::thread::sleep(want - elapsed);
         }
-        self.silence_at = Some(std::time::Instant::now());
+        self.silence_at = Some(common::time::Instant::now());
         let buf = IqBuf::new(std::mem::take(&mut self.samples), self.center, self.rate, self.seq);
         self.seq += n as u64;
         buf
@@ -772,7 +767,7 @@ impl HackRfStream {
         match reopen_rx(self.shared.index, want) {
             Ok(h) => {
                 *self.shared.rx.lock() = Some(h);
-                self.last_real = std::time::Instant::now();
+                self.last_real = common::time::Instant::now();
                 tracing::info!("HackRF receiving again at {}", want.center);
             }
             Err(e) => tracing::warn!("HackRF did not reopen: {e}"),
@@ -786,7 +781,7 @@ impl RxStream for HackRfStream {
             if self.shared.is_silent() {
                 // Transmitting: the radio is deaf by design, and the clock
                 // for the watchdog starts again when it comes back.
-                self.last_real = std::time::Instant::now();
+                self.last_real = common::time::Instant::now();
                 self.attempts = 0;
                 return Ok(self.silence());
             }
@@ -813,7 +808,7 @@ impl RxStream for HackRfStream {
                         }
                         continue;
                     }
-                    self.last_real = std::time::Instant::now();
+                    self.last_real = common::time::Instant::now();
                     self.attempts = 0;
                     let n = self.samples.len() as u64;
                     let buf = IqBuf::new(
@@ -1022,12 +1017,6 @@ mod tests {
         let el = t.elapsed().as_secs_f64();
         // Five blocks of 20 ms, less the first which starts the clock.
         assert!((0.06..0.16).contains(&el), "five blocks took {el:.3} s");
-    }
-
-    #[test]
-    fn serials_shorten_to_the_part_that_identifies_the_unit() {
-        assert_eq!(short_serial("0000000000000000457863dc3579c1df"), "3579c1df");
-        assert_eq!(short_serial("abc"), "abc");
     }
 }
 

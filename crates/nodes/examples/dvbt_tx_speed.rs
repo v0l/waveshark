@@ -26,7 +26,7 @@ fn main() {
 
     let mut outer = OuterTx::new();
     let mut bytes = Vec::new();
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     for n in 0..packets {
         outer.push(&packet(n as u16), &mut bytes);
     }
@@ -40,14 +40,14 @@ fn main() {
         }
     }
     let mask = params.code_rate_hp.mask();
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     let coded = encoder.punctured(&bits, mask);
     println!("the inner code {:.1}x real time", air / t.elapsed().as_secs_f64());
 
     let mut inner = Inner::new(params.mode, params.constellation);
     let per_symbol = inner.bits_per_symbol();
     let mut cells = Vec::new();
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     let mut symbols = 0;
     for chunk in coded.chunks_exact(per_symbol) {
         cells.clear();
@@ -62,7 +62,7 @@ fn main() {
     let mut ofdm = dvbt::tx::Modulator::new(params);
     let cells_in = vec![C32::new(0.5, 0.5); ofdm.cells()];
     let mut out = Vec::new();
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     for _ in 0..symbols {
         ofdm.modulate(&cells_in, &mut out);
     }
@@ -75,7 +75,7 @@ fn main() {
     // And the resampler onto a radio rate, which is what the stage puts out.
     let mut up = dsp::resample::Rational::approx(dvbt::RATE_HZ, 10_000_000.0, 1 << 14);
     let mut wide = Vec::new();
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     up.process(&out, &mut wide);
     println!(
         "the resampler {:.1}x real time, {} samples",

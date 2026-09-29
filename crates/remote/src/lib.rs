@@ -10,26 +10,58 @@
 //! accepts a retune, and the name of the program that serves it, which is
 //! what an operator has to install at the far end.
 
+#[cfg(all(feature = "iqstream", any(feature = "rtl_tcp", feature = "spyserver")))]
 mod cut;
+#[cfg(all(feature = "iqstream", feature = "rtl_tcp", feature = "spyserver"))]
 pub mod door;
 pub mod gaps;
+#[cfg(feature = "pluto")]
 pub mod iiod;
+#[cfg(feature = "iqstream")]
 pub mod iqstream;
 pub mod kiwisdr;
+#[cfg(feature = "pluto")]
 pub mod pluto;
+#[cfg(feature = "rtl_tcp")]
 pub mod rtl_tcp;
+#[cfg(feature = "spyserver")]
 pub mod spyserver;
 
 use common::addr::{AddrError, HostPort};
+use common::time::Duration;
 use common::{Error, Hz, Result, Sps};
-use std::time::Duration;
 
 /// How long to wait for a server to answer before calling it unreachable.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Blocks queued for the consumer. A block is tens of milliseconds, so this is
 /// a couple of seconds of slack before the oldest are dropped.
-pub(crate) const QUEUE_DEPTH: usize = 64;
+pub const QUEUE_DEPTH: usize = 64;
+
+trait Protocol: Sync {
+    fn proto(&self) -> Proto;
+    fn probe(&self, addr: &str) -> Result<Probe>;
+    fn probe_within(&self, addr: &str, _within: Duration) -> Result<Probe> {
+        self.probe(addr)
+    }
+    fn probe_all(&self, addr: &str) -> Result<Vec<Probe>> {
+        self.probe(addr).map(|p| vec![p])
+    }
+    fn open(&self, addr: &str) -> Result<Box<dyn common::Device>>;
+}
+
+const PROTOCOLS: &[&dyn Protocol] = &[
+    #[cfg(feature = "iqstream")]
+    &iqstream::Remote,
+    #[cfg(feature = "rtl_tcp")]
+    &rtl_tcp::Remote,
+    #[cfg(feature = "spyserver")]
+    &spyserver::Remote,
+    #[cfg(feature = "kiwisdr")]
+    &kiwisdr::Remote,
+    #[cfg(feature = "pluto")]
+    &pluto::Remote,
+];
 
 /// A protocol a network tuner speaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -71,9 +103,9 @@ impl Proto {
             // Both, which is the whole reason an address alone cannot say
             // which server is listening.
             Self::IqStream | Self::RtlTcp => 1234,
-            Self::SpyServer => spyserver::DEFAULT_PORT,
-            Self::KiwiSdr => kiwisdr::DEFAULT_PORT,
-            Self::Pluto => iiod::DEFAULT_PORT,
+            Self::SpyServer => 5555,
+            Self::KiwiSdr => 8073,
+            Self::Pluto => 30431,
         }
     }
 
@@ -168,13 +200,24 @@ impl Proto {
 
     /// Ask what is at an address, without keeping the connection.
     pub fn probe(self, addr: &str) -> Result<Probe> {
-        match self {
-            Self::IqStream => iqstream::probe(addr),
-            Self::RtlTcp => rtl_tcp::probe(addr),
-            Self::SpyServer => spyserver::probe(addr),
-            Self::KiwiSdr => kiwisdr::probe(addr),
-            Self::Pluto => pluto::probe(addr),
-        }
+        self.protocol()?.probe(addr)
+    }
+
+    /// Whether this build can speak it.
+    pub fn built(self) -> bool {
+        self.protocol().is_ok()
+    }
+
+    pub fn built_all() -> impl Iterator<Item = Proto> {
+        PROTOCOLS.iter().map(|p| p.proto())
+    }
+
+    fn protocol(self) -> Result<&'static dyn Protocol> {
+        PROTOCOLS
+            .iter()
+            .copied()
+            .find(|p| p.proto() == self)
+            .ok_or_else(|| Error::other(format!("this build does not speak {self}")))
     }
 
     /// Every tuner at an address, which is more than one only for a server
@@ -182,26 +225,16 @@ impl Proto {
     ///
     /// What builds the radio list: a machine with three dongles on one port
     /// is three receivers to pick from, each with its own address.
+    pub fn probe_within(self, addr: &str, within: Duration) -> Result<Probe> {
+        self.protocol()?.probe_within(addr, within)
+    }
+
     pub fn probe_all(self, addr: &str) -> Result<Vec<Probe>> {
-        match self {
-            Self::IqStream => iqstream::probe_all(addr),
-            Self::RtlTcp => rtl_tcp::probe(addr).map(|p| vec![p]),
-            Self::SpyServer => spyserver::probe(addr).map(|p| vec![p]),
-            Self::KiwiSdr => kiwisdr::probe(addr).map(|p| vec![p]),
-            Self::Pluto => pluto::probe(addr).map(|p| vec![p]),
-        }
+        self.protocol()?.probe_all(addr)
     }
 
     pub fn open(self, addr: &str) -> Result<Box<dyn common::Device>> {
-        match self {
-            Self::IqStream => Ok(Box::new(iqstream::Device::open(addr)?)),
-            Self::RtlTcp => Ok(Box::new(rtl_tcp::Device::open(addr)?)),
-            Self::SpyServer => Ok(Box::new(spyserver::Device::open(addr)?)),
-            Self::KiwiSdr => Ok(Box::new(kiwisdr::Device::open(addr)?)),
-            Self::Pluto => {
-                Ok(Box::new(pluto::Pluto::open(addr, common::device::DriverKind::Network)?))
-            }
-        }
+        self.protocol()?.open(addr)
     }
 }
 
@@ -389,14 +422,14 @@ mod tests {
         use std::io::Write;
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap().to_string();
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             for mut sock in l.incoming().take(2).flatten() {
                 let mut hello = [0u8; 12];
                 hello[..4].copy_from_slice(b"RTL0");
                 hello[7] = 5;
                 hello[11] = 29;
                 let _ = sock.write_all(&hello);
-                std::thread::sleep(std::time::Duration::from_millis(200));
+                std::thread::sleep(common::time::Duration::from_millis(200));
             }
         });
         let p = identify(&addr).unwrap();

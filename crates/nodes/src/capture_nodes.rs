@@ -122,7 +122,7 @@ pub const DEFAULT_BUDGET: u64 = 4 << 30;
 /// A file being written, and what is known about it.
 struct Sink {
     path: PathBuf,
-    file: std::io::BufWriter<std::fs::File>,
+    file: std::io::BufWriter<common::fs::blocking::File>,
     bytes: u64,
     samples: u64,
 }
@@ -142,7 +142,7 @@ pub struct IqCaptureNode {
     last: u64,
     /// When the folder was last added up, so a reader is not charged a
     /// directory listing per block.
-    measured: Option<std::time::Instant>,
+    measured: Option<common::time::Instant>,
     enabled: bool,
     rate: f64,
     center: Hz,
@@ -352,28 +352,23 @@ impl IqCaptureNode {
     /// is open the total is already exact, since the folder was measured when
     /// it was created and the writing is counted.
     pub fn refresh_folder(&mut self) {
-        const EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+        const EVERY: common::time::Duration = common::time::Duration::from_secs(2);
         if self.sink.is_some() || self.measured.is_some_and(|t| t.elapsed() < EVERY) {
             return;
         }
         self.older = self.measure();
         self.last = 0;
-        self.measured = Some(std::time::Instant::now());
+        self.measured = Some(common::time::Instant::now());
     }
 
     /// Add up the captures already on the disk. Every file is counted, not
     /// only the ones this node named: what the setting promises is a limit on
     /// the folder, and a `.cs16` from last month takes the same disk.
     fn measure(&self) -> u64 {
-        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+        let Ok(entries) = common::fs::blocking::read_dir(&self.dir) else {
             return 0;
         };
-        entries
-            .flatten()
-            .filter(|e| e.path().is_file())
-            .filter_map(|e| e.metadata().ok())
-            .map(|m| m.len())
-            .sum()
+        entries.iter().filter(|e| !e.is_dir()).map(|e| e.len()).sum()
     }
 
     /// Seconds of signal written, which is what somebody watching wants to
@@ -437,7 +432,7 @@ impl IqCaptureNode {
     /// Open the file for the tuning in force, named so that replaying it
     /// needs no arguments.
     fn open(&mut self, at_us: u64) -> Result<()> {
-        std::fs::create_dir_all(&self.dir)?;
+        common::fs::blocking::create_dir_all(&self.dir)?;
         let name = |stamp: &str| {
             format!(
                 "{}_{stamp}_{:.4}M_{:.0}k.{}",
@@ -454,13 +449,13 @@ impl IqCaptureNode {
         // first. The counter goes inside the time token, where
         // `sources::parse_filename` will not read it as a rate.
         for n in 2.. {
-            if !path.exists() {
+            if !common::fs::blocking::exists(&path) {
                 break;
             }
             path = self.dir.join(name(&format!("{at}-{n}")));
         }
         self.older = self.measure();
-        self.measured = Some(std::time::Instant::now());
+        self.measured = Some(common::time::Instant::now());
         if self.budget > 0 && self.older >= self.budget {
             self.full = true;
             return Err(Error::other(format!(
@@ -469,7 +464,7 @@ impl IqCaptureNode {
                 self.older as f64 / (1u64 << 30) as f64
             )));
         }
-        let file = std::fs::File::create(&path)?;
+        let file = common::fs::blocking::File::create(&path)?;
         sources::sigmf::Recording::new(self.format, self.rate, self.center.as_f64())
             .at(at_us)
             .write_beside(&path)?;
@@ -799,8 +794,8 @@ fn stamp(at_us: u64) -> String {
 }
 
 fn now_us() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    common::time::SystemTime::now()
+        .duration_since(common::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
         .unwrap_or(0)
 }
@@ -861,7 +856,8 @@ mod tests {
     use pipeline::node::Node;
 
     fn dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("sr-iqcap-{name}-{}", std::process::id()));
+        let d =
+            common::platform::scratch_dir().join(format!("sr-iqcap-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
     }

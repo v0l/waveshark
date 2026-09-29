@@ -543,7 +543,7 @@ impl HeatmapNode {
     }
 
     fn write(&self, dir: &Path, ramp: Ramp, floor: f32, ceil: f32) -> Result<PathBuf> {
-        std::fs::create_dir_all(dir)?;
+        common::fs::blocking::create_dir_all(dir)?;
         let name = format!(
             "heatmap_{}_{:.4}M_{:.0}k.html",
             chrono::Utc::now().format("%Y%m%d-%H%M%S"),
@@ -551,7 +551,7 @@ impl HeatmapNode {
             self.heat.rate() / 1e3,
         );
         let path = dir.join(name);
-        std::fs::write(&path, html(&self.heat, ramp, floor, ceil)?)?;
+        common::fs::blocking::write(&path, html(&self.heat, ramp, floor, ceil)?)?;
         Ok(path)
     }
 }
@@ -653,8 +653,8 @@ impl Simple for HeatmapNode {
 }
 
 fn now_us() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    common::time::SystemTime::now()
+        .duration_since(common::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
         .unwrap_or(0)
 }
@@ -1004,7 +1004,7 @@ mod tests {
 
     #[test]
     fn an_export_writes_a_file_and_says_where_it_went() {
-        let dir = std::env::temp_dir().join(format!("sr-heat-{}", std::process::id()));
+        let dir = common::platform::scratch_dir().join(format!("sr-heat-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut n = HeatmapNode::new(1 << 20);
         n.heat = recorded();

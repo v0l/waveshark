@@ -455,7 +455,6 @@ impl super::App {
             "server_model": c.read_model,
             "fault": c.reading_fault(),
         });
-        #[cfg(feature = "stt")]
         if let Some(e) = self.radio.as_ref().and_then(|r| r.status.transcriber.lock().clone()) {
             out["node"] = json!(e.node);
             out["enabled"] = json!(e.enabled);
@@ -525,6 +524,9 @@ impl super::App {
 
     fn agent_set_survey(&mut self, a: args::Survey) -> Result<Value, String> {
         if let Some(g) = a.gps {
+            if !crate::build::Feature::Gps.built() {
+                return Err("this build reads no GPS: set the station position instead".into());
+            }
             let text = g.trim();
             let want = match text.is_empty() {
                 true => None,
@@ -864,12 +866,10 @@ fn agent_datasets() -> Value {
 
 fn dataset_of(name: &str) -> Result<crate::data::Which, String> {
     let want = name.trim().to_lowercase();
-    crate::data::Which::all()
-        .iter()
-        .copied()
+    crate::data::Which::shown()
         .find(|w| w.id() == want || w.label().to_lowercase() == want)
         .ok_or_else(|| {
-            let have: Vec<String> = crate::data::Which::all().iter().map(|w| w.id()).collect();
+            let have: Vec<String> = crate::data::Which::shown().map(|w| w.id()).collect();
             format!("no dataset {name:?}. One of {have:?}")
         })
 }
@@ -908,7 +908,8 @@ mod tests {
     fn config_in_temp() {
         static ONCE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
         let dir = ONCE.get_or_init(|| {
-            let d = std::env::temp_dir().join(format!("waveshark-test-{}", std::process::id()));
+            let d = common::platform::scratch_dir()
+                .join(format!("waveshark-test-{}", std::process::id()));
             let _ = std::fs::create_dir_all(&d);
             d
         });

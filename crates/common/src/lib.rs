@@ -10,13 +10,20 @@ pub mod decode;
 pub mod demod;
 pub mod device;
 pub mod error;
+pub mod fs;
 pub mod geohash;
 pub mod iq;
 pub mod modulation;
 pub mod packet;
+#[cfg(target_arch = "wasm32")]
+pub mod page;
+pub mod platform;
 pub mod pulse;
 pub mod rtl;
 pub mod source;
+pub mod store;
+pub mod thread;
+pub mod time;
 pub mod units;
 pub mod value;
 
@@ -27,7 +34,7 @@ pub use decode::{
 pub use demod::{Demod, Passband};
 pub use device::{
     Choice, Device, DeviceInfo, DriverKind, GainMode, GainStage, Number, RxStream, Toggle,
-    TunerRange, Tuning, TxInfo, TxStream,
+    TunerRange, Tuning, TxInfo, TxStream, serial_tail,
 };
 pub use error::{Error, Result};
 pub use iq::{C32, IqBuf, SampleFormat};

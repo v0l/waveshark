@@ -36,7 +36,7 @@ pub(super) enum Action {
 
 impl LinksView<'_> {
     pub(super) fn show(self, ui: &mut egui::Ui) -> Option<Action> {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let links: Vec<Link> = self.st.list.active(now).into_iter().cloned().collect();
         let mut act = None;
 
@@ -170,7 +170,12 @@ impl LinksView<'_> {
 }
 
 /// One link in the directory.
-fn link_row(ui: &mut egui::Ui, l: &Link, now: std::time::Instant, picked: bool) -> egui::Response {
+fn link_row(
+    ui: &mut egui::Ui,
+    l: &Link,
+    now: common::time::Instant,
+    picked: bool,
+) -> egui::Response {
     let tint = if l.live(now) { theme::OK } else { theme::TRACE };
     let inner = panel::card(
         ui,
@@ -221,7 +226,7 @@ fn link_row(ui: &mut egui::Ui, l: &Link, now: std::time::Instant, picked: bool) 
 
 /// One packet inside a followed link.
 /// One packet of a followed link, timed from the first one shown.
-fn packet_row(ui: &mut egui::Ui, r: &Reception, first: Option<std::time::Instant>) {
+fn packet_row(ui: &mut egui::Ui, r: &Reception, first: Option<common::time::Instant>) {
     let t = first.map(|f| r.at.saturating_duration_since(f).as_secs_f64()).unwrap_or(0.0);
     ui.horizontal_wrapped(|ui| {
         Line::new().legend(&format!("{t:>8.3}")).value(r.protocol()).size(11.0).show(ui);
@@ -249,7 +254,7 @@ fn packet_row(ui: &mut egui::Ui, r: &Reception, first: Option<std::time::Instant
     }
 }
 
-fn age(d: std::time::Duration) -> String {
+fn age(d: common::time::Duration) -> String {
     let s = d.as_secs();
     match s {
         0..=59 => format!("{s}s"),

@@ -36,7 +36,7 @@ fn a_capture_or_a_remote_tuner_is_not_served_again_and_a_radio_is() {
         if served {
             until("the span to be served", || nodes::iqstream_nodes::running(addr).is_some());
         } else {
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::thread::sleep(common::time::Duration::from_millis(200));
             assert!(nodes::iqstream_nodes::running(addr).is_none(), "{kind:?} served again");
         }
     }
@@ -56,7 +56,7 @@ fn a_new_tnc_address_closes_the_old_one_and_a_rebuild_does_not() {
     until("the TNC to serve", || nodes::kiss_nodes::running(first).is_some());
     let tnc = nodes::kiss_nodes::running(first).unwrap();
     let mut client = std::net::TcpStream::connect(first).expect("connected");
-    client.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+    client.set_read_timeout(Some(common::time::Duration::from_secs(5))).unwrap();
     until("the TNC to see its client", || tnc.connected() == 1);
 
     let rev = radio.status.patch_rev.load(Ordering::Relaxed);
@@ -86,7 +86,7 @@ fn a_new_tnc_address_closes_the_old_one_and_a_rebuild_does_not() {
 /// board that recalibrates its VCO gets the longer window it needs.
 #[test]
 fn the_settle_window_is_what_the_tuner_asked_for() {
-    let ms = |n| std::time::Duration::from_millis(n);
+    let ms = |n| common::time::Duration::from_millis(n);
     assert_eq!(settle_samples(2_400_000.0, ms(5)), 12_000);
     assert_eq!(settle_samples(250_000.0, ms(5)), 1_250);
     assert_eq!(settle_samples(61_440_000.0, ms(60)), 3_686_400);
@@ -120,7 +120,7 @@ fn the_chain_keeps_its_timings_with_the_spectrum_off() {
     let before = calls();
     until("the timings to be published again", || calls() > before);
     while radio.frames.try_recv().is_ok() {}
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    std::thread::sleep(common::time::Duration::from_millis(200));
     assert_eq!(radio.frames.try_iter().count(), 0, "the spectrum went on drawing");
 }
 
@@ -223,7 +223,7 @@ fn a_band_walk_moves_the_dial_through_the_radio_thread() {
     // And stopping the walk leaves the dial where it was.
     radio.send(Cmd::BandScan(crate::chain::BandScan::default()));
     let held = *walked.last().expect("somewhere");
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    std::thread::sleep(common::time::Duration::from_millis(400));
     for f in radio.frames.try_iter() {
         if (f.center - held).abs() > 1.0 {
             walked.push(f.center);

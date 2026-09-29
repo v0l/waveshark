@@ -65,7 +65,7 @@ fn an_alert_relayed_on_a_listening_channel_is_read_off_its_audio() {
     let mut rows = Vec::new();
     for block in iq.chunks(16_384) {
         rx.process(block).expect("the graph runs");
-        rows.extend(rx.rows(std::time::Instant::now()));
+        rows.extend(rx.rows(common::time::Instant::now()));
     }
     let alerts = read_by(&rows, "eas");
     assert_eq!(alerts.len(), 1, "{} alerts off one relayed header", alerts.len());
@@ -115,7 +115,7 @@ fn noise_on_a_listening_channel_reads_as_no_alert() {
     for _ in 0..(60.0 * rate / 16_384.0) as usize {
         let block: Vec<C32> = (0..16_384).map(|_| C32::new(noise() * 0.3, noise() * 0.3)).collect();
         rx.process(&block).expect("the graph runs");
-        rows.extend(rx.rows(std::time::Instant::now()));
+        rows.extend(rx.rows(common::time::Instant::now()));
     }
     assert_eq!(read_by(&rows, "eas").len(), 0, "noise became an alert");
     assert_eq!(rows.len(), 0, "noise became {} rows", rows.len());
@@ -124,7 +124,7 @@ fn noise_on_a_listening_channel_reads_as_no_alert() {
     // same channel, after the noise.
     for block in relayed_alert(rate, offset, TOR).chunks(16_384) {
         rx.process(block).expect("the graph runs");
-        rows.extend(rx.rows(std::time::Instant::now()));
+        rows.extend(rx.rows(common::time::Instant::now()));
     }
     assert_eq!(read_by(&rows, "eas").len(), 1, "the alert after the noise was lost");
 }

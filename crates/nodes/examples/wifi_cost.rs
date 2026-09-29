@@ -18,7 +18,7 @@ fn main() {
     .expect("a channel in the span");
     println!("{} channels", det.channels().len());
     let mut frames = Vec::new();
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     for block in buf.samples.chunks(16_384) {
         det.process(block, &mut frames);
     }

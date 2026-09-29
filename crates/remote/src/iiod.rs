@@ -1,10 +1,8 @@
 use crate::CONNECT_TIMEOUT;
+use common::time::Duration;
 use common::{Error, Result};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
-use std::time::Duration;
-
-pub const DEFAULT_PORT: u16 = 30431;
 
 const MAX_XML: usize = 4 << 20;
 
@@ -527,11 +525,11 @@ pub(crate) mod tests {
             values.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
         ));
         let h = heard.clone();
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             for sock in l.incoming() {
                 let Ok(sock) = sock else { break };
                 let (h, store) = (h.clone(), store.clone());
-                std::thread::spawn(move || serve(sock, xml, h, store));
+                common::thread::spawn(move || serve(sock, xml, h, store));
             }
         });
         (addr, heard)

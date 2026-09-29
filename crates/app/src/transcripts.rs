@@ -47,11 +47,11 @@
 //! conversation is left alone until it goes quiet again.
 
 use common::Result;
+use common::time::{Duration, Instant};
 use pipeline::node::{NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
 
 /// How often a partial is asked for while somebody is still talking.
 pub const PARTIAL_EVERY_S: f64 = 2.0;
@@ -793,7 +793,7 @@ mod work {
                 let log = self.log.clone();
                 let on_server = crate::agent::config::reading_server();
                 self.reading_on = on_server.as_ref().map(|(url, ..)| url.clone());
-                let thread = std::thread::Builder::new().name("transcribe".into());
+                let thread = common::thread::Builder::new().name("transcribe".into());
                 match on_server {
                     Some((url, model, key)) => {
                         thread
@@ -953,7 +953,7 @@ mod work {
 
     /// How long one window may take to come back from a server. Generous:
     /// a Whisper on somebody else's CPU is slower than the radio.
-    const PATIENCE: std::time::Duration = std::time::Duration::from_secs(120);
+    const PATIENCE: common::time::Duration = common::time::Duration::from_secs(120);
 
     /// Read speech on an OpenAI-compatible `/v1/audio/transcriptions`.
     ///
@@ -979,13 +979,6 @@ mod work {
             .map(|(_, rest)| rest.split('/').next().unwrap_or(rest))
             .unwrap_or(&url)
             .to_string();
-        let client = match httpc::blocking(PATIENCE) {
-            Ok(c) => c,
-            Err(e) => {
-                health.lock().state = ModelState::Failed(format!("{e}"));
-                return;
-            }
-        };
         {
             let mut h = health.lock();
             h.state = ModelState::Ready;
@@ -997,7 +990,7 @@ mod work {
             let wav =
                 crate::mix::wav_bytes(&common::Speech { pcm: job.pcm.clone(), rate: job.rate });
             let started = Instant::now();
-            let read = read_on_server(&client, &url, &key, &model, wav);
+            let read = read_on_server(&url, &key, &model, wav);
             let failed = read.as_ref().err().cloned();
             {
                 let mut h = health.lock();
@@ -1047,30 +1040,26 @@ mod work {
 
     /// One window, posted as a file the way the API takes it.
     pub(super) fn read_on_server(
-        client: &reqwest::blocking::Client,
         url: &str,
         key: &str,
         model: &str,
         wav: Vec<u8>,
     ) -> std::result::Result<String, String> {
-        let part = reqwest::blocking::multipart::Part::bytes(wav)
-            .file_name("over.wav")
-            .mime_str("audio/wav")
-            .map_err(|e| e.to_string())?;
-        let form = reqwest::blocking::multipart::Form::new()
-            .part("file", part)
-            .text("model", model.to_string())
+        let mut req = httpc::post(url)
+            .timeout(PATIENCE)
+            .file_part("file", "over.wav", "audio/wav", wav)
+            .text_part("model", model)
             // Words, not segments: nothing here reads timings, and a server
             // that cannot do verbose_json still answers this.
-            .text("response_format", "json");
-        let mut req = client.post(url).multipart(form);
+            .text_part("response_format", "json");
         if !key.is_empty() {
-            req = req.bearer_auth(key);
+            req = req.bearer(key);
         }
-        let resp = req.send().map_err(|e| e.to_string())?;
-        let status = resp.status();
-        let body = resp.text().map_err(|e| e.to_string())?;
-        if !status.is_success() {
+        let resp = req.wait()?;
+        let status = resp.status;
+        let ok = resp.is_success();
+        let body = resp.text()?;
+        if !ok {
             return Err(format!("{status}: {}", body.trim()));
         }
         // `{"text": "..."}`, and a plain body from a server that ignored the
@@ -1403,7 +1392,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
         let url = format!("http://{}/v1/audio/transcriptions", listener.local_addr().unwrap());
         let (seen, posted) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             for (nth, stream) in listener.incoming().take(2).enumerate() {
                 let Ok(mut s) = stream else { return };
                 // Head first, then the body by the length it declared: one
@@ -1447,7 +1436,6 @@ mod tests {
             }
         });
 
-        let client = httpc::blocking(std::time::Duration::from_secs(5)).expect("a client");
         assert_eq!(
             crate::mix::wav_bytes(&common::Speech { pcm: vec![0.25; 8_000], rate: 8_000.0 }).len(),
             44 + 16_000,
@@ -1456,10 +1444,10 @@ mod tests {
         let speech = common::Speech { pcm: vec![0.25; 200], rate: 8_000.0 };
         let wav = crate::mix::wav_bytes(&speech);
 
-        let read = work::read_on_server(&client, &url, "sk-read", "whisper-1", wav.clone())
+        let read = work::read_on_server(&url, "sk-read", "whisper-1", wav.clone())
             .expect("the server answered");
         assert_eq!(read.trim(), "mobile one, go ahead");
-        let sent = posted.recv_timeout(std::time::Duration::from_secs(5)).expect("it posted");
+        let sent = posted.recv_timeout(common::time::Duration::from_secs(5)).expect("it posted");
         assert!(sent.contains("multipart/form-data"), "{sent}");
         assert!(sent.contains("name=\"file\""), "the audio goes under file: {sent}");
         assert!(sent.contains("over.wav"));
@@ -1467,10 +1455,9 @@ mod tests {
         assert!(sent.contains("Bearer sk-read"), "the key is sent: {sent}");
         assert!(sent.contains("RIFF"), "a WAV, not raw samples");
 
-        let plain =
-            work::read_on_server(&client, &url, "", "whisper-1", wav).expect("the second answer");
+        let plain = work::read_on_server(&url, "", "whisper-1", wav).expect("the second answer");
         assert_eq!(plain, "plain words");
-        let sent = posted.recv_timeout(std::time::Duration::from_secs(5)).expect("it posted");
+        let sent = posted.recv_timeout(common::time::Duration::from_secs(5)).expect("it posted");
         assert!(!sent.contains("Bearer"), "no key, no header: {sent}");
     }
 
@@ -1641,7 +1628,7 @@ mod tests {
             if n.log().lock().latest(&key).is_some_and(|u| u.settled) {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(common::time::Duration::from_millis(100));
             let mut out = Payload::Voice(Vec::new());
             let mut c = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags);
             c.block_seconds = 0.1;
@@ -1806,7 +1793,7 @@ mod tests {
         assert_eq!(cold.health.reads, 0);
 
         n.set_param("load", ParamValue::Bool(true)).unwrap();
-        let waited = std::time::Instant::now();
+        let waited = common::time::Instant::now();
         while n.engine().health.state != ModelState::Ready && waited.elapsed().as_secs() < 120 {
             std::thread::sleep(Duration::from_millis(100));
         }

@@ -34,3 +34,6 @@ pub const HACKRF_JAWBREAKER_PID: u16 = 0x604b;
 
 /// rad1o USB Product ID.
 pub const RAD1O_PID: u16 = 0xcc15;
+
+pub const USB_IDS: &[(u16, u16)] =
+    &[(HACKRF_VID, HACKRF_ONE_PID), (HACKRF_VID, HACKRF_JAWBREAKER_PID), (HACKRF_VID, RAD1O_PID)];

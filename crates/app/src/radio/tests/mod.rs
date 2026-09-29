@@ -66,10 +66,10 @@ pub(crate) fn transmit_plan(plan: &Plan) -> Option<crate::chain::TxPlan> {
 /// Wait for the radio thread, which runs on its own clock. Fails the
 /// test rather than hanging.
 fn until(what: &str, mut ready: impl FnMut() -> bool) {
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let until = common::time::Instant::now() + common::time::Duration::from_secs(10);
     while !ready() {
-        assert!(std::time::Instant::now() < until, "waited ten seconds for {what}");
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(common::time::Instant::now() < until, "waited ten seconds for {what}");
+        std::thread::sleep(common::time::Duration::from_millis(5));
     }
 }
 

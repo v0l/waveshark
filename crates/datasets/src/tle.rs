@@ -31,7 +31,7 @@
 //! turning a set into a position over a place is `crates/orbit`'s job.
 
 use crate::cache::{Cache, Error, Source, When};
-use std::time::Duration;
+use common::time::Duration;
 
 /// Where a group's file comes from and what shape it arrives in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +90,7 @@ impl Group {
                 name: self.file,
                 from: std::sync::Arc::new(crate::spacetrack::Query { url: url.to_string() }),
                 max_age: crate::spacetrack::MAX_AGE,
+                cross_origin: false,
                 check: Some(|head| match three_line_head(head) {
                     true => Ok(()),
                     false => Err("Space-Track did not answer with elements".into()),
@@ -101,10 +102,12 @@ impl Group {
             // A refusal, a redirect body or an unknown group comes back as
             // prose or HTML with a 200 in front of it. Storing that as the
             // dataset would replace elements that were fine.
-            Feed::CelesTrak(_) => src.checked(|head| match head.starts_with(b"OBJECT_NAME,") {
-                true => Ok(()),
-                false => Err("CelesTrak did not answer with GP data".into()),
-            }),
+            Feed::CelesTrak(_) => src
+                .checked(|head| match head.starts_with(b"OBJECT_NAME,") {
+                    true => Ok(()),
+                    false => Err("CelesTrak did not answer with GP data".into()),
+                })
+                .cross_origin(),
             _ => src.checked(|head| match three_line_head(head) {
                 true => Ok(()),
                 false => Err("the answer was not a file of three-line sets".into()),

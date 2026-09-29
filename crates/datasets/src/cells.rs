@@ -12,8 +12,8 @@
 //! continents, and a receiver hears one country's.
 
 use crate::cache::{Cache, Error, Source, When};
+use common::time::Duration;
 use std::io::Read;
-use std::time::Duration;
 
 /// Both are rebuilt daily at the far end.
 const DAILY: Duration = Duration::from_secs(24 * 3600);
@@ -24,6 +24,7 @@ pub fn operators_source() -> Source {
         "https://raw.githubusercontent.com/pbakondy/mcc-mnc-list/master/mcc-mnc-list.json",
         DAILY,
     )
+    .cross_origin()
 }
 
 /// The country export for one MCC.

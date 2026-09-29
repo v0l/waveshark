@@ -32,11 +32,11 @@ use crate::proto::{
     msg, now_ns, read_streams, tag, unpack,
 };
 use crate::ws;
+use common::time::Duration;
 use common::{Error, Result};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;

@@ -10,7 +10,7 @@
 //! deep and the alternative is a protobuf dependency and a generated file
 //! for the sake of one name and one byte string.
 
-use std::time::Duration;
+use common::time::Duration;
 
 /// A channel the node holds, as the node holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,7 +67,7 @@ pub async fn channels(host: String) -> Result<Vec<Channel>, String> {
             .await
             .map_err(|e| format!("{host}: {e}"))?;
         if body.is_empty() {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            crate::task::sleep(Duration::from_millis(100)).await;
             continue;
         }
         match from_radio(&body) {

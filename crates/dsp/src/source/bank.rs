@@ -143,7 +143,7 @@ impl Bank {
     /// Feed input indexed from wideband sample `at` and keep the frames.
     pub(super) fn feed(&mut self, input: &[C32], at: u64) {
         debug_assert_eq!(at, self.origin + self.chan_pos());
-        let t = std::time::Instant::now();
+        let t = common::time::Instant::now();
         let n = self.chan.process_parallel(input, &mut self.scratch);
         self.feed_us += t.elapsed().as_micros() as u64;
         if n == 0 {
@@ -184,7 +184,7 @@ impl Bank {
         self.running = true;
         self.idle = 0;
         if origin < ring.end() {
-            let t = std::time::Instant::now();
+            let t = common::time::Instant::now();
             let (head, tail) = ring.parts(origin, ring.end());
             self.feed(head, origin);
             self.feed(tail, origin + head.len() as u64);

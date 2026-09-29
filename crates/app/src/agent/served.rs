@@ -110,21 +110,13 @@ pub fn fetch(url: &str, key: &str, again: bool) {
         h.insert(base.clone(), Served { state: State::Fetching });
     }
     let key = key.trim().to_string();
-    let spawned = std::thread::Builder::new().name("models".into()).spawn(move || {
-        let outcome = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| e.to_string())
-            .and_then(|rt| rt.block_on(ask(&base, &key)));
-        let state = match outcome {
+    crate::task::spawner().spawn(async move {
+        let state = match ask(&base, &key).await {
             Ok(models) => State::Ready(models),
             Err(e) => State::Failed(e),
         };
         held().write().insert(base, Served { state });
     });
-    if spawned.is_err() {
-        held().write().remove(&key_of(url));
-    }
 }
 
 /// OpenRouter's own listing of what speaks, which carries the voices. A
@@ -136,7 +128,7 @@ const OPENROUTER_SPEECH: &str = "https://openrouter.ai/api/v1/models?output_moda
 const RELAYED: &str = "openrouter/";
 
 async fn ask(base: &str, key: &str) -> Result<Vec<Model>, String> {
-    let client = httpc::client(std::time::Duration::from_secs(15)).map_err(|e| e.to_string())?;
+    let client = httpc::client(common::time::Duration::from_secs(15)).map_err(|e| e.to_string())?;
     let mut req = client.get(format!("{base}/models"));
     if !key.is_empty() {
         req = req.bearer_auth(key);

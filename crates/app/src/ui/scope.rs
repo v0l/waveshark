@@ -337,7 +337,7 @@ impl Scope<'_> {
         // unreadable smear.
         let mut seen = seen;
         seen.sort_by(|a, b| a.source.center_hz.partial_cmp(&b.source.center_hz).unwrap());
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let mut rows: Vec<f32> = Vec::new();
         // A channel a front end has taken for the session is drawn as a
         // channel, down the plot like the ones on the strip, and not as a

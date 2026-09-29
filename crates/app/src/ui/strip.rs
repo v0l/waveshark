@@ -557,7 +557,7 @@ impl Strip<'_> {
     fn channel_decoding(
         ui: &mut egui::Ui,
         d: &crate::chain::Decoding,
-        last: Option<std::time::Duration>,
+        last: Option<common::time::Duration>,
     ) {
         use pipeline::Acquisition;
         ui.add_space(6.0);
@@ -1952,11 +1952,11 @@ fn decoding_row(ui: &mut egui::Ui, caption: &str, value: &str, tint: egui::Color
 }
 
 fn heard_since(
-    seen: &mut std::collections::HashMap<u64, (u64, Option<std::time::Instant>)>,
+    seen: &mut std::collections::HashMap<u64, (u64, Option<common::time::Instant>)>,
     id: u64,
     heard: u64,
-) -> Option<std::time::Duration> {
-    let now = std::time::Instant::now();
+) -> Option<common::time::Duration> {
+    let now = common::time::Instant::now();
     let entry = seen.entry(id).or_insert((heard, None));
     if heard > entry.0 {
         entry.1 = Some(now);
@@ -1965,7 +1965,7 @@ fn heard_since(
     entry.1.map(|t| now.duration_since(t))
 }
 
-fn ago(t: std::time::Duration) -> String {
+fn ago(t: common::time::Duration) -> String {
     match t.as_secs() {
         0 => "under a second".to_string(),
         s @ 1..=59 => format!("{s} s"),

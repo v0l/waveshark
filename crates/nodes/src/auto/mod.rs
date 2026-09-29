@@ -24,6 +24,7 @@
 //! the world rather than about this radio: 1090 MHz is 1090 MHz everywhere.
 
 use common::packet::Packet;
+use common::time::Instant;
 use common::{Hz, Result, SourceBlock};
 use dsp::{SourceConfig, SourceDetector, SourceEvent};
 use pipeline::Graph;
@@ -35,7 +36,6 @@ use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Registry, Settings, SettingsExt, StageDesc};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
-use std::time::Instant;
 
 use crate::protocol::{self, Wake};
 
@@ -479,8 +479,8 @@ fn run_fronts(
 }
 
 fn now_us() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    common::time::SystemTime::now()
+        .duration_since(common::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
         .unwrap_or(0)
 }

@@ -9,14 +9,18 @@ fixtures = []
 
 [dependencies]
 common.workspace = true
+web-time = "1"
 getrandom = "0.4"
 httpc.workspace = true
 iqstream.workspace = true
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+
 [dev-dependencies]
+iqstream = { workspace = true, features = ["net"] }
 tracing-subscriber.workspace = true

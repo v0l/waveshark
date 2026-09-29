@@ -42,7 +42,6 @@ const CONNECT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// One repository, one directory, and a running report.
 pub struct Fetch<'a> {
-    client: httpc::BlockingClient,
     base: String,
     dir: PathBuf,
     seen: std::cell::RefCell<Fetching>,
@@ -73,10 +72,7 @@ impl<'a> Fetch<'a> {
     fn at(base: String, dir: impl AsRef<Path>, on: OnProgress<'a>) -> Result<Self> {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
-        let client =
-            httpc::blocking_download(CONNECT).map_err(|e| Error::other(format!("hub: {e}")))?;
         Ok(Self {
-            client,
             base,
             dir,
             seen: std::cell::RefCell::new(Fetching::default()),
@@ -107,13 +103,9 @@ impl<'a> Fetch<'a> {
         });
         let url = format!("{}/{name}", self.base);
         let fail = |e: String| Error::other(format!("hub {name}: {e}"));
-        let mut resp = self
-            .client
-            .get(&url)
-            .send()
-            .and_then(|r| r.error_for_status())
-            .map_err(|e| fail(e.to_string()))?;
-        let total = resp.content_length().unwrap_or(0);
+        let mut resp =
+            httpc::get(&url).connect_timeout(CONNECT).wait().and_then(|r| r.ok()).map_err(fail)?;
+        let total = resp.header("content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
         self.report(|f| f.total = total);
         let part = dst.with_file_name(format!(
             "{}.part",

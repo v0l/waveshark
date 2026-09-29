@@ -124,7 +124,7 @@ fn a_locked_screen_is_read_faster_than_it_arrives() {
     }
     let Some(iq) = capture(ON) else { return };
     let mode = display::by_label("1920x1080 60 Hz").expect("the mode");
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     let reader = read(&iq, Some(mode));
     let speed = iq.len() as f64 / RATE / t.elapsed().as_secs_f64();
     assert!(reader.locked().is_some(), "the screen was not locked");

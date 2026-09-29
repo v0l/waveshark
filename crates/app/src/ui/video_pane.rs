@@ -25,9 +25,9 @@ use common::{Pixels, VideoFrame};
 /// How long a picture with nothing to say about its cadence stays on screen.
 /// What a frame does say is [`common::Cadence::hold_s`], which is half a
 /// second for a camera and an hour for a picture that was built and finished.
-const HOLD: std::time::Duration = std::time::Duration::from_millis(500);
+const HOLD: common::time::Duration = common::time::Duration::from_millis(500);
 
-const OSD_HOLD: std::time::Duration = std::time::Duration::from_secs(4);
+const OSD_HOLD: common::time::Duration = common::time::Duration::from_secs(4);
 
 const DEFAULT_PICTURE_FRAC: f32 = 0.65;
 const PICTURE_FRAC_RANGE: std::ops::RangeInclusive<f32> = 0.2..=0.9;
@@ -54,7 +54,7 @@ pub(super) struct VideoState {
     drawn: Option<egui::load::SizedTexture>,
     /// The field that texture holds, for the caption.
     shown: Option<VideoFrame>,
-    last: Option<std::time::Instant>,
+    last: Option<common::time::Instant>,
     /// Which transmission is being watched, by the key the bus keeps it
     /// under, or `None` for whatever is best.
     watching: Option<String>,
@@ -63,7 +63,7 @@ pub(super) struct VideoState {
     watching_label: Option<String>,
     split: Option<f32>,
     splitting: bool,
-    osd_until: Option<std::time::Instant>,
+    osd_until: Option<common::time::Instant>,
     osd_title: String,
     rate: FrameRate,
 }
@@ -72,12 +72,12 @@ const RATE_WINDOW_S: f32 = 2.0;
 
 #[derive(Default)]
 struct FrameRate {
-    from: Option<(std::time::Instant, u64)>,
+    from: Option<(common::time::Instant, u64)>,
     fps: Option<f32>,
 }
 
 impl FrameRate {
-    fn saw(&mut self, f: &VideoFrame, at: std::time::Instant) {
+    fn saw(&mut self, f: &VideoFrame, at: common::time::Instant) {
         if f.update != common::Update::Whole || f.cadence != common::Cadence::Live {
             *self = Self::default();
             return;
@@ -147,7 +147,7 @@ impl VideoPane<'_> {
         if let Some(f) = self.frame
             && is_new(st.shown.as_ref(), &f)
         {
-            let now = std::time::Instant::now();
+            let now = common::time::Instant::now();
             st.drawn = Some(upload(ui.ctx(), &f, st, self.gpu));
             st.rate.saw(&f, now);
             st.last = Some(now);
@@ -156,7 +156,7 @@ impl VideoPane<'_> {
         let hold = st
             .shown
             .as_ref()
-            .map(|f| std::time::Duration::from_secs_f64(f.cadence.hold_s()))
+            .map(|f| common::time::Duration::from_secs_f64(f.cadence.hold_s()))
             .unwrap_or(HOLD);
         if st.last.is_some_and(|t| t.elapsed() > hold) {
             st.texture = None;
@@ -240,7 +240,7 @@ fn picture(ui: &mut egui::Ui, st: &mut VideoState, osd: &Osd) {
     let resp = ui.interact(rect, ui.id().with("osd"), Sense::click());
     ui.allocate_rect(area, Sense::hover());
 
-    let now = std::time::Instant::now();
+    let now = common::time::Instant::now();
     if osd.title != st.osd_title {
         st.osd_title = osd.title.clone();
         st.osd_until = Some(now + OSD_HOLD);
@@ -942,8 +942,8 @@ mod tests {
 
     #[test]
     fn the_frame_rate_counts_every_picture_the_decoder_numbered() {
-        let t0 = std::time::Instant::now();
-        let at = |s: f32| t0 + std::time::Duration::from_secs_f32(s);
+        let t0 = common::time::Instant::now();
+        let at = |s: f32| t0 + common::time::Duration::from_secs_f32(s);
         let live = |sequence| VideoFrame { cadence: common::Cadence::Live, ..frame(sequence, 4) };
         let mut rate = FrameRate::default();
         rate.saw(&live(1), at(0.0));

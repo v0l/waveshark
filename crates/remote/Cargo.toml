@@ -4,18 +4,30 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["iqstream", "rtl_tcp", "spyserver", "kiwisdr", "pluto"]
+iqstream = ["iqstream/net", "dep:tokio"]
+rtl_tcp = []
+spyserver = []
+kiwisdr = ["dep:httpc", "dep:tungstenite"]
+pluto = ["dep:quick-xml"]
+usb = ["pluto", "dep:nusb"]
+
 [dependencies]
 common.workspace = true
 dsp.workspace = true
 crossbeam-channel.workspace = true
 tracing.workspace = true
-nusb.workspace = true
-quick-xml = "0.41"
+nusb = { workspace = true, optional = true }
+quick-xml = { version = "0.41", optional = true }
 iqstream.workspace = true
-tokio = { version = "1", features = ["rt", "net", "time"] }
-httpc.workspace = true
-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+tokio = { version = "1", features = ["rt", "net", "time"], optional = true }
+httpc = { workspace = true, optional = true }
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"], optional = true }
 
 [dev-dependencies]
-dsp.workspace = true
 sdr-directory.workspace = true
+
+[[test]]
+name = "serve"
+required-features = ["iqstream", "rtl_tcp", "spyserver"]

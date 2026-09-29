@@ -62,7 +62,7 @@ impl Worker {
     fn spawn(mut reader: Reader) -> Option<Self> {
         let (jobs, work) = crossbeam_channel::unbounded::<Job>();
         let (finished, done) = crossbeam_channel::unbounded::<Done>();
-        std::thread::Builder::new()
+        common::thread::Builder::new()
             .name("tempest".into())
             .spawn(move || {
                 while let Ok(job) = work.recv() {
@@ -89,7 +89,7 @@ impl Worker {
                             continue;
                         }
                     };
-                    let t = std::time::Instant::now();
+                    let t = common::time::Instant::now();
                     let read = reader.push(&block);
                     let us = t.elapsed().as_micros().min(u32::MAX as u128) as u32;
                     let seen = Seen::of(&reader);

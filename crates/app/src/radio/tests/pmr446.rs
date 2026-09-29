@@ -70,7 +70,7 @@ fn pmr446_reads_as_words(buf: &common::IqBuf, denoise: bool) {
         tx: None,
         tone: None,
     }];
-    let since = std::time::Instant::now();
+    let since = common::time::Instant::now();
     let mut rx = crate::chain::Receiver::build(&plan, Default::default()).expect("a receiver");
     // Transcription is off in the graph the receiver draws, because
     // writing down what people said is not something to start doing
@@ -98,7 +98,7 @@ fn pmr446_reads_as_words(buf: &common::IqBuf, denoise: bool) {
         if said.iter().any(|u| u.settled) {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(common::time::Duration::from_millis(100));
     }
     let text = said.iter().map(|u| u.text.as_str()).collect::<Vec<_>>().join(" ");
     let words = text.to_lowercase();
@@ -165,7 +165,7 @@ fn pmr446_strip(
             silent_blocks += 1;
         }
         pcm.extend(out.iter().step_by(2));
-        assert!(rx.rows(std::time::Instant::now()).is_empty(), "speech is not a packet");
+        assert!(rx.rows(common::time::Instant::now()).is_empty(), "speech is not a packet");
         for c in rx.heard_mut().expect("the tap").take_calls() {
             calls.hear(&c);
             heard.push(c);
@@ -201,7 +201,7 @@ fn a_voice_channel_is_heard_and_is_a_call() {
 
     assert!(!heard.is_empty(), "a channel marked as voice made no call");
     assert!(heard.iter().all(|c| c.to == "PMR1"), "a call not named for the strip");
-    let now = std::time::Instant::now();
+    let now = common::time::Instant::now();
     let active = calls.active(now);
     assert_eq!(active.len(), 1, "one channel, one row: {active:?}");
     assert_eq!(active[0].to, "PMR1");
@@ -232,7 +232,7 @@ fn a_channel_not_marked_as_voice_is_heard_and_is_not_a_call() {
     assert_eq!(silent_blocks, 0, "the bus handed the speaker nothing");
     assert!(rms > 0.01, "the channel is silent at the speaker: {rms:e} rms");
     assert!(heard.is_empty(), "an unmarked channel became a call: {heard:?}");
-    assert!(calls.active(std::time::Instant::now()).is_empty());
+    assert!(calls.active(common::time::Instant::now()).is_empty());
 }
 
 /// The same handheld, kept as audio: the whole path from IQ to a record
@@ -249,7 +249,8 @@ fn a_handheld_on_pmr446_is_recorded_and_reads_back() {
         return;
     };
     const CHANNEL_HZ: f64 = 446_049_100.0;
-    let dir = std::env::temp_dir().join(format!("sr-calls-replay-{}", std::process::id()));
+    let dir =
+        common::platform::scratch_dir().join(format!("sr-calls-replay-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let mut plan = replay_plan(&buf, false);
     plan.fronts.clear();

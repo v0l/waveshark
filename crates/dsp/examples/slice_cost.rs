@@ -1,6 +1,6 @@
 //! What slicing a wide span costs, both ways.
 use common::C32;
-use std::time::Instant;
+use common::time::Instant;
 
 fn noise(n: usize) -> Vec<C32> {
     let mut s = 0x1234_5678u32;

@@ -708,13 +708,13 @@ impl Node for BurstRouteNode {
             if let Some(dir) = &self.dump_dir {
                 let path =
                     dir.join(format!("burst_{}_{}_{}.c64", center, rate as u64, b.start_sample));
-                if !path.exists() {
+                if !common::fs::blocking::exists(&path) {
                     let mut bytes = Vec::with_capacity(b.iq.len() * 8);
                     for s in &b.iq {
                         bytes.extend_from_slice(&s.re.to_le_bytes());
                         bytes.extend_from_slice(&s.im.to_le_bytes());
                     }
-                    let _ = std::fs::write(path, bytes);
+                    let _ = common::fs::blocking::write(path, bytes);
                 }
             }
             // What it was measured to be, whether or not anything read it.

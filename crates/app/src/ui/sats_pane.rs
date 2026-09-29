@@ -185,7 +185,7 @@ impl Sats<'_> {
         ui.add_space(4.0);
 
         let Some(passes) = passes else {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+            ui.ctx().request_repaint_after(common::time::Duration::from_millis(500));
             return acts;
         };
         let mut selected = self.st.selected;
@@ -282,7 +282,7 @@ impl Sats<'_> {
         });
         self.st.selected = selected;
         // A countdown that does not count down is a clock nobody trusts.
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        ui.ctx().request_repaint_after(common::time::Duration::from_millis(500));
         acts
     }
 

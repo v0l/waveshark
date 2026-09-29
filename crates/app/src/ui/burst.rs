@@ -268,7 +268,7 @@ pub(super) fn sigid_modal(ctx: &egui::Context, rec: &Reception) -> bool {
             match crate::data::sigid() {
                 None => {
                     Line::new().note("loading the signal identification wiki").show(ui);
-                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+                    ui.ctx().request_repaint_after(common::time::Duration::from_millis(500));
                 }
                 Some(db) => {
                     let m = db.matches(&q);

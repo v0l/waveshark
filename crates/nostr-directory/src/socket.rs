@@ -1,10 +1,10 @@
+use common::time::{Duration, Instant};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use serde_json::Value;
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::http::HeaderValue;
 use tungstenite::http::header::USER_AGENT;

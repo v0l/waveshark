@@ -11,7 +11,7 @@
 use crate::bits::BitBuffer;
 use crate::slicer::{Coding, Timing};
 use common::pulse::Pulse;
-use std::time::Duration;
+use common::time::Duration;
 
 /// Inter-frame silence, so a burst of repeats splits into packages the way
 /// the receiver's burst detector expects and `find_and_parse` corroborates

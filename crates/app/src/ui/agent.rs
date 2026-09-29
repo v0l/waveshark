@@ -132,7 +132,7 @@ fn param_from_json(
     }
 }
 
-fn secs(then: std::time::Instant, now: std::time::Instant) -> f64 {
+fn secs(then: common::time::Instant, now: common::time::Instant) -> f64 {
     now.saturating_duration_since(then).as_secs_f64()
 }
 
@@ -160,15 +160,15 @@ pub(super) struct PendingEdit {
     rev: u64,
     /// When it was sent, so a refusal reported afterwards is this edit's and
     /// not one left on screen from a minute ago.
-    sent: std::time::Instant,
-    until: std::time::Instant,
+    sent: common::time::Instant,
+    until: common::time::Instant,
     want: Expect,
 }
 
 /// How long an edit waits for the receiver to rebuild before it answers with
 /// what it can see. A rebuild is a few blocks; this is long enough for a wide
 /// span on a busy host and short enough to be an answer rather than a hang.
-const REBUILD_WAIT: std::time::Duration = std::time::Duration::from_millis(2500);
+const REBUILD_WAIT: common::time::Duration = common::time::Duration::from_millis(2500);
 
 impl App {
     /// Take everything an agent has queued since the last frame.
@@ -178,7 +178,7 @@ impl App {
             // arriving over a socket or from a model is not something egui
             // knows about.
             let ctx = ctx.clone();
-            self.desk.bell().answered_by(move || ctx.request_repaint());
+            self.desk.bell().answered_by(move || crate::window::repaint(&ctx));
             self.desk_rung = true;
         }
         // Before this frame's actions, so an edit is judged against the
@@ -191,7 +191,7 @@ impl App {
             // arrives as an event after the one that asked for it.
             if matches!(action, Action::Screenshot) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
-                ctx.request_repaint();
+                crate::window::repaint(&ctx);
                 self.agent_shots.push(reply);
                 continue;
             }
@@ -239,7 +239,7 @@ impl App {
             let _ = reply.send(Ok(v));
             return;
         }
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         self.agent_edits.push(PendingEdit {
             reply,
             rev: self.chain.patch_rev,
@@ -254,7 +254,7 @@ impl App {
         if self.agent_edits.is_empty() {
             return;
         }
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let rev = self.chain.patch_rev;
         let mut waiting = Vec::new();
         for p in std::mem::take(&mut self.agent_edits) {
@@ -914,7 +914,7 @@ impl App {
                 false => config.voice_local = v,
             }
         }
-        let said = self.air.say(&config, self.rt.handle(), &a.text)?;
+        let said = self.air.say(&config, &self.rt, &a.text)?;
         Ok(json!({ "saying": said, "channel": self.air.on, "state": self.air.state.label() }))
     }
 
@@ -1239,7 +1239,7 @@ impl App {
     }
 
     fn agent_packets(&self, a: &args::Packets) -> Value {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let want = a.protocol.as_ref().map(|p| p.to_lowercase());
         let rows: Vec<Value> = self
             .log
@@ -1290,7 +1290,7 @@ impl App {
     }
 
     fn agent_calls(&self, limit: usize) -> Value {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let rows: Vec<Value> = self
             .calls
             .list
@@ -1323,7 +1323,7 @@ impl App {
     }
 
     fn agent_transcript(&self, limit: usize) -> Value {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let rows: Vec<Value> = self
             .transcript
             .log
@@ -1345,7 +1345,7 @@ impl App {
     }
 
     fn agent_messages(&self, limit: usize) -> Value {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let rows: Vec<Value> = self
             .messages
             .list
@@ -1368,7 +1368,7 @@ impl App {
     }
 
     fn agent_links(&self, limit: usize) -> Value {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let rows: Vec<Value> = self
             .links
             .list
@@ -1394,7 +1394,7 @@ impl App {
     }
 
     fn agent_control_links(&self) -> Value {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let rows: Vec<Value> = self
             .control
             .list
@@ -1419,7 +1419,7 @@ impl App {
     }
 
     fn agent_tracks(&self, limit: usize) -> Value {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let fleet = crate::data::aircraft();
         let rows: Vec<Value> = self
             .map
@@ -1754,7 +1754,7 @@ mod tests {
         a.log.decodes.push(Logged {
             id,
             rec: Reception {
-                at: std::time::Instant::now() - std::time::Duration::from_secs_f64(ago_s),
+                at: common::time::Instant::now() - common::time::Duration::from_secs_f64(ago_s),
                 ..Reception::for_test(freq, model).of_bytes(vec![0xde, 0xad])
             },
         });

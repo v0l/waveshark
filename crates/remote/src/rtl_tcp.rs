@@ -10,6 +10,7 @@
 //! settings rather than readings, and the server turns away a second client
 //! for as long as this one holds the socket.
 
+#[cfg(feature = "iqstream")]
 pub mod serve;
 
 use crate::gaps::Gaps;
@@ -56,7 +57,7 @@ const DIRECT_Q: u32 = 2;
 /// How long a read may block before the stream calls the server gone. Long
 /// enough that a quiet moment is not a disconnection: at the slowest rate
 /// offered, a block is a fifth of a second.
-const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const READ_TIMEOUT: common::time::Duration = common::time::Duration::from_secs(5);
 
 fn connect(addr: &str) -> Result<(TcpStream, Tuner, u32)> {
     let resolved = addr
@@ -301,7 +302,7 @@ impl DeviceTrait for Device {
         let counted = dropped.clone();
         let halt = stop.clone();
         let addr = self.addr.clone();
-        let join = std::thread::Builder::new()
+        let join = common::thread::Builder::new()
             .name("rtl-tcp-rx".into())
             .spawn(move || {
                 if let Err(e) = pump(sock, center, rate, tx, counted, halt) {
@@ -383,7 +384,7 @@ struct NetStream {
     stop: Arc<AtomicBool>,
     /// The control socket, shut down so a reader blocked mid-block wakes.
     sock: Option<TcpStream>,
-    join: Option<std::thread::JoinHandle<()>>,
+    join: Option<common::thread::JoinHandle<()>>,
 }
 
 impl RxStream for NetStream {
@@ -415,6 +416,22 @@ impl Drop for NetStream {
     }
 }
 
+pub(crate) struct Remote;
+
+impl crate::Protocol for Remote {
+    fn proto(&self) -> Proto {
+        Proto::RtlTcp
+    }
+
+    fn probe(&self, addr: &str) -> Result<Probe> {
+        probe(addr)
+    }
+
+    fn open(&self, addr: &str) -> Result<Box<dyn common::Device>> {
+        Ok(Box::new(Device::open(addr)?))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,7 +443,7 @@ mod tests {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap().to_string();
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             let (mut sock, _) = l.accept().unwrap();
             let mut hello = [0u8; GREETING];
             hello[..4].copy_from_slice(&MAGIC);
@@ -434,10 +451,10 @@ mod tests {
             hello[8..12].copy_from_slice(&gains.to_be_bytes());
             sock.write_all(&hello).unwrap();
             let mut writer = sock.try_clone().unwrap();
-            std::thread::spawn(move || {
+            common::thread::spawn(move || {
                 let block: Vec<u8> = (0..=255u8).cycle().take(65536).collect();
                 while writer.write_all(&block).is_ok() {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    std::thread::sleep(common::time::Duration::from_millis(1));
                 }
             });
             let mut cmd = [0u8; 5];
@@ -467,10 +484,10 @@ mod tests {
     fn a_server_that_does_not_greet_is_not_rtl_tcp() {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap().to_string();
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             let (mut sock, _) = l.accept().unwrap();
             let _ = sock.write_all(b"IQST\0\0\0\0\0\0\0\0");
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::thread::sleep(common::time::Duration::from_millis(200));
         });
         let e = probe(&addr).unwrap_err().to_string();
         assert!(e.contains("not rtl_tcp"), "{e}");
@@ -489,7 +506,7 @@ mod tests {
 
         let mut seen = Vec::new();
         while seen.len() < 7 {
-            seen.push(cmds.recv_timeout(std::time::Duration::from_secs(2)).unwrap());
+            seen.push(cmds.recv_timeout(common::time::Duration::from_secs(2)).unwrap());
         }
         let value = |b: &[u8; 5]| u32::from_be_bytes([b[1], b[2], b[3], b[4]]);
         // Rate, centre, automatic gain, RTL AGC off on open; then the retune
@@ -521,7 +538,7 @@ mod tests {
 
         let mut seen = Vec::new();
         while seen.len() < 8 {
-            seen.push(cmds.recv_timeout(std::time::Duration::from_secs(2)).unwrap());
+            seen.push(cmds.recv_timeout(common::time::Duration::from_secs(2)).unwrap());
         }
         let value = |b: &[u8; 5]| u32::from_be_bytes([b[1], b[2], b[3], b[4]]);
         // Four on open: rate, centre, automatic gain, RTL AGC off.
@@ -555,7 +572,7 @@ mod tests {
         d.set_toggle("offset_tuning", true).unwrap();
         let mut seen = Vec::new();
         while seen.len() < 5 {
-            seen.push(cmds.recv_timeout(std::time::Duration::from_secs(2)).unwrap());
+            seen.push(cmds.recv_timeout(common::time::Duration::from_secs(2)).unwrap());
         }
         assert_eq!(
             (seen[4][0], u32::from_be_bytes([seen[4][1], seen[4][2], seen[4][3], seen[4][4]])),
@@ -587,10 +604,10 @@ mod tests {
     /// while part way through. `catches_up` says whether the samples it could
     /// not send are still sent afterwards, which is what a held TCP
     /// connection does, or thrown away, which is what its own overrun does.
-    fn stalling(rate: u64, stall: std::time::Duration, catches_up: bool) -> String {
+    fn stalling(rate: u64, stall: common::time::Duration, catches_up: bool) -> String {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap().to_string();
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             let (mut sock, _) = l.accept().unwrap();
             let mut hello = [0u8; GREETING];
             hello[..4].copy_from_slice(&MAGIC);
@@ -600,20 +617,20 @@ mod tests {
             // A fifth of the receiver's block, so the stream is not paced in
             // step with the reads it is measured by.
             let block = (rate / 250) as usize;
-            let period = std::time::Duration::from_secs_f64(block as f64 / rate as f64);
+            let period = common::time::Duration::from_secs_f64(block as f64 / rate as f64);
             let bytes = vec![127u8; block * 2];
-            let start = std::time::Instant::now();
+            let start = common::time::Instant::now();
             let mut next = start + period;
             let mut stalled = false;
             loop {
-                if !stalled && start.elapsed() > std::time::Duration::from_millis(1200) {
+                if !stalled && start.elapsed() > common::time::Duration::from_millis(1200) {
                     stalled = true;
                     std::thread::sleep(stall);
                     if !catches_up {
-                        next = std::time::Instant::now() + period;
+                        next = common::time::Instant::now() + period;
                     }
                 }
-                let now = std::time::Instant::now();
+                let now = common::time::Instant::now();
                 if next > now {
                     std::thread::sleep(next - now);
                 }
@@ -628,8 +645,8 @@ mod tests {
 
     /// Read blocks for this long, and say by how much the sequence number
     /// jumped beyond the samples that were handed over.
-    fn seq_jumps(s: &mut dyn RxStream, how_long: std::time::Duration) -> Vec<u64> {
-        let start = std::time::Instant::now();
+    fn seq_jumps(s: &mut dyn RxStream, how_long: common::time::Duration) -> Vec<u64> {
+        let start = common::time::Instant::now();
         let mut last: Option<(u64, u64)> = None;
         let mut jumps = Vec::new();
         while start.elapsed() < how_long {
@@ -651,11 +668,11 @@ mod tests {
     /// sample in it.
     #[test]
     fn a_stall_that_catches_up_leaves_the_numbering_alone() {
-        let addr = stalling(240_000, std::time::Duration::from_millis(400), true);
+        let addr = stalling(240_000, common::time::Duration::from_millis(400), true);
         let mut d = Device::open(&addr).unwrap();
         d.set_rate(Sps(240_000)).unwrap();
         let mut s = d.start_rx().unwrap();
-        let jumps = seq_jumps(s.as_mut(), std::time::Duration::from_secs(4));
+        let jumps = seq_jumps(s.as_mut(), common::time::Duration::from_secs(4));
         assert_eq!(jumps, Vec::<u64>::new(), "nothing was lost, so nothing is counted");
         assert_eq!(s.dropped(), 0);
         s.stop();
@@ -666,11 +683,11 @@ mod tests {
     /// after it belong 400 ms further on than counting would put them.
     #[test]
     fn a_stall_that_never_catches_up_moves_the_numbering_on() {
-        let addr = stalling(240_000, std::time::Duration::from_millis(400), false);
+        let addr = stalling(240_000, common::time::Duration::from_millis(400), false);
         let mut d = Device::open(&addr).unwrap();
         d.set_rate(Sps(240_000)).unwrap();
         let mut s = d.start_rx().unwrap();
-        let jumps = seq_jumps(s.as_mut(), std::time::Duration::from_secs(4));
+        let jumps = seq_jumps(s.as_mut(), common::time::Duration::from_secs(4));
         assert_eq!(jumps.len(), 1, "one gap, declared once: {jumps:?}");
         // 400 ms at 240 kS/s is 96000 samples; the ends are the window's own
         // resolution either side of it.

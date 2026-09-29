@@ -76,8 +76,8 @@ fn main() {
     }
 
     let air = at_rate.len() as f64 / RATE_HZ;
-    let start = std::time::Instant::now();
-    let mut on_thread = std::time::Duration::ZERO;
+    let start = common::time::Instant::now();
+    let mut on_thread = common::time::Duration::ZERO;
     let mut frames: Vec<common::VideoFrame> = Vec::new();
     let mut bytes = 0usize;
     let mut sound = 0usize;
@@ -93,7 +93,7 @@ fn main() {
         let (mut events, mut new_tags) = (Vec::new(), Vec::new());
         let mut ctx = NodeCtx::new(0, &ins, &tags, &mut events, &mut new_tags)
             .with_block_seconds(block.len() as f64 / RATE_HZ);
-        let t = std::time::Instant::now();
+        let t = common::time::Instant::now();
         Node::process(&mut node, &[&input], &mut out, &mut ctx).expect("the stage runs");
         on_thread += t.elapsed();
         bytes += out[0].as_bytes().unwrap_or(&[]).len();

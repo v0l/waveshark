@@ -11,8 +11,8 @@
 //! radiates nothing while it is still wrong.
 
 use common::device::{Device, DeviceInfo, DriverKind, GainMode, RxStream, TunerRange, TxInfo};
+use common::fs::blocking::File;
 use common::{Error, Hz, IqBuf, Result, SampleFormat, Sps, TxStream};
-use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -70,7 +70,7 @@ impl FileSink {
         // Fail here rather than at the first block, when a modulator is
         // already running and the error has nowhere useful to go.
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-            std::fs::create_dir_all(dir)?;
+            common::fs::blocking::create_dir_all(dir)?;
         }
         File::create(&path)?;
         Ok(Self::build(
@@ -211,7 +211,7 @@ impl Device for FileSink {
                 crate::sigmf::Recording::new(self.format, self.rate.as_f64(), self.center.as_f64())
                     .at(now_us())
                     .write_beside(p)?;
-                Box::new(BufWriter::with_capacity(1 << 20, File::options().append(true).open(p)?))
+                Box::new(BufWriter::with_capacity(1 << 20, File::append(p)?))
             }
             Target::Memory(b) => Box::new(MemWriter(b.clone())),
         };
@@ -227,8 +227,8 @@ impl Device for FileSink {
 }
 
 fn now_us() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    common::time::SystemTime::now()
+        .duration_since(common::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
         .unwrap_or(0)
 }
@@ -274,7 +274,7 @@ impl TxStream for FileTx {
         0
     }
 
-    fn drain(&mut self, _timeout: std::time::Duration) -> bool {
+    fn drain(&mut self, _timeout: common::time::Duration) -> bool {
         self.out.flush().is_ok()
     }
 
@@ -307,7 +307,7 @@ mod tests {
         let mut tx = sink.start_tx().unwrap();
         let sent = ramp(64, rate);
         tx.write(&sent).unwrap();
-        tx.drain(std::time::Duration::from_millis(10));
+        tx.drain(common::time::Duration::from_millis(10));
 
         let mut back = Vec::new();
         SampleFormat::Cs16.convert(&buf.lock(), &mut back);
@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn a_capture_written_here_is_named_so_it_replays() {
-        let dir = std::env::temp_dir().join("waveshark_sink_test");
+        let dir = common::platform::scratch_dir().join("waveshark_sink_test");
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("tone_433.92M_250k.cs8");
         let mut sink = FileSink::create(&path, Sps(250_000)).unwrap();

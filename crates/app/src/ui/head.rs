@@ -214,7 +214,14 @@ impl App {
                     if ui.selectable_label(false, "Rescan").clicked() {
                         rescan = true;
                     }
-                    if ui.selectable_label(false, "Add remote…").clicked() {
+                    if crate::webusb::offered()
+                        && ui.selectable_label(false, "Add USB device…").clicked()
+                    {
+                        crate::webusb::ask(ui.ctx());
+                    }
+                    if settings::Over::shown().next().is_some()
+                        && ui.selectable_label(false, "Add remote…").clicked()
+                    {
                         add_remote = true;
                     }
                     // A recording is a receiver: the same graph, detector and
@@ -544,7 +551,7 @@ impl App {
         // window opens, so a receiver sitting stopped would otherwise not
         // repaint until the pointer moved.
         if matches!(state, crate::update::State::Checking) {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+            ui.ctx().request_repaint_after(common::time::Duration::from_millis(500));
         }
         let crate::update::State::Newer(r) = state else {
             return;

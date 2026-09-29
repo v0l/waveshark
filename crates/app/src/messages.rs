@@ -23,7 +23,7 @@
 //! transmission heard twice.
 
 use crate::row::Reception;
-use std::time::{Duration, Instant};
+use common::time::{Duration, Instant};
 
 /// How close two identical messages have to be to be the same message.
 pub const REPEAT: Duration = Duration::from_secs(120);
@@ -230,8 +230,8 @@ impl Message {
 
 /// Now, in microseconds since the epoch.
 pub fn now_us() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    common::time::SystemTime::now()
+        .duration_since(common::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
         .unwrap_or(0)
 }
@@ -255,7 +255,8 @@ mod tests {
             .expect("a message");
         assert!(!heard.logged, "something heard now is not from the log");
 
-        let dir = std::env::temp_dir().join(format!("waveshark-msg-{}", std::process::id()));
+        let dir =
+            common::platform::scratch_dir().join(format!("waveshark-msg-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         crate::messagelog::append(&dir, &heard);
         let back = crate::messagelog::recent(&dir, 2);

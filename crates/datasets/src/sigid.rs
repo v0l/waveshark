@@ -19,9 +19,15 @@
 //! a hint about where to look, not an identification.
 
 use crate::cache::{Cache, Error, Fetch, Seen, Source, When};
+use common::time::Duration;
 use std::io::{Read, Write};
-use std::path::Path;
-use std::time::Duration;
+
+#[cfg(feature = "artemis")]
+#[path = "sigid/sqlite.rs"]
+mod sqlite;
+#[cfg(not(feature = "artemis"))]
+#[path = "sigid/sqlite_offline.rs"]
+mod sqlite;
 
 /// Artemis cuts a release every few weeks; the wiki changes daily but
 /// slowly. A week between checks is one API call nobody notices.
@@ -41,6 +47,7 @@ pub fn artemis_source() -> Source {
         from: std::sync::Arc::new(Artemis),
         max_age: MAX_AGE,
         check: None,
+        cross_origin: false,
     }
 }
 
@@ -66,13 +73,11 @@ impl Fetch for Artemis {
         _progress: &crate::progress::Progress,
     ) -> Result<Option<Seen>, Error> {
         let fail = |e: String| Error::Fetch(RELEASES.into(), e);
-        let client = httpc::blocking(Duration::from_secs(600)).map_err(|e| fail(e.to_string()))?;
-        let body = client
-            .get(RELEASES)
-            .send()
-            .and_then(|r| r.error_for_status())
-            .and_then(|r| r.text())
-            .map_err(|e| fail(e.to_string()))?;
+        let body = httpc::get(RELEASES)
+            .timeout(Duration::from_secs(600))
+            .wait()
+            .and_then(|r| r.ok()?.text())
+            .map_err(fail)?;
         let rel: serde_json::Value =
             serde_json::from_str(&body).map_err(|e| fail(e.to_string()))?;
         let tag = rel["tag_name"].as_str().ok_or_else(|| fail("no tag_name".into()))?.to_string();
@@ -88,11 +93,11 @@ impl Fetch for Artemis {
             .ok_or_else(|| fail(format!("{tag}: no .tar asset")))?
             .to_string();
         let published = rel["published_at"].as_str().map(str::to_string);
-        let resp = client
-            .get(&url)
-            .send()
-            .and_then(|r| r.error_for_status())
-            .map_err(|e| Error::Fetch(url.clone(), e.to_string()))?;
+        let resp = httpc::get(&url)
+            .timeout(Duration::from_secs(600))
+            .wait()
+            .and_then(|r| r.ok())
+            .map_err(|e| Error::Fetch(url.clone(), e))?;
         let mut body = crate::cache::Capped::new(resp, 1 << 30);
         match tar_entry(&mut body, "data.sqlite", to) {
             Ok(true) => Ok(Some(Seen { etag: Some(tag), last_modified: published })),
@@ -346,7 +351,7 @@ pub fn fmt_hz(hz: f64) -> String {
 
 /// The identified half: Artemis's SQLite, downloaded if missing.
 pub fn load_artemis(cache: &Cache) -> Result<Vec<Signal>, Error> {
-    read_sqlite(&cache.get(&artemis_source())?)
+    sqlite::read(&cache.get(&artemis_source())?)
 }
 
 /// The unidentified half: the wiki's own list, downloaded if missing.
@@ -357,7 +362,7 @@ pub fn load_unid(cache: &Cache) -> Result<Vec<Signal>, Error> {
 /// Check the release and reread if a new one is out.
 pub fn refresh_artemis(cache: &Cache, when: When) -> Result<Option<Vec<Signal>>, Error> {
     match cache.refresh(&artemis_source(), when)? {
-        Some(p) => read_sqlite(&p).map(Some),
+        Some(p) => sqlite::read(&p).map(Some),
         None => Ok(None),
     }
 }
@@ -365,10 +370,10 @@ pub fn refresh_artemis(cache: &Cache, when: When) -> Result<Option<Vec<Signal>>,
 /// Check the wiki list and reparse if it changed.
 pub fn refresh_unid(cache: &Cache, when: When) -> Result<Option<Vec<Signal>>, Error> {
     match cache.refresh(&unid_source(), when)? {
-        Some(p) => {
-            parse_unid(&std::fs::read(&p).map_err(|e| Error::Io(p.display().to_string(), e))?)
-                .map(Some)
-        }
+        Some(p) => parse_unid(
+            &common::fs::blocking::read(&p).map_err(|e| Error::Io(p.display().to_string(), e))?,
+        )
+        .map(Some),
         None => Ok(None),
     }
 }
@@ -382,90 +387,6 @@ pub fn load(cache: &Cache) -> Result<Db, Error> {
         Err(e) => tracing::warn!("sigidwiki unidentified list unavailable: {e}"),
     }
     Ok(Db { signals })
-}
-
-fn read_sqlite(path: &Path) -> Result<Vec<Signal>, Error> {
-    let name = path.display().to_string();
-    let bad = |e: rusqlite::Error| Error::Parse(name.clone(), e.to_string());
-    let db =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(bad)?;
-    let mut out: Vec<Signal> = Vec::new();
-    let mut ids: Vec<i64> = Vec::new();
-    {
-        let mut st = db
-            .prepare("SELECT sig_id, name, url, description FROM signals ORDER BY sig_id")
-            .map_err(bad)?;
-        let rows = st
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                    r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                    r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                ))
-            })
-            .map_err(bad)?;
-        for row in rows {
-            let (id, name, url, description) = row.map_err(bad)?;
-            ids.push(id);
-            out.push(Signal {
-                name,
-                url,
-                identified: true,
-                description,
-                categories: Vec::new(),
-                frequencies_hz: Vec::new(),
-                bandwidths_hz: Vec::new(),
-                modulations: Vec::new(),
-                modes: Vec::new(),
-                locations: Vec::new(),
-                acf_ms: Vec::new(),
-                picture_url: None,
-            });
-        }
-    }
-    let at = |id: i64| ids.binary_search(&id).ok();
-    let mut texts = |sql: &str, put: &mut dyn FnMut(&mut Signal, String)| -> Result<(), Error> {
-        let mut st = db.prepare(sql).map_err(bad)?;
-        let rows = st
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)))
-            .map_err(bad)?;
-        for row in rows {
-            let (id, v) = row.map_err(bad)?;
-            if let (Some(i), Some(v)) = (at(id), v.filter(|v| !v.trim().is_empty())) {
-                put(&mut out[i], v.trim().to_string());
-            }
-        }
-        Ok(())
-    };
-    texts(
-        "SELECT c.sig_id, l.value FROM category c JOIN categorylabel l ON l.clb_id = c.clb_id",
-        &mut |s, v| s.categories.push(v),
-    )?;
-    texts("SELECT sig_id, value FROM modulation", &mut |s, v| s.modulations.push(v))?;
-    texts("SELECT sig_id, value FROM mode", &mut |s, v| s.modes.push(v))?;
-    texts("SELECT sig_id, value FROM location", &mut |s, v| s.locations.push(v))?;
-    texts("SELECT sig_id, CAST(value AS TEXT) FROM frequency WHERE value > 0", &mut |s, v| {
-        if let Ok(hz) = v.parse::<u64>() {
-            s.frequencies_hz.push(hz);
-        }
-    })?;
-    texts("SELECT sig_id, CAST(value AS TEXT) FROM bandwidth WHERE value > 0", &mut |s, v| {
-        if let Ok(hz) = v.parse::<u64>() {
-            s.bandwidths_hz.push(hz);
-        }
-    })?;
-    texts("SELECT sig_id, CAST(value AS TEXT) FROM acf WHERE value > 0", &mut |s, v| {
-        if let Ok(ms) = v.parse::<f64>() {
-            s.acf_ms.push(ms);
-        }
-    })?;
-    for s in &mut out {
-        s.frequencies_hz.sort_unstable();
-        s.frequencies_hz.dedup();
-    }
-    Ok(out)
 }
 
 /// The wiki's `ask` result for the unidentified category.
@@ -832,26 +753,6 @@ mod tests {
         let form = o.sigidwiki_form_url();
         assert!(form.contains("Unidentified_Signal%5BModulation%5D=FSK"), "{form}");
         assert!(o.markdown().contains("| Symbol rate | 19600 Bd |"));
-    }
-
-    /// The real release's database, when a copy has been fetched into the
-    /// cache, reads to the count Artemis publishes.
-    #[test]
-    fn the_cached_release_reads_if_present() {
-        let Ok(dir) = Cache::default_dir() else { return };
-        let p = dir.join("artemis-sigid.sqlite");
-        if !p.exists() {
-            eprintln!("skipping: {} not cached", p.display());
-            return;
-        }
-        let v = read_sqlite(&p).unwrap();
-        assert!(v.len() > 500, "{}", v.len());
-        let lora = v.iter().find(|s| s.name == "LoRa").expect("LoRa");
-        assert!(
-            lora.frequencies_hz.contains(&868_000_000)
-                || lora.frequencies_hz.contains(&863_000_000)
-        );
-        assert_eq!(lora.modulations, ["CSS"]);
     }
 }
 

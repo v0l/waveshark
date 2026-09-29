@@ -6,7 +6,7 @@ fn main() {
 
     let mut v = dsp::conv::Viterbi::new(dsp::conv::K7_X_FIRST);
     let mut out = Vec::new();
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     for pair in soft.chunks_exact(2) {
         v.push_step(pair, &mut out);
     }
@@ -20,7 +20,7 @@ fn main() {
 
     let mut v = dsp::conv::Viterbi::new(dsp::conv::K7_X_FIRST);
     let mut out = Vec::new();
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     v.push(&soft, dsp::conv::P_1_2, &mut out);
     let whole = t.elapsed().as_secs_f64();
     println!(
@@ -35,7 +35,7 @@ fn main() {
         ("floats, one at a time", dsp::conv::Viterbi::new(dsp::conv::K7_X_FIRST).only_scalar()),
     ] {
         let mut out = Vec::new();
-        let t = std::time::Instant::now();
+        let t = common::time::Instant::now();
         v.push(&soft, dsp::conv::P_1_2, &mut out);
         let took = t.elapsed().as_secs_f64();
         println!("  {name}: {:.1} Msteps/s", n as f64 / took / 1e6);
@@ -45,7 +45,7 @@ fn main() {
     let mask = [1u8, 1, 1, 0];
     let mut v = dsp::conv::Viterbi::new(dsp::conv::K7_X_FIRST);
     let mut out = Vec::new();
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     v.push(&soft, &mask, &mut out);
     let punctured = t.elapsed().as_secs_f64();
     println!("push punctured {:.1} Msteps/s", out.len() as f64 / punctured / 1e6);

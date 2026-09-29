@@ -10,7 +10,7 @@ fn main() {
         .collect();
     let mut span = dsp::artosyn::Span::new(20e6, center, &[center]).expect("the channel fits");
     let mut out = Vec::new();
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     for b in iq.chunks(200_000) {
         span.process(b, &mut out);
     }

@@ -13,7 +13,7 @@ use crate::radio::{ChanMode, Cmd};
 use crate::row::Reception;
 use crate::waterfall::Waterfall;
 use crate::wheel::Wheel;
-use std::time::Instant;
+use common::time::Instant;
 
 /// A decode, as shown in the packet log.
 pub struct Logged {
@@ -461,7 +461,7 @@ impl ChainState {
     pub fn save_patch(&mut self) {
         self.places = self.edit.pos.iter().map(|(k, p)| (*k, (p.x, p.y))).collect();
         self.edits.save(&self.places);
-        self.saved_at = Some(std::time::Instant::now());
+        self.saved_at = Some(common::time::Instant::now());
     }
 
     /// Write it out again when a stage has been moved and the pointer has
@@ -537,7 +537,7 @@ pub(super) struct LogState {
 /// scrolled to by the time they choose a name.
 #[derive(Default)]
 pub(super) struct SubSave {
-    going: Option<(String, poll_promise::Promise<Option<std::path::PathBuf>>)>,
+    going: Option<poll_promise::Promise<Option<String>>>,
     /// The last file written or the reason none was, for the line under the
     /// button. Kept until the next save, so a path stays readable.
     pub said: Option<String>,
@@ -552,44 +552,38 @@ impl SubSave {
         let start = crate::chain::default_sub_dir();
         let _ = std::fs::create_dir_all(&start);
         let ctx = ctx.clone();
-        self.going = Some((
-            text,
-            poll_promise::Promise::spawn_thread("save sub", move || {
-                let picked = rfd::FileDialog::new()
-                    .set_title("Write this burst as a Flipper .sub file")
-                    .set_directory(&start)
-                    .set_file_name(format!("{stem}.sub"))
-                    .add_filter("Flipper SubGhz", &["sub"])
-                    .save_file();
-                // Nothing is drawing while the dialog is up, so the frame
-                // that reads this has to be asked for.
-                ctx.request_repaint();
-                picked
-            }),
-        ));
+        self.going = Some(crate::task::thread("save sub", move || {
+            let picked = crate::dialog::FileDialog::new()
+                .set_title("Write this burst as a Flipper .sub file")
+                .set_directory(&start)
+                .set_file_name(format!("{stem}.sub"))
+                .add_filter("Flipper SubGhz", &["sub"])
+                .save_file();
+            // Nothing is drawing while the dialog is up, so the frame
+            // that reads this has to be asked for.
+            crate::window::repaint(&ctx);
+            let path = picked?;
+            // The dialog's own name is taken as given except for the suffix: a
+            // file without it is one the Flipper will not list.
+            let path = match path.extension() {
+                Some(e) if e.eq_ignore_ascii_case("sub") => path,
+                _ => path.with_extension("sub"),
+            };
+            Some(match common::fs::blocking::write(&path, text) {
+                Ok(()) => format!("wrote {}", path.display()),
+                Err(e) => format!("could not write {}: {e}", path.display()),
+            })
+        }));
     }
 
     /// Write the file, once the dialog has said where.
     pub fn poll(&mut self) {
-        if self.going.as_ref().is_none_or(|(_, p)| p.ready().is_none()) {
+        if self.going.as_ref().is_none_or(|p| p.ready().is_none()) {
             return;
         }
-        let Some((text, promise)) = self.going.take() else {
-            return;
-        };
-        let Some(path) = promise.block_and_take() else {
-            return;
-        };
-        // The dialog's own name is taken as given except for the suffix: a
-        // file without it is one the Flipper will not list.
-        let path = match path.extension() {
-            Some(e) if e.eq_ignore_ascii_case("sub") => path,
-            _ => path.with_extension("sub"),
-        };
-        self.said = Some(match std::fs::write(&path, text) {
-            Ok(()) => format!("wrote {}", path.display()),
-            Err(e) => format!("could not write {}: {e}", path.display()),
-        });
+        if let Some(said) = self.going.take().and_then(|p| p.block_and_take()) {
+            self.said = Some(said);
+        }
     }
 }
 
@@ -715,8 +709,8 @@ pub struct Locating {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-const LOCATE_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
-const LOCATED_SHOWN_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+const LOCATE_EVERY: common::time::Duration = common::time::Duration::from_secs(5);
+const LOCATED_SHOWN_EVERY: common::time::Duration = common::time::Duration::from_secs(1);
 
 impl Locating {
     pub fn start(path: std::path::PathBuf) -> Self {
@@ -724,7 +718,7 @@ impl Locating {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (out, halt, file) = (found.clone(), stop.clone(), path.clone());
         let threads = std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).clamp(1, 4));
-        let spawned = std::thread::Builder::new().name("locate".into()).spawn(move || {
+        let spawned = common::thread::Builder::new().name("locate".into()).spawn(move || {
             let mut locator = survey::Locator::default();
             let halted = || halt.load(std::sync::atomic::Ordering::Relaxed);
             let mut db = None;
@@ -748,7 +742,7 @@ impl Locating {
                 }
                 let t0 = Instant::now();
                 while t0.elapsed() < LOCATE_EVERY && !halted() {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    std::thread::sleep(common::time::Duration::from_millis(100));
                 }
             }
         });
@@ -989,7 +983,7 @@ pub(super) const RECORDINGS_MAX: usize = 2_000;
 /// a receiver recording every over is not reading its own folder back
 /// continuously, short enough that an over appears while somebody is still
 /// looking for it.
-pub(super) const RECORDINGS_EVERY: std::time::Duration = std::time::Duration::from_secs(3);
+pub(super) const RECORDINGS_EVERY: common::time::Duration = common::time::Duration::from_secs(3);
 
 impl CallsState {
     /// Walk the folder again if it is time to, or if something asked.
@@ -1225,7 +1219,7 @@ pub(super) struct AudioState {
     pub sub_pick: SubPick,
     /// The capture the IQ transmit source replays.
     pub capture_pick: CapturePick,
-    pub heard_at: std::collections::HashMap<u64, (u64, Option<std::time::Instant>)>,
+    pub heard_at: std::collections::HashMap<u64, (u64, Option<common::time::Instant>)>,
     pub unfolded: std::collections::HashSet<u64>,
 }
 
@@ -1268,15 +1262,15 @@ impl SubPick {
             .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
             .unwrap_or_default();
         let ctx = ctx.clone();
-        self.picking = Some(poll_promise::Promise::spawn_thread("open sub", move || {
-            let picked = rfd::FileDialog::new()
+        self.picking = Some(crate::task::thread("open sub", move || {
+            let picked = crate::dialog::FileDialog::new()
                 .set_title("Choose a Flipper .sub file")
                 .set_directory(&start)
                 .add_filter("Flipper SubGhz", &["sub"])
                 .pick_file();
             // Nothing is drawing while the dialog is up, so the frame that
             // reads this has to be asked for.
-            ctx.request_repaint();
+            crate::window::repaint(&ctx);
             picked
         }));
     }
@@ -1313,7 +1307,11 @@ impl SubPick {
 #[derive(Default)]
 pub(super) struct CapturePick {
     pub file: Option<crate::radio::TxCapture>,
-    picking: Option<poll_promise::Promise<Option<std::path::PathBuf>>>,
+    picking: Option<
+        poll_promise::Promise<
+            Option<Result<crate::radio::TxCapture, super::settings::CaptureEdit>>,
+        >,
+    >,
 }
 
 impl CapturePick {
@@ -1324,8 +1322,8 @@ impl CapturePick {
         let start = crate::chain::default_capture_dir();
         let _ = std::fs::create_dir_all(&start);
         let ctx = ctx.clone();
-        self.picking = Some(poll_promise::Promise::spawn_thread("open tx capture", move || {
-            let picked = rfd::FileDialog::new()
+        self.picking = Some(crate::task::thread("open tx capture", move || {
+            let picked = crate::dialog::FileDialog::new()
                 .set_title("Choose a capture to transmit")
                 .set_directory(&start)
                 .add_filter(
@@ -1333,26 +1331,32 @@ impl CapturePick {
                     &["cu8", "cs8", "cs16", "cf32", "data", "sigmf-meta", "sigmf-data", "sigmf"],
                 )
                 .pick_file();
-            ctx.request_repaint();
-            picked
+            crate::window::repaint(&ctx);
+            let path = picked?;
+            Some(
+                crate::radio::TxCapture::open(&path)
+                    .ok_or_else(|| super::settings::CaptureEdit::new(path, true)),
+            )
         }));
     }
 
-    /// The file the dialog came back with, where its name does not say enough
-    /// to send it: the caller opens the card that asks. Nothing is returned
-    /// for a name in the convention, which needs no asking.
-    pub fn poll(&mut self, cmds: &mut Vec<crate::radio::Cmd>) -> Option<std::path::PathBuf> {
+    /// The card to open, where the file's name does not say enough to send
+    /// it. Nothing is returned for a name in the convention, which needs no
+    /// asking.
+    pub fn poll(
+        &mut self,
+        cmds: &mut Vec<crate::radio::Cmd>,
+    ) -> Option<super::settings::CaptureEdit> {
         if self.picking.as_ref().is_none_or(|p| p.ready().is_none()) {
             return None;
         }
-        let path = self.picking.take().and_then(|p| p.block_and_take())?;
-        match crate::radio::TxCapture::open(&path) {
-            Some(c) => {
+        match self.picking.take().and_then(|p| p.block_and_take())? {
+            Ok(c) => {
                 self.file = Some(c.clone());
                 cmds.push(crate::radio::Cmd::TxCapture(Some(c)));
                 None
             }
-            None => Some(path),
+            Err(edit) => Some(edit),
         }
     }
 }
@@ -1409,8 +1413,8 @@ impl FilePick {
         self.going = Some((
             node,
             param.to_string(),
-            poll_promise::Promise::spawn_thread("open file", move || {
-                let picked = rfd::FileDialog::new()
+            crate::task::thread("open file", move || {
+                let picked = crate::dialog::FileDialog::new()
                     .set_title(&title)
                     .set_directory(&start)
                     .add_filter(
@@ -1421,7 +1425,7 @@ impl FilePick {
                     .pick_file();
                 // Nothing is drawing while the dialog is up, so the frame
                 // that reads this has to be asked for.
-                ctx.request_repaint();
+                crate::window::repaint(&ctx);
                 picked
             }),
         ));

@@ -13,8 +13,8 @@
 //! which is exactly the sort of failure that costs an afternoon.
 
 use common::device::{Device, DeviceInfo, DriverKind, GainMode, RxStream, TunerRange};
+use common::fs::blocking::File;
 use common::{Error, Hz, IqBuf, Result, SampleFormat, Sps};
-use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -190,12 +190,7 @@ impl FileSource {
     }
 
     fn open_inner(path: PathBuf, given: FileMeta, given_wins: bool) -> Result<Self> {
-        if !path.exists() {
-            return Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("{}", path.display()),
-            )));
-        }
+        common::fs::blocking::metadata(&path).map_err(Error::Io)?;
         let located = crate::sigmf::locate(&path)?;
         let named = located.meta;
         let meta = match given_wins {
@@ -291,8 +286,8 @@ impl FileSource {
         Ok((self.bytes.end - self.bytes.start) / self.format.bytes_per_sample() as u64)
     }
 
-    pub fn duration(&self) -> Result<std::time::Duration> {
-        Ok(std::time::Duration::from_secs_f64(self.sample_count()? as f64 / self.rate.as_f64()))
+    pub fn duration(&self) -> Result<common::time::Duration> {
+        Ok(common::time::Duration::from_secs_f64(self.sample_count()? as f64 / self.rate.as_f64()))
     }
 
     /// Read the whole file into memory. Convenient for tests; a multi-gigabyte
@@ -352,7 +347,7 @@ impl Device for FileSource {
             realtime: self.realtime,
             raw: vec![0u8; self.block * self.format.bytes_per_sample()],
             seq: 0,
-            start: std::time::Instant::now(),
+            start: common::time::Instant::now(),
             done: false,
         }))
     }
@@ -371,7 +366,7 @@ struct FileStream {
     realtime: bool,
     raw: Vec<u8>,
     seq: u64,
-    start: std::time::Instant,
+    start: common::time::Instant,
     done: bool,
 }
 
@@ -404,7 +399,7 @@ impl RxStream for FileStream {
                 self.reader.seek(SeekFrom::Start(self.bytes.start))?;
                 self.at = self.bytes.start;
                 self.seq = 0;
-                self.start = std::time::Instant::now();
+                self.start = common::time::Instant::now();
                 return self.read();
             }
             self.done = true;
@@ -416,7 +411,7 @@ impl RxStream for FileStream {
         self.format.convert(&self.raw[..usable], &mut samples);
 
         if self.realtime {
-            let want = std::time::Duration::from_secs_f64(self.seq as f64 / self.rate.as_f64());
+            let want = common::time::Duration::from_secs_f64(self.seq as f64 / self.rate.as_f64());
             let elapsed = self.start.elapsed();
             if want > elapsed {
                 std::thread::sleep(want - elapsed);
@@ -472,7 +467,7 @@ mod tests {
 
     #[test]
     fn missing_rate_is_an_actionable_error() {
-        let dir = std::env::temp_dir().join("sr_file_test");
+        let dir = common::platform::scratch_dir().join("sr_file_test");
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("mystery.cu8");
         std::fs::write(&p, [0u8; 16]).unwrap();
@@ -485,7 +480,7 @@ mod tests {
     /// the caller says about it has to be enough on its own.
     #[test]
     fn a_described_capture_opens_on_what_it_was_told() {
-        let dir = std::env::temp_dir().join("sr_file_described");
+        let dir = common::platform::scratch_dir().join("sr_file_described");
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("someone elses recording.iq");
         std::fs::write(&p, [0u8; 4096]).unwrap();

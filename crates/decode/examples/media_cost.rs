@@ -24,13 +24,13 @@ fn main() {
     let ts = std::fs::read(&path).expect("readable");
     let block = 188 * 64;
     let blocks = ts.len().div_ceil(block);
-    let per_block = std::time::Duration::from_secs_f64(seconds / blocks as f64);
+    let per_block = common::time::Duration::from_secs_f64(seconds / blocks as f64);
 
     let mut media = Media::decoding(decoding);
     let mut out = Vec::new();
     let mut pictures = 0usize;
     let cpu = cpu_seconds();
-    let start = std::time::Instant::now();
+    let start = common::time::Instant::now();
     for (i, b) in ts.chunks(block).enumerate() {
         media.push(b);
         media.take(&mut out);

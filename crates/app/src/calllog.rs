@@ -118,7 +118,7 @@ const FORMAT: Format = Format {
     version: VERSION,
     segment_bytes: 32 << 20,
     buf_bytes: 64 << 10,
-    flush_every: std::time::Duration::from_millis(500),
+    flush_every: common::time::Duration::from_millis(500),
 };
 
 /// What the recorder is doing, for the pane that offers its switch.
@@ -186,7 +186,7 @@ impl Call {
 pub fn calls_dir() -> PathBuf {
     crate::wspkt::PacketLog::default_dir()
         .map(|d| d.with_file_name("calls"))
-        .unwrap_or_else(|| std::env::temp_dir().join("waveshark-calls"))
+        .unwrap_or_else(|| common::platform::scratch_dir().join("waveshark-calls"))
 }
 
 /// The folder's files, for a receiver with no log open to ask.
@@ -279,7 +279,7 @@ fn encode_record(c: &Call) -> Vec<u8> {
 /// writer and is tested against it. A truncated final record, which is what a
 /// receiver killed mid-write leaves, ends the iteration rather than failing.
 pub fn read(path: impl AsRef<std::path::Path>) -> std::io::Result<Vec<Call>> {
-    Ok(parse(&std::fs::read(path)?))
+    Ok(parse(&common::fs::blocking::read(path)?))
 }
 
 pub fn parse(buf: &[u8]) -> Vec<Call> {
@@ -359,13 +359,13 @@ pub struct Entry {
 /// holding a week of a busy talkgroup costs a few hundred kilobytes to list
 /// rather than the gigabyte it is.
 pub fn browse(dir: &std::path::Path, most: usize) -> Vec<Entry> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Ok(entries) = common::fs::blocking::read_dir(dir) else {
         return Vec::new();
     };
     // Named for the day they hold, so the newest file is the last name.
     let mut files: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
+        .iter()
+        .map(|e| e.path().to_path_buf())
         .filter(|p| p.extension().is_some_and(|x| x == EXT))
         .collect();
     files.sort();
@@ -385,7 +385,7 @@ pub fn browse(dir: &std::path::Path, most: usize) -> Vec<Entry> {
 pub fn headers(path: &std::path::Path) -> Vec<Entry> {
     use std::io::{Read, Seek, SeekFrom};
     let mut out = Vec::new();
-    let Ok(mut f) = std::fs::File::open(path) else {
+    let Ok(mut f) = common::fs::blocking::File::open(path) else {
         return out;
     };
     let mut head = [0u8; MAGIC.len() + 2];
@@ -420,7 +420,7 @@ pub fn headers(path: &std::path::Path) -> Vec<Entry> {
     out
 }
 
-fn read_upto(f: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
+fn read_upto(f: &mut common::fs::blocking::File, buf: &mut [u8]) -> std::io::Result<usize> {
     use std::io::Read;
     let mut got = 0;
     while got < buf.len() {
@@ -435,7 +435,7 @@ fn read_upto(f: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
 /// The speech of one listed call, read from the file it is in.
 pub fn speech_of(e: &Entry) -> Option<common::Speech> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(&e.file).ok()?;
+    let mut f = common::fs::blocking::File::open(&e.file).ok()?;
     f.seek(SeekFrom::Start(e.at)).ok()?;
     let mut buf = vec![0u8; e.len as usize];
     f.read_exact(&mut buf).ok()?;
@@ -494,7 +494,7 @@ pub fn decode(packets: &[Vec<u8>]) -> Option<common::Speech> {
 /// One over with its audio, as it is stored: Opus packets, not samples.
 pub fn call_of(e: &Entry) -> Option<Call> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(&e.file).ok()?;
+    let mut f = common::fs::blocking::File::open(&e.file).ok()?;
     f.seek(SeekFrom::Start(e.at)).ok()?;
     let mut buf = vec![0u8; e.len as usize];
     f.read_exact(&mut buf).ok()?;
@@ -609,7 +609,7 @@ pub fn stem(c: &Call, k: Option<usize>) -> String {
 /// The packets are copied rather than decoded: what comes out is the audio
 /// that was encoded off the air, not a second generation of it.
 pub fn export(entries: &[Entry], dir: &std::path::Path) -> std::io::Result<(usize, usize)> {
-    std::fs::create_dir_all(dir)?;
+    common::fs::blocking::create_dir_all(dir)?;
     let mut order: Vec<&Entry> = entries.iter().collect();
     order.sort_by_key(|e| e.call.at_us);
     let (mut done, mut failed) = (0, 0);
@@ -987,8 +987,8 @@ impl Drop for CallLogNode {
 }
 
 fn now_us() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    common::time::SystemTime::now()
+        .duration_since(common::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
         .unwrap_or(0)
 }
@@ -1019,7 +1019,8 @@ mod tests {
     use pipeline::node::Node;
 
     fn dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("sr-calllog-{name}-{}", std::process::id()));
+        let d = common::platform::scratch_dir()
+            .join(format!("sr-calllog-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
     }

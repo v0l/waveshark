@@ -194,7 +194,7 @@ impl MapView {
         ui: &mut egui::Ui,
         height: f32,
         fallback: Option<(f64, f64)>,
-        rt: &tokio::runtime::Handle,
+        rt: &crate::task::Spawner,
         layers: &mut [&mut dyn Layer],
     ) -> Drawn {
         let w = ui.available_width();
@@ -504,7 +504,7 @@ impl MapView {
         center: (f64, f64),
         z: u8,
         scale: f64,
-        rt: &tokio::runtime::Handle,
+        rt: &crate::task::Spawner,
     ) {
         let (cx, cy) = center;
         let mid = rect.center();

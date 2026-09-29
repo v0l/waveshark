@@ -1,10 +1,10 @@
 use common::C32;
+use common::time::Instant;
 use decode::bits::bch::Bch;
 use decode::bits::ldpc::{Ldpc, Workspace};
 use decode::dvbs2::{Fec, Outcome, deinterleave};
 use dsp::dvbs2::acquire::estimate_within;
 use dsp::dvbs2::{Config, Dvbs2};
-use std::time::Instant;
 
 fn main() {
     let name = std::env::args().nth(1).unwrap_or("dvbs2_bbc_hd_1097M_40000k.cs8".into());

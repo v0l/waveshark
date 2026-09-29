@@ -149,7 +149,7 @@ fn a_block_the_radio_refuses_does_not_stop_the_graph() {
     if let Some(n) = g.node_mut(id)
         && let Some(tx) = n.as_any_mut().downcast_mut::<TxSinkNode>()
     {
-        tx.finish(std::time::Duration::from_millis(10));
+        tx.finish(common::time::Duration::from_millis(10));
     }
     transmit(&mut g, 2);
 }

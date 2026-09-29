@@ -52,7 +52,7 @@ fn worker() -> Option<&'static Sender<Job>> {
     WORKER
         .get_or_init(|| {
             let (tx, rx) = channel::<Job>();
-            std::thread::Builder::new()
+            common::thread::Builder::new()
                 .name("tetra-crypto".into())
                 .spawn(move || {
                     let mut tea1: Option<GpuSearch> = None;
@@ -712,7 +712,9 @@ mod tests {
         // Poll as the UI loop would, until the background thread answers.
         loop {
             match promise.poll() {
-                std::task::Poll::Pending => std::thread::sleep(std::time::Duration::from_millis(2)),
+                std::task::Poll::Pending => {
+                    std::thread::sleep(common::time::Duration::from_millis(2))
+                }
                 std::task::Poll::Ready(&(found, got)) => {
                     assert!(found, "worker says no adapter");
                     assert_eq!(got, Some(0x111));
@@ -740,7 +742,7 @@ mod tests {
         let span: u64 =
             std::env::var("SPAN").map(|v| 1u64 << v.parse::<u32>().unwrap()).unwrap_or(1 << 28);
         let chunk: u32 = 1 << 21;
-        let t = std::time::Instant::now();
+        let t = common::time::Instant::now();
         let got = gpu.search(&frames, span..span * 2, chunk);
         let dt = t.elapsed();
         assert_eq!(got, None, "64-bit constraint leaves no chance survivor");

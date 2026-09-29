@@ -23,8 +23,8 @@
 //! modem's own business.
 
 use crate::source::Transport;
+use common::time::{Duration, Instant};
 use std::io::{Read, Write};
-use std::time::{Duration, Instant};
 
 const SOF: [u8; 2] = [0xA5, 0x5A];
 /// `PROTO_MAX_VALUE`. A frame claiming more than this is a resync artefact,
@@ -287,7 +287,7 @@ pub fn probe(path: &str, baud: u32, timeout: Duration) -> std::io::Result<Info> 
             format!("{path} is open in another process"),
         ));
     }
-    let mut port = crate::source::open_port(path, baud, Duration::from_millis(200))?;
+    let mut port = crate::serial::open_port(path, baud, Duration::from_millis(200))?;
     let mut frames = Frames::new();
     let mut buf = [0u8; 512];
     let deadline = Instant::now() + timeout;
@@ -344,27 +344,7 @@ pub const PROBE: Duration = Duration::from_secs(2);
 /// header, so the on-board UARTs are left alone: opening `/dev/ttyS0` on a
 /// machine with a serial console attached is not a free question.
 pub fn candidates() -> Vec<String> {
-    #[cfg(unix)]
-    {
-        let keep = ["ttyACM", "ttyUSB", "cu.usbmodem", "cu.usbserial", "cu.wchusbserial"];
-        let mut found: Vec<String> = std::fs::read_dir("/dev")
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|e| {
-                let name = e.file_name().to_string_lossy().to_string();
-                keep.iter().any(|p| name.starts_with(p)).then(|| format!("/dev/{name}"))
-            })
-            .collect();
-        found.sort();
-        found
-    }
-    #[cfg(windows)]
-    {
-        // Windows has no directory of ports, and an absent COM port fails to
-        // open immediately, so the first thirty-two are simply tried.
-        (1..=32).map(|n| format!("COM{n}")).collect()
-    }
+    crate::serial::candidates()
 }
 
 /// Look for modems on every USB serial port, in parallel.
@@ -378,7 +358,7 @@ pub fn discover() -> Vec<Found> {
     let ports = candidates();
     for path in ports.iter().cloned() {
         let tx = tx.clone();
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             let found = match probe(&path, BAUD, PROBE) {
                 Ok(info) => {
                     tracing::info!("modem on {path}: {}", info.summary());
@@ -479,15 +459,15 @@ mod tests {
     fn a_port_held_by_a_reader_is_not_taken_twice() {
         let _alone = FORKS.lock().unwrap_or_else(|e| e.into_inner());
         let (_master, slave) = pty();
-        let held = crate::source::open_port(&slave, BAUD, Duration::from_millis(200))
+        let held = crate::serial::open_port(&slave, BAUD, Duration::from_millis(200))
             .expect("the first open");
         assert_eq!(ospeed(&slave), libc::B115200);
-        let e = crate::source::open_port(&slave, BAUD, Duration::from_millis(200))
+        let e = crate::serial::open_port(&slave, BAUD, Duration::from_millis(200))
             .err()
             .expect("the second open to fail");
         assert_eq!(e.kind(), std::io::ErrorKind::ResourceBusy);
         drop(held);
-        assert!(crate::source::open_port(&slave, BAUD, Duration::from_millis(200)).is_ok());
+        assert!(crate::serial::open_port(&slave, BAUD, Duration::from_millis(200)).is_ok());
     }
 
     #[cfg(target_os = "linux")]

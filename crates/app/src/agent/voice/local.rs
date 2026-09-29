@@ -50,7 +50,16 @@ pub fn speak(config: &Config, text: &str) -> Result<Said, String> {
         // somebody's home connection and a silent wait of that length cannot
         // be told from a fetch that has hung.
         let files = tts::Files::ensure(&dir, &name, &mut |f| {
-            super::fetching(&f.file, f.done, f.total, f.files_done, f.files)
+            super::report(|h| {
+                h.state = crate::transcripts::ModelState::Fetching;
+                h.fetch = crate::transcripts::Fetch {
+                    file: f.file.clone(),
+                    done: f.done,
+                    total: f.total,
+                    files_done: f.files_done,
+                    files: f.files,
+                };
+            })
         })
         .map_err(|e| fault(e.to_string()))?;
         super::report(|h| h.state = crate::transcripts::ModelState::Loading);
@@ -70,7 +79,7 @@ pub fn speak(config: &Config, text: &str) -> Result<Said, String> {
         *slot = Some(Held { engine, name, dir, device });
     }
     let held = slot.as_mut().expect("just loaded");
-    let at = std::time::Instant::now();
+    let at = common::time::Instant::now();
     let samples = held
         .engine
         .say(text, crate::agent::channel::MAX_OVER_S)

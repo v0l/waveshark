@@ -27,6 +27,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
+#[cfg(feature = "feeds")]
+#[path = "feed_nodes/tcp.rs"]
+mod link;
+#[cfg(not(feature = "feeds"))]
+#[path = "feed_nodes/tcp_offline.rs"]
+mod link;
+
 /// One wire format, as a table entry.
 ///
 /// A feed is a name, a port, a band and a function that turns bytes off a
@@ -145,7 +152,7 @@ pub struct FeedNode {
     rx: Receiver<Packet>,
     state: Arc<FeedState>,
     stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    thread: Option<common::thread::JoinHandle<()>>,
 }
 
 impl FeedNode {
@@ -155,7 +162,7 @@ impl FeedNode {
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
             let (spec, state, stop) = (spec.clone(), state.clone(), stop.clone());
-            std::thread::Builder::new()
+            common::thread::Builder::new()
                 .name(format!("feed-{}", spec.address()))
                 .spawn(move || run(spec, tx, state, stop))
                 .ok()
@@ -230,13 +237,13 @@ impl Node for FeedNode {
 }
 
 fn run(spec: FeedSpec, tx: Sender<Packet>, state: Arc<FeedState>, stop: Arc<AtomicBool>) {
-    let mut backoff = std::time::Duration::from_millis(500);
+    let mut backoff = common::time::Duration::from_millis(500);
     while !stop.load(Ordering::Relaxed) {
-        match connect(&spec) {
+        match link::connect(&spec) {
             Ok(sock) => {
                 set_error(&state, None);
                 state.connected.store(true, Ordering::Relaxed);
-                backoff = std::time::Duration::from_millis(500);
+                backoff = common::time::Duration::from_millis(500);
                 read_loop(&spec, sock, &tx, &state, &stop);
                 state.connected.store(false, Ordering::Relaxed);
             }
@@ -247,34 +254,20 @@ fn run(spec: FeedSpec, tx: Sender<Packet>, state: Arc<FeedState>, stop: Arc<Atom
         }
         // Backing off rather than hammering: a feed that is down is usually
         // down for as long as it takes someone to notice.
-        let deadline = std::time::Instant::now() + backoff;
-        while std::time::Instant::now() < deadline {
+        let deadline = common::time::Instant::now() + backoff;
+        while common::time::Instant::now() < deadline {
             if stop.load(Ordering::Relaxed) {
                 return;
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(common::time::Duration::from_millis(50));
         }
-        backoff = (backoff * 2).min(std::time::Duration::from_secs(15));
+        backoff = (backoff * 2).min(common::time::Duration::from_secs(15));
     }
-}
-
-fn connect(spec: &FeedSpec) -> std::io::Result<std::net::TcpStream> {
-    use std::net::ToSocketAddrs;
-    let addr = spec
-        .address()
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| std::io::Error::other("no address"))?;
-    let sock = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(5))?;
-    // A feed goes quiet at night; a read timeout is how the thread notices it
-    // has been asked to stop rather than blocking until a frame arrives.
-    sock.set_read_timeout(Some(std::time::Duration::from_secs(1)))?;
-    Ok(sock)
 }
 
 fn read_loop(
     spec: &FeedSpec,
-    mut sock: std::net::TcpStream,
+    mut sock: impl Read,
     tx: &Sender<Packet>,
     state: &FeedState,
     stop: &AtomicBool,
@@ -337,8 +330,8 @@ fn set_error(state: &FeedState, msg: Option<String>) {
 }
 
 fn now_us() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    common::time::SystemTime::now()
+        .duration_since(common::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
         .unwrap_or(0)
 }
@@ -644,39 +637,5 @@ mod tests {
         node.process(&[], &mut out, &mut ctx).unwrap();
         assert!(out[0].as_packets().unwrap().is_empty());
         assert!(!node.connected());
-    }
-
-    #[test]
-    fn a_feed_delivers_what_a_socket_sends_it() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        std::thread::spawn(move || {
-            use std::io::Write;
-            let (mut s, _) = listener.accept().unwrap();
-            for _ in 0..3 {
-                let _ = s.write_all(&beast_message(&LONG, 200, 0).unwrap());
-            }
-            let _ = s.flush();
-            std::thread::sleep(std::time::Duration::from_millis(300));
-        });
-
-        let mut node = FeedNode::new(FeedSpec::new("127.0.0.1", port, &BEAST));
-        node.negotiate(&[]).unwrap();
-        let mut got = Vec::new();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while got.len() < 3 && std::time::Instant::now() < deadline {
-            let mut out = vec![Payload::Packets(Vec::new())];
-            let mut events = Vec::new();
-            let tags = Vec::new();
-            let mut new_tags = Vec::new();
-            let mut ctx = NodeCtx::new(0, &[], &tags, &mut events, &mut new_tags);
-            node.process(&[], &mut out, &mut ctx).unwrap();
-            got.extend(out[0].as_packets().unwrap().iter().cloned());
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert_eq!(got.len(), 3, "three frames sent, {} arrived", got.len());
-        assert_eq!(got[0].bytes(), &LONG);
-        assert_eq!(got[0].center_hz(), 1_090_000_000);
-        assert_eq!(node.frames(), 3);
     }
 }

@@ -49,7 +49,7 @@ const QUEUE_MAX: usize = 64;
 
 /// One request at a time with a gap between them: this is somebody else's
 /// server, and a map being panned must not become a flood.
-const GAP: std::time::Duration = std::time::Duration::from_millis(250);
+const GAP: common::time::Duration = common::time::Duration::from_millis(250);
 
 pub fn set_lookup(on: bool) {
     ON.store(on, Ordering::Relaxed);
@@ -101,7 +101,7 @@ pub fn start() {
     if STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
-    let _ = std::thread::Builder::new().name("beacondb-lookup".into()).spawn(run);
+    let _ = common::thread::Builder::new().name("beacondb-lookup".into()).spawn(run);
 }
 
 fn run() {

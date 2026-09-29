@@ -5,12 +5,12 @@ use common::device::{
     Choice, Device as DeviceTrait, DeviceInfo, DriverKind, GainMode, GainStage, RxStream,
     TunerRange, TxInfo, TxStream,
 };
+use common::time::Duration;
 use common::{C32, Error, Hz, IqBuf, Result, SampleFormat, Sps};
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
 
 const PHY: &str = "ad9361-phy";
 const ADC: &str = "cf-ad9361-lpc";
@@ -179,6 +179,7 @@ impl Attached {
     }
 }
 
+#[cfg(feature = "usb")]
 pub fn attached() -> Vec<Attached> {
     use nusb::MaybeFuture;
     let Ok(devices) = nusb::list_devices().wait() else { return Vec::new() };
@@ -510,7 +511,7 @@ impl DeviceTrait for Pluto {
         };
         let streaming = self.streaming.clone();
         let addr = self.addr.clone();
-        let join = std::thread::Builder::new()
+        let join = common::thread::Builder::new()
             .name("pluto-rx".into())
             .spawn(move || {
                 if let Err(e) = pump.run() {
@@ -654,7 +655,7 @@ struct Stream {
     dropped: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     sock: Option<std::net::TcpStream>,
-    join: Option<std::thread::JoinHandle<()>>,
+    join: Option<common::thread::JoinHandle<()>>,
 }
 
 impl RxStream for Stream {
@@ -752,6 +753,22 @@ impl Drop for Transmit {
             let _ = self.flush();
         }
         self.stop();
+    }
+}
+
+pub(crate) struct Remote;
+
+impl crate::Protocol for Remote {
+    fn proto(&self) -> Proto {
+        Proto::Pluto
+    }
+
+    fn probe(&self, addr: &str) -> Result<Probe> {
+        probe(addr)
+    }
+
+    fn open(&self, addr: &str) -> Result<Box<dyn common::Device>> {
+        Ok(Box::new(Pluto::open(addr, common::device::DriverKind::Network)?))
     }
 }
 

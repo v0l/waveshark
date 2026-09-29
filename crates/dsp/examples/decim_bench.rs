@@ -4,8 +4,8 @@
 //! `cargo run --release -p dsp --example decim_bench`
 
 use common::C32;
+use common::time::Instant;
 use dsp::fir::FirDecim;
-use std::time::Instant;
 
 fn main() {
     let rate = 40_000_000.0;

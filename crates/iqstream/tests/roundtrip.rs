@@ -1,10 +1,10 @@
 //! Both ends of the protocol against each other: a server on a free port, a
 //! client subscribing to it, and the samples arriving as they were pushed.
 
+use common::time::Duration;
 use iqstream::proto::Codec;
 use iqstream::{ClientConfig, IqStream, Server, ServerConfig, Stream, StreamConfig};
 use std::sync::Arc;
-use std::time::Duration;
 
 fn tuner(name: &str, center_hz: u64, tunable: bool) -> StreamConfig {
     StreamConfig {

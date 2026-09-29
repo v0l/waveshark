@@ -5,8 +5,8 @@
 //! the fraction of real time, because a Raspberry Pi 4 has one core to give
 //! it.
 use common::C32;
+use common::time::Instant;
 use dsp::{ModeSConfig, ModeSDetector, ModeSFrame};
-use std::time::Instant;
 
 fn noise(n: usize) -> Vec<C32> {
     let mut s = 0x2545_f491u32;

@@ -10,10 +10,15 @@
 //! to the room all the time, which is not a thing to do quietly.
 
 use crate::AudioError;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, SampleFormat, StreamConfig};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "capture/native.rs"]
+mod input;
+#[cfg(target_arch = "wasm32")]
+#[path = "capture/web.rs"]
+mod input;
 
 /// Seconds of audio the ring holds.
 ///
@@ -66,113 +71,67 @@ struct Ring {
 ///
 /// Dropping it closes the device, which is how a transmission ends.
 pub struct AudioCapture {
-    /// The cpal stream, alive for as long as this is.
-    _stream: cpal::Stream,
+    _input: input::Input,
     shared: Arc<Shared>,
     device_name: String,
 }
 
-struct Shared {
+pub(crate) struct Shared {
     ring: Mutex<Ring>,
     rate: f64,
     overruns: AtomicU64,
+}
+
+impl Shared {
+    pub(crate) fn new(rate: f64) -> Arc<Self> {
+        let cap = (rate * RING_SECONDS) as usize;
+        Arc::new(Shared {
+            ring: Mutex::new(Ring {
+                buf: std::collections::VecDeque::with_capacity(cap),
+                cap,
+                base: 0,
+            }),
+            rate,
+            overruns: AtomicU64::new(0),
+        })
+    }
+
+    pub(crate) fn push(&self, input: &[f32], channels: usize) {
+        let Ok(mut ring) = self.ring.lock() else { return };
+        for frame in input.chunks(channels.max(1)) {
+            // Down to mono by averaging: a stereo headset with a
+            // dead right channel would otherwise transmit at half
+            // level, and nothing on this path is stereo.
+            let v = frame.iter().sum::<f32>() / frame.len() as f32;
+            if ring.buf.len() == ring.cap {
+                ring.buf.pop_front();
+                ring.base += 1;
+            }
+            ring.buf.push_back(v);
+        }
+    }
 }
 
 impl AudioCapture {
     /// Open the default input at the rate asked for, or at whatever the
     /// device does if it will not do that one.
     pub fn open(want_rate: u32) -> Result<Self, AudioError> {
-        let host = cpal::default_host();
-        let device = host.default_input_device().ok_or(AudioError::NoDevice)?;
-        Self::open_on(device, want_rate)
+        Self::opened(input::open(None, want_rate)?)
     }
 
     /// Microphones this machine has, without ALSA's plugin aliases.
     pub fn devices() -> Vec<String> {
-        let host = cpal::default_host();
-        let mut seen = std::collections::BTreeSet::new();
-        host.input_devices()
-            .map(|it| {
-                it.map(|d| d.to_string())
-                    .filter(|n| seen.insert(n.clone()) && is_real_device(n))
-                    .collect()
-            })
-            .unwrap_or_default()
+        input::devices()
     }
 
     pub fn open_named(needle: &str, want_rate: u32) -> Result<Self, AudioError> {
-        let host = cpal::default_host();
-        let needle = needle.to_lowercase();
-        let device = host
-            .input_devices()
-            .map_err(|e| AudioError::Cpal(e.to_string()))?
-            .find(|d| d.to_string().to_lowercase().contains(&needle))
-            .ok_or(AudioError::NoDevice)?;
-        Self::open_on(device, want_rate)
+        Self::opened(input::open(Some(needle.to_lowercase()), want_rate)?)
     }
 
-    fn open_on(device: Device, want_rate: u32) -> Result<Self, AudioError> {
-        let device_name = device.to_string();
-        let default = device.default_input_config().map_err(|e| AudioError::Cpal(e.to_string()))?;
-
-        let supports_want = device
-            .supported_input_configs()
-            .map(|it| {
-                it.filter(|c| c.sample_format() == SampleFormat::F32)
-                    .any(|c| c.min_sample_rate() <= want_rate && want_rate <= c.max_sample_rate())
-            })
-            .unwrap_or(false);
-        if default.sample_format() != SampleFormat::F32 && !supports_want {
-            return Err(AudioError::NoFormat);
-        }
-        let (rate, channels) = match supports_want {
-            true => (want_rate, default.channels().min(2)),
-            false => (default.sample_rate(), default.channels().min(2)),
-        };
-
-        let shared = Arc::new(Shared {
-            ring: Mutex::new(Ring {
-                buf: std::collections::VecDeque::with_capacity(
-                    (rate as f64 * RING_SECONDS) as usize,
-                ),
-                cap: (rate as f64 * RING_SECONDS) as usize,
-                base: 0,
-            }),
-            rate: rate as f64,
-            overruns: AtomicU64::new(0),
-        });
-
-        let cb = shared.clone();
-        let ch = channels as usize;
-        let stream = device
-            .build_input_stream(
-                StreamConfig {
-                    channels,
-                    sample_rate: rate,
-                    buffer_size: cpal::BufferSize::Default,
-                },
-                move |input: &[f32], _| {
-                    let Ok(mut ring) = cb.ring.lock() else { return };
-                    for frame in input.chunks(ch) {
-                        // Down to mono by averaging: a stereo headset with a
-                        // dead right channel would otherwise transmit at half
-                        // level, and nothing on this path is stereo.
-                        let v = frame.iter().sum::<f32>() / ch as f32;
-                        if ring.buf.len() == ring.cap {
-                            ring.buf.pop_front();
-                            ring.base += 1;
-                        }
-                        ring.buf.push_back(v);
-                    }
-                },
-                |e| tracing::warn!("microphone stream error: {e}"),
-                None,
-            )
-            .map_err(|e| AudioError::Cpal(e.to_string()))?;
-        stream.play().map_err(|e| AudioError::Cpal(e.to_string()))?;
-
-        tracing::info!("microphone open: {device_name} at {rate} Hz, {channels} channels");
-        Ok(Self { _stream: stream, shared, device_name })
+    fn opened(
+        (input, shared, device_name): (input::Input, Arc<Shared>, String),
+    ) -> Result<Self, AudioError> {
+        Ok(Self { _input: input, shared, device_name })
     }
 
     pub fn device_name(&self) -> &str {
@@ -380,6 +339,8 @@ pub(crate) fn is_real_device(name: &str) -> bool {
         "Direct sample",
         "Direct hardware device without any conversions",
         "Hardware device with all software conversions",
+        "Default ALSA Output",
+        "Default Device",
     ];
     !PLUGINS.iter().any(|p| name.contains(p))
 }
@@ -405,6 +366,7 @@ mod tests {
             "HD-Audio Generic, ALC1220 Analog",
             "Scarlett 2i2 USB, USB Audio",
             "Scarlett 2i2 USB",
+            "Default Device",
         ];
         let kept: Vec<&str> = reported.into_iter().filter(|n| is_real_device(n)).collect();
         assert_eq!(
@@ -412,7 +374,6 @@ mod tests {
             [
                 "PipeWire Sound Server",
                 "PulseAudio Sound Server",
-                "Default ALSA Output (currently PipeWire Media Server)",
                 "HD-Audio Generic, ALC1220 Analog",
                 "Scarlett 2i2 USB, USB Audio",
                 "Scarlett 2i2 USB",

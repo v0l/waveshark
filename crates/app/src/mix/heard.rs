@@ -35,8 +35,8 @@ pub struct LiveCall {
     /// The coded squelch the traffic is using, where the channel has one:
     /// "141.3" for a CTCSS tone, "D023" for a DCS code.
     pub code: Option<String>,
-    pub first: std::time::Instant,
-    pub last: std::time::Instant,
+    pub first: common::time::Instant,
+    pub last: common::time::Instant,
     /// Seconds somebody was actually talking, not the span of the call.
     pub seconds: f64,
     pub peak: f32,
@@ -149,7 +149,7 @@ impl HeardNode {
         *m = m.max(peak);
         self.peak = self.peak.max(peak);
         let talking = peak > SPEECH_FLOOR || stated.is_some();
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         // An over whose labels fill in part way through is the same over.
         // Analogue identity arrives late by nature: a PTT-ID is tones that
         // take half a second to settle, a coded squelch tone needs half a

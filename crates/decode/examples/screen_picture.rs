@@ -31,7 +31,7 @@ fn main() {
         println!("forced {}", m.label());
     }
     let mut last = None;
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     for block in iq.chunks(131_072) {
         if let Some(p) = reader.push(block).picture {
             last = Some(p);

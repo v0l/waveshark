@@ -105,7 +105,7 @@ That build has everything, including two decoders the published binaries do
 not carry:
 
 ```sh
-cargo run --release -p app --no-default-features --features limesdr,stt,cuda,mcp
+cargo run --release -p app --no-default-features --features native,limesdr,stt,cuda,mcp
 ```
 
 is what the release workflow runs, and it leaves out `tea` and `ambe`. `tea`

@@ -9,11 +9,10 @@ use crate::error::{Error, Result};
 use crate::gains;
 use crate::r82xx::{self, Board, Chip, R82xx};
 use crate::transport::{self, Transport};
-use nusb::MaybeFuture;
-use nusb::transfer::{Bulk, In};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use usbio::transfer::{Bulk, In};
 
 pub const RX_ENDPOINT: u8 = 0x81;
 /// Librtlsdr's transfer size, about 3.4 ms a buffer at 2.4 MS/s
@@ -106,14 +105,15 @@ const VID_REALTEK: u16 = 0x0bda;
 
 /// Identifies a dongle without opening it. Most RTL2832U dongles carry a
 /// Realtek VID, and the Blog V4 carries its own.
+pub const USB_IDS: &[(u16, u16)] =
+    &[(VID_REALTEK, 0x2832), (VID_REALTEK, 0x2838), (0x1d50, 0x8667)];
+
 fn is_rtl2832(vid: u16, pid: u16) -> bool {
-    vid == VID_REALTEK && matches!(pid, 0x2832 | 0x2838)
-        // RTL-SDR Blog V4
-        || (vid == 0x1d50 && pid == 0x8667)
+    USB_IDS.contains(&(vid, pid))
 }
 
 pub fn enumerate() -> Vec<Enumerated> {
-    let Ok(devices) = nusb::list_devices().wait() else { return Vec::new() };
+    let Ok(devices) = usbio::list_devices() else { return Vec::new() };
     devices
         .filter(|d| is_rtl2832(d.vendor_id(), d.product_id()))
         .enumerate()
@@ -130,7 +130,7 @@ pub fn enumerate() -> Vec<Enumerated> {
         .collect()
 }
 
-fn port_path(d: &nusb::DeviceInfo) -> String {
+fn port_path(d: &usbio::DeviceInfo) -> String {
     let ports: Vec<String> = d.port_chain().iter().map(|p| p.to_string()).collect();
     match ports.is_empty() {
         true => format!("{}-?", d.bus_id()),
@@ -190,7 +190,7 @@ impl RtlSdr {
     }
 
     fn open_enumerated(found: Enumerated) -> Result<Self> {
-        let mut devices = nusb::list_devices().wait().map_err(|e| Error::usb("list", e))?;
+        let mut devices = usbio::list_devices().map_err(|e| Error::usb("list", e))?;
         // By port rather than by serial: every dongle of a kind ships with
         // the same one, so a serial match opens the first of them whichever
         // was asked for.
@@ -202,16 +202,16 @@ impl RtlSdr {
             })
             .ok_or(Error::NoDevice)?;
 
-        let device = info.open().wait().map_err(|e| match e.kind() {
-            nusb::ErrorKind::PermissionDenied => Error::Permission,
+        let device = info.open().map_err(|e| match e.kind() {
+            usbio::ErrorKind::PermissionDenied => Error::Permission,
             _ => Error::usb("open", e),
         })?;
 
         #[cfg(target_os = "linux")]
         let _ = device.detach_kernel_driver(0);
 
-        let iface = device.claim_interface(0).wait().map_err(|e| match e.kind() {
-            nusb::ErrorKind::Busy => Error::Busy,
+        let iface = device.claim_interface(0).map_err(|e| match e.kind() {
+            usbio::ErrorKind::Busy => Error::Busy,
             _ => Error::usb("claim", e),
         })?;
         let t = Transport::new(iface);
@@ -249,7 +249,7 @@ impl RtlSdr {
         // A write that has to work; if it does not, the device is wedged and
         // a reset gives it back.
         if me.t.write_reg(transport::block::USB, transport::usb_reg::SYSCTL, 0x09, 1).is_err() {
-            let _ = device.reset().wait();
+            let _ = device.reset();
             return Err(Error::Usb("the dongle needed a reset; try again".into()));
         }
 
@@ -680,7 +680,7 @@ impl RtlSdr {
             Error::usb("open endpoint", e)
         })?;
         for _ in 0..TRANSFERS {
-            ep.submit(nusb::transfer::Buffer::new(XFER_BYTES));
+            ep.submit(usbio::transfer::Buffer::new(XFER_BYTES));
         }
         let dropped = Arc::new(AtomicU64::new(0));
         let streaming = Arc::new(AtomicBool::new(true));
@@ -695,7 +695,7 @@ fn is_model(e: &Enumerated, manufacturer: &str, product: &str) -> bool {
 
 /// One bulk transfer at a time, off the queue the endpoint keeps full.
 pub struct Reader {
-    ep: nusb::Endpoint<Bulk, In>,
+    ep: usbio::Endpoint<Bulk, In>,
     streaming: Arc<AtomicBool>,
     pub dropped: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
@@ -722,7 +722,7 @@ impl Reader {
             };
             match completion.status {
                 Ok(()) => {
-                    self.ep.submit(nusb::transfer::Buffer::new(XFER_BYTES));
+                    self.ep.submit(usbio::transfer::Buffer::new(XFER_BYTES));
                     return Ok(completion.buffer.into_vec());
                 }
                 // A cancelled transfer is what a stop looks like.

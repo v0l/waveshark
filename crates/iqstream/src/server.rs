@@ -32,6 +32,8 @@
 //! dongle that steps in units of its own must be told where it really went,
 //! and only the owner knows that.
 
+pub use crate::config::Door;
+use crate::config::{Ask, Public, ServerConfig, StreamConfig, Tune};
 use crate::proto::{
     BitDepth, CONTROL_MAGIC, Codec, DATA_HEADER_LEN, DATAGRAM_OVERHEAD, DataHeader, Frame,
     MAX_DATAGRAM_PAYLOAD, MAX_FRAME_PAYLOAD, PREAMBLE_LEN, PROBE_LADDER, SAFE_DATAGRAM_PAYLOAD,
@@ -75,71 +77,7 @@ const INLINE_DEPTH: usize = 8;
 /// datagram does not cost the path its real size.
 const PROBE_TRIES: usize = 2;
 
-/// One tuner, as the welcome describes it.
-#[derive(Clone, Debug, Default)]
-pub struct StreamConfig {
-    /// What an operator picking a tuner sees: the radio's own label.
-    pub name: String,
-    pub center_hz: u64,
-    pub sample_rate: u32,
-    pub gain_db: Option<f32>,
-    /// Whether a subscriber may move this dial. Off unless an operator asked
-    /// for it: granting it on the receiver's own radio moves the local screen.
-    pub tunable: bool,
-    /// How far the tuner reaches, sent only when `tunable`. A subscriber that
-    /// is not told this can ask for a frequency but cannot offer a dial,
-    /// because it has no idea where the dial may go.
-    pub tune_range_hz: Option<(u64, u64)>,
-    /// What else the radio is set to: its gain stages, its switches, its
-    /// antenna port. Kept up to date with [`Stream::set_settings`].
-    pub settings: Vec<Setting>,
-}
-
-/// What the server is, and the tuners it starts with.
-#[derive(Clone)]
-pub struct ServerConfig {
-    /// Reported to subscribers for logging.
-    pub name: String,
-    /// Tuners offered from the moment the port opens. More may be added with
-    /// [`Server::add_stream`] while it runs.
-    pub streams: Vec<StreamConfig>,
-    pub door: Option<Arc<dyn Door>>,
-}
-
-impl std::fmt::Debug for ServerConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ServerConfig")
-            .field("name", &self.name)
-            .field("streams", &self.streams)
-            .field("door", &self.door.is_some())
-            .finish()
-    }
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        ServerConfig { name: "waveshark".into(), streams: Vec::new(), door: None }
-    }
-}
-
-impl ServerConfig {
-    /// One tuner and nothing else, which is what a 1.1 server was.
-    pub fn single(name: &str, stream: StreamConfig) -> Self {
-        ServerConfig { name: name.into(), streams: vec![stream], door: None }
-    }
-}
-
 pub const SNIFF_WAIT: std::time::Duration = std::time::Duration::from_millis(400);
-
-pub trait Door: Send + Sync + 'static {
-    fn open(
-        &self,
-        sock: std::net::TcpStream,
-        peer: SocketAddr,
-        first: &[u8],
-        streams: Vec<Arc<Stream>>,
-    );
-}
 
 pub struct Tap {
     stream: Arc<Stream>,
@@ -191,22 +129,6 @@ impl Drop for Tap {
     fn drop(&mut self) {
         self.stream.subscribers.fetch_sub(1, Ordering::Relaxed);
     }
-}
-
-/// A frequency a subscriber asked for, waiting to be acted on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Tune {
-    pub center_hz: u64,
-}
-
-/// A setting a subscriber asked for, waiting to be acted on.
-///
-/// Named rather than described: what a gain of 24 dB means is the driver's
-/// business, and this crate does not know what a gain stage is.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Ask {
-    pub name: String,
-    pub value: SettingValue,
 }
 
 /// One tuner on a server: what is pushed into it, and who is reading it.
@@ -531,7 +453,7 @@ struct Streams {
     punches: Mutex<HashMap<u64, tokio::sync::watch::Sender<Option<SocketAddr>>>>,
     /// Punches that arrived before the subscribe naming them, which is the
     /// order a client opening its hole first sends them in.
-    early: Mutex<HashMap<u64, (SocketAddr, std::time::Instant)>>,
+    early: Mutex<HashMap<u64, (SocketAddr, common::time::Instant)>>,
 }
 
 /// How long a punch is held for a subscribe that has not arrived yet. Long
@@ -580,7 +502,7 @@ async fn punch_loop(data: Arc<UdpSocket>, shared: Arc<Streams>) {
             // The subscribe naming this token has not been read yet.
             None => {
                 if let Ok(mut early) = shared.early.lock() {
-                    let now = std::time::Instant::now();
+                    let now = common::time::Instant::now();
                     early.retain(|_, (_, at)| at.elapsed().as_secs() < EARLY_PUNCH_S);
                     early.insert(token, (from, now));
                 }
@@ -613,7 +535,7 @@ pub struct Server {
     addr: SocketAddr,
     inner: Arc<Streams>,
     stop: Arc<AtomicBool>,
-    join: Option<std::thread::JoinHandle<()>>,
+    join: Option<common::thread::JoinHandle<()>>,
 }
 
 impl Server {
@@ -667,7 +589,7 @@ impl Server {
         let stopping = stop.clone();
         let shared = inner.clone();
         let door = cfg.door;
-        let join = std::thread::Builder::new()
+        let join = common::thread::Builder::new()
             .name("iqstream-srv".into())
             .spawn(move || {
                 // from_std registers with the reactor, so it has to happen
@@ -961,7 +883,7 @@ async fn converse(
 
     let mut subs: HashMap<u16, Subscription> = HashMap::new();
     let mut changed = shared.changed.subscribe();
-    let mut ping = tokio::time::interval(std::time::Duration::from_secs(PING_INTERVAL_S));
+    let mut ping = tokio::time::interval(common::time::Duration::from_secs(PING_INTERVAL_S));
     ping.tick().await;
     let mut last_seen = tokio::time::Instant::now();
 
@@ -1266,12 +1188,6 @@ async fn subscribe(
         }
     });
     Ok(Some(Subscription { stop: stop_tx, payload: payload_tx, task }))
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Public {
-    pub addr: SocketAddr,
-    pub data_port: Option<u16>,
 }
 
 fn nearby(ip: IpAddr) -> bool {

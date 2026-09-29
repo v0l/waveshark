@@ -1,7 +1,7 @@
 use crate::file::{FileMeta, parse_filename};
+use common::fs::blocking::File;
 use common::{Error, Hz, Result, SampleFormat, Sps};
 use serde_json::{Map, Value, json};
-use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -47,19 +47,19 @@ pub fn locate(path: &Path) -> Result<Located> {
     match Kind::of(path) {
         Kind::Archive => archive(path),
         Kind::Meta => {
-            let described = parse(&std::fs::read_to_string(path)?, path)?;
+            let described = parse(&common::fs::blocking::read_to_string(path)?, path)?;
             let data = match &described.dataset {
                 Some(name) => path.with_file_name(name),
                 None => path.with_extension(DATA),
             };
-            let len = std::fs::metadata(&data)?.len();
+            let len = common::fs::blocking::metadata(&data)?.len();
             Ok(Located { meta: parse_filename(&data).under(described.meta), data, bytes: 0..len })
         }
         Kind::Samples => {
-            let len = std::fs::metadata(path)?.len();
+            let len = common::fs::blocking::metadata(path)?.len();
             let named = parse_filename(path);
             let beside = path.with_extension(META);
-            let meta = match std::fs::read_to_string(&beside) {
+            let meta = match common::fs::blocking::read_to_string(&beside) {
                 Ok(text) => {
                     let described = parse(&text, &beside)?;
                     let mine = described
@@ -139,7 +139,7 @@ fn archive(path: &Path) -> Result<Located> {
 
 fn tar_members(f: &mut File) -> Result<Vec<(String, Range<u64>)>> {
     const BLOCK: u64 = 512;
-    let end = f.metadata()?.len();
+    let end = f.len();
     let mut members = Vec::new();
     let mut pos = 0u64;
     let mut long_name: Option<String> = None;
@@ -287,7 +287,7 @@ impl Recording {
         let path = data.with_extension(META);
         let text = serde_json::to_string_pretty(&self.to_json(data))
             .map_err(|e| Error::other(e.to_string()))?;
-        std::fs::write(&path, text)?;
+        common::fs::blocking::write(&path, text)?;
         Ok(path)
     }
 }
@@ -307,7 +307,8 @@ mod tests {
     use common::device::Device;
 
     fn dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("sr-sigmf-{name}-{}", std::process::id()));
+        let d =
+            common::platform::scratch_dir().join(format!("sr-sigmf-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

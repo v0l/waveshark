@@ -25,10 +25,10 @@
 //! quarter of a gigabyte for a callsign lookup, so a fetch streams to the
 //! file and a reader is what the parse gets.
 
+use common::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// What the far end said about the version we now hold, in the form it wants
 /// back to decide whether that version is still current.
@@ -79,6 +79,7 @@ pub struct Source {
     /// good file with its complaint. OpenCelliD does exactly that when the
     /// day's two downloads are used up.
     pub check: Option<Check>,
+    pub cross_origin: bool,
 }
 
 /// Reads the head of a download and says why it is not the dataset.
@@ -90,7 +91,18 @@ const CHECK_BYTES: usize = 4096;
 
 impl Source {
     pub fn http(name: &'static str, url: impl Into<String>, max_age: Duration) -> Self {
-        Self { name, from: Arc::new(Http { url: url.into() }), max_age, check: None }
+        Self {
+            name,
+            from: Arc::new(Http { url: url.into() }),
+            max_age,
+            check: None,
+            cross_origin: false,
+        }
+    }
+
+    pub fn cross_origin(mut self) -> Self {
+        self.cross_origin = true;
+        self
     }
 
     pub fn checked(mut self, check: Check) -> Self {
@@ -147,32 +159,30 @@ impl Fetch for Http {
         progress: &crate::progress::Progress,
     ) -> Result<Option<Seen>, Error> {
         let fail = |e: String| Error::Fetch(self.url.to_string(), e);
-        let client = httpc::blocking(Duration::from_secs(600)).map_err(|e| fail(e.to_string()))?;
-        let mut req = client.get(&self.url);
+        let mut req = httpc::get(&self.url).timeout(Duration::from_secs(600));
         if let Some(e) = &have.etag {
             req = req.header("If-None-Match", e);
         }
         if let Some(m) = &have.last_modified {
             req = req.header("If-Modified-Since", m);
         }
-        let resp = req.send().map_err(|e| fail(e.to_string()))?;
-        let code = resp.status().as_u16();
+        let resp = req.wait().map_err(fail)?;
+        let code = resp.status;
         if code == 304 {
             return Ok(None);
         }
         if code != 200 {
             return Err(Error::Status(self.url.clone(), code));
         }
-        let header =
-            |k: &str| resp.headers().get(k).and_then(|v| v.to_str().ok()).map(str::to_string);
+        let header = |k: &str| resp.header(k).map(str::to_string);
         // A publisher that redirects is telling us the URL is wrong, even
         // though following it worked: CelesTrak says outright that a 301
         // means a legacy query they will stop honouring. Nothing is failed
         // over it, because the bytes are good, but it is said once where a
         // person will find it rather than discovered when it turns into a
         // 404.
-        if resp.url().as_str() != self.url {
-            tracing::warn!(asked = %self.url, answered = %resp.url(), "dataset URL redirects");
+        if resp.url != self.url {
+            tracing::warn!(asked = %self.url, answered = %resp.url, "dataset URL redirects");
         }
         let seen = Seen { etag: header("etag"), last_modified: header("last-modified") };
         // What it says it is sending, so the row can draw how far through
@@ -204,17 +214,16 @@ impl Fetch for File {
         progress: &crate::progress::Progress,
     ) -> Result<Option<Seen>, Error> {
         let io = |e: std::io::Error| Error::Io(self.origin(), e);
-        let meta = std::fs::metadata(&self.path).map_err(io)?;
+        let meta = common::fs::blocking::metadata(&self.path).map_err(io)?;
         progress.expect(meta.len());
         let stamp = meta
             .modified()
-            .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| format!("{}.{:09}", d.as_secs(), d.subsec_nanos()));
         if stamp.is_some() && stamp == have.last_modified {
             return Ok(None);
         }
-        let mut f = std::fs::File::open(&self.path).map_err(io)?;
+        let mut f = common::fs::blocking::File::open(&self.path).map_err(io)?;
         std::io::copy(&mut f, to).map_err(io)?;
         Ok(Some(Seen { etag: None, last_modified: stamp }))
     }
@@ -297,17 +306,11 @@ impl Cache {
     /// map tiles, because both are copies of something published elsewhere
     /// and both can be deleted without losing anything of the operator's.
     pub fn default_dir() -> Result<PathBuf, Error> {
-        let base = std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-            .ok_or(Error::NoDir)?;
-        Ok(base.join("waveshark").join("data"))
+        Ok(common::platform::cache_dir().ok_or(Error::NoDir)?.join("data"))
     }
 
     pub fn at_default_dir() -> Result<Self, Error> {
-        let dir = Self::default_dir()?;
-        std::fs::create_dir_all(&dir).map_err(|e| Error::Io(dir.display().to_string(), e))?;
-        Ok(Self::new(dir))
+        Ok(Self::new(Self::default_dir()?))
     }
 
     pub fn dir(&self) -> &Path {
@@ -322,10 +325,19 @@ impl Cache {
         self.dir.join(format!("{}.meta.json", src.name))
     }
 
+    fn recorded(&self, src: &Source) -> Option<Meta> {
+        let raw = common::store::read(&self.meta_file(src)).ok()?;
+        serde_json::from_str(&raw).ok()
+    }
+
     fn meta(&self, src: &Source) -> Option<Meta> {
-        let raw = std::fs::read(self.meta_file(src)).ok()?;
-        let meta: Meta = serde_json::from_slice(&raw).ok()?;
-        (std::fs::metadata(self.file(src)).ok()?.len() == meta.len).then_some(meta)
+        let meta = self.recorded(src)?;
+        (common::fs::blocking::metadata(self.file(src)).ok()?.len() == meta.len).then_some(meta)
+    }
+
+    fn record(&self, src: &Source, meta: &Meta) -> std::io::Result<()> {
+        let raw = serde_json::to_string(meta).map_err(std::io::Error::other)?;
+        common::store::write(&self.meta_file(src), &raw)
     }
 
     /// The path of a complete cached copy, if there is one.
@@ -354,12 +366,12 @@ impl Cache {
     /// The whole file, for datasets small enough to hold at once.
     pub fn read(&self, src: &Source) -> Result<Vec<u8>, Error> {
         let p = self.get(src)?;
-        std::fs::read(&p).map_err(|e| Error::Io(p.display().to_string(), e))
+        common::fs::blocking::read(&p).map_err(|e| Error::Io(p.display().to_string(), e))
     }
 
     /// What is held for this source, and when it was last checked.
     pub fn status(&self, src: &Source) -> Status {
-        let meta = self.meta(src);
+        let meta = self.recorded(src);
         Status {
             origin: src.from.origin(),
             bytes: meta.as_ref().map(|m| m.len),
@@ -410,7 +422,7 @@ impl Cache {
     /// a run killed mid-download leaves the previous copy rather than a
     /// truncated file that parses to nonsense.
     fn fetch(&self, src: &Source, have: &Seen) -> Result<Option<PathBuf>, Error> {
-        std::fs::create_dir_all(&self.dir)
+        common::fs::blocking::create_dir_all(&self.dir)
             .map_err(|e| Error::Io(self.dir.display().to_string(), e))?;
         let path = self.file(src);
         let tmp = path.with_extension("part");
@@ -418,7 +430,7 @@ impl Cache {
             let p = p.display().to_string();
             move |e: std::io::Error| Error::Io(p.clone(), e)
         };
-        let f = std::fs::File::create(&tmp).map_err(io(&tmp))?;
+        let f = common::fs::blocking::File::create(&tmp).map_err(io(&tmp))?;
         let mut out = std::io::BufWriter::new(f);
         // Counted where the bytes are written rather than in each fetcher:
         // every one of them writes here, and a fetcher that forgot to
@@ -431,28 +443,27 @@ impl Cache {
             other => {
                 progress.stop();
                 drop(out);
-                let _ = std::fs::remove_file(&tmp);
+                let _ = common::fs::blocking::remove_file(&tmp);
                 return other.map(|_| None);
             }
         };
         progress.stop();
         out.flush().map_err(io(&tmp))?;
-        let len = out.get_ref().metadata().map_err(io(&tmp))?.len();
+        out.get_mut().sync_all().map_err(io(&tmp))?;
+        let len = out.get_ref().len();
         drop(out);
         if let Some(check) = src.check {
             let head = read_head(&tmp, CHECK_BYTES).map_err(io(&tmp))?;
             if let Err(why) = check(&head) {
-                let _ = std::fs::remove_file(&tmp);
+                let _ = common::fs::blocking::remove_file(&tmp);
                 // Named by the dataset, not by the origin: the cell
                 // export's URL carries the operator's token.
                 return Err(Error::Parse(src.name.into(), why));
             }
         }
-        std::fs::rename(&tmp, &path).map_err(io(&path))?;
+        common::fs::blocking::rename(&tmp, &path).map_err(io(&path))?;
         let meta = Meta { seen, len, checked: now(), refused: None };
-        let raw = serde_json::to_vec(&meta).unwrap_or_default();
-        let mpath = self.meta_file(src);
-        std::fs::write(&mpath, raw).map_err(io(&mpath))?;
+        self.record(src, &meta).map_err(io(&self.meta_file(src)))?;
         tracing::info!(dataset = src.name, bytes = len, from = %src.from.origin(), "dataset downloaded");
         Ok(Some(path))
     }
@@ -466,9 +477,7 @@ impl Cache {
             return;
         }
         meta.refused = why;
-        if let Ok(raw) = serde_json::to_vec(&meta) {
-            let _ = std::fs::write(self.meta_file(src), raw);
-        }
+        let _ = self.record(src, &meta);
     }
 
     /// Record that the file was revalidated and is still current, so the next
@@ -476,17 +485,19 @@ impl Cache {
     fn touch(&self, src: &Source) {
         let Some(mut meta) = self.meta(src) else { return };
         meta.checked = now();
-        if let Ok(raw) = serde_json::to_vec(&meta) {
-            let _ = std::fs::write(self.meta_file(src), raw);
-        }
+        let _ = self.record(src, &meta);
     }
 }
 
 fn read_head(path: &Path, n: usize) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
     let mut buf = Vec::new();
-    std::fs::File::open(path)?.take(n as u64).read_to_end(&mut buf)?;
+    common::fs::blocking::File::open(path)?.take(n as u64).read_to_end(&mut buf)?;
     Ok(buf)
+}
+
+pub fn is_meta(path: &Path) -> bool {
+    path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(".meta.json"))
 }
 
 fn now() -> u64 {
@@ -527,7 +538,8 @@ mod tests {
     }
 
     fn tmpdir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("waveshark-cache-{name}-{}", std::process::id()));
+        let d = common::platform::scratch_dir()
+            .join(format!("waveshark-cache-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -539,7 +551,13 @@ mod tests {
             tag: parking_lot::Mutex::new("v1".into()),
             fetches: AtomicUsize::new(0),
         });
-        let src = Source { name: "thing.txt", from: from.clone(), max_age, check: None };
+        let src = Source {
+            name: "thing.txt",
+            from: from.clone(),
+            max_age,
+            check: None,
+            cross_origin: false,
+        };
         (Cache::new(dir), src, from)
     }
 
@@ -611,8 +629,13 @@ mod tests {
         let dir = tmpdir("failed");
         let (cache, src, _) = counted(&dir, Duration::ZERO);
         cache.read(&src).unwrap();
-        let broken =
-            Source { name: src.name, from: Arc::new(Broken), max_age: Duration::ZERO, check: None };
+        let broken = Source {
+            name: src.name,
+            from: Arc::new(Broken),
+            max_age: Duration::ZERO,
+            check: None,
+            cross_origin: false,
+        };
         assert!(cache.refresh(&broken, When::Now).is_err());
         assert_eq!(cache.read(&src).unwrap(), b"one");
     }
@@ -647,6 +670,7 @@ mod tests {
             from: Arc::new(Refused),
             max_age: Duration::ZERO,
             check: None,
+            cross_origin: false,
         };
         assert!(cache.refresh(&refusing, When::Now).is_err());
         // Nothing is asked again on its own, and what was held is still
@@ -690,6 +714,7 @@ mod tests {
             from: Arc::new(File { path: src_path.clone() }),
             max_age: Duration::ZERO,
             check: None,
+            cross_origin: false,
         };
         assert_eq!(cache.read(&src).unwrap(), b"hello");
         assert!(cache.refresh(&src, When::Now).unwrap().is_none());
@@ -716,7 +741,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/dump.csv", listener.local_addr().unwrap());
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             for (sock, answer) in listener.incoming().flatten().zip(answers) {
                 let mut reader = BufReader::new(sock.try_clone().unwrap());
                 let mut head = String::new();

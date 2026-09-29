@@ -5,12 +5,12 @@
 
 use crate::error::{Error, Result};
 use crate::{HACKRF_JAWBREAKER_PID, HACKRF_ONE_PID, HACKRF_VID, RAD1O_PID};
-use nusb::transfer::{Buffer, Bulk, ControlIn, ControlOut, ControlType, In, Out, Recipient};
-use nusb::{Endpoint, MaybeFuture};
+use common::thread;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
-use std::thread;
 use std::time::Duration;
+use usbio::Endpoint;
+use usbio::transfer::{Buffer, Bulk, ControlIn, ControlOut, ControlType, In, Out, Recipient};
 
 // ─── USB Constants ────────────────────────────────────────────────────────────
 
@@ -340,14 +340,14 @@ pub const BOARD_REV_GSG: u8 = 0x80;
 
 /// Main HackRF device handle.
 ///
-/// Wraps a nusb USB interface and provides methods for device discovery,
-/// configuration, and streaming. The nusb `Interface` is internally
+/// Wraps a usbio USB interface and provides methods for device discovery,
+/// configuration, and streaming. The usbio `Interface` is internally
 /// Arc-backed, so cloning is cheap.
 pub struct HackRf {
-    iface: nusb::Interface,
+    iface: usbio::Interface,
     /// Keep the Device alive so USB isn't released prematurely.
     #[allow(dead_code)]
-    usb_device: nusb::Device,
+    usb_device: usbio::Device,
     /// USB API version (from bcdDevice descriptor field).
     usb_api_version: u16,
     /// Bulk IN endpoint for RX streaming (opened on start_rx, closed on stop_rx).
@@ -386,19 +386,19 @@ impl AsyncWriteHandle {
 
     /// Queue a chunk, giving up after `timeout` rather than blocking.
     pub fn send_timeout(&self, chunk: Vec<u8>, timeout: Duration) -> Result<()> {
-        let deadline = std::time::Instant::now() + timeout;
+        let deadline = common::time::Instant::now() + timeout;
         self.queued.fetch_add(1, Ordering::Relaxed);
         let mut chunk = chunk;
         loop {
             match self.tx.try_send(chunk) {
                 Ok(()) => return Ok(()),
                 Err(mpsc::TrySendError::Full(c)) => {
-                    if std::time::Instant::now() >= deadline {
+                    if common::time::Instant::now() >= deadline {
                         self.queued.fetch_sub(1, Ordering::Relaxed);
                         return Err(Error::Timeout);
                     }
                     chunk = c;
-                    thread::sleep(Duration::from_millis(1));
+                    std::thread::sleep(Duration::from_millis(1));
                 }
                 Err(mpsc::TrySendError::Disconnected(_)) => {
                     self.queued.fetch_sub(1, Ordering::Relaxed);
@@ -432,8 +432,8 @@ impl AsyncWriteHandle {
     ///
     /// Waits for the transfers carrying those chunks to complete as well.
     pub fn drain(&self, timeout: Duration) -> bool {
-        let deadline = std::time::Instant::now() + timeout;
-        while std::time::Instant::now() < deadline {
+        let deadline = common::time::Instant::now() + timeout;
+        while common::time::Instant::now() < deadline {
             if self.queued.load(Ordering::Relaxed) == 0
                 && self.airborne.load(Ordering::Relaxed) == 0
             {
@@ -442,7 +442,7 @@ impl AsyncWriteHandle {
             if self.stop.load(Ordering::Relaxed) {
                 return false;
             }
-            thread::sleep(Duration::from_millis(2));
+            std::thread::sleep(Duration::from_millis(2));
         }
         false
     }
@@ -464,8 +464,7 @@ impl HackRf {
     pub fn list_devices() -> Result<Vec<String>> {
         let mut serials = Vec::new();
 
-        for dev_info in nusb::list_devices()
-            .wait()
+        for dev_info in usbio::list_devices()
             .map_err(Error::OpenFailed)?
             .filter(|d| d.vendor_id() == HACKRF_VID && is_hackrf_pid(d.product_id()))
         {
@@ -483,8 +482,7 @@ impl HackRf {
 
     /// Open a HackRF device by index in the enumerated list.
     pub fn open_by_index(index: usize) -> Result<Self> {
-        let devices: Vec<_> = nusb::list_devices()
-            .wait()
+        let devices: Vec<_> = usbio::list_devices()
             .map_err(Error::OpenFailed)?
             .filter(|d| d.vendor_id() == HACKRF_VID && is_hackrf_pid(d.product_id()))
             .collect();
@@ -494,7 +492,7 @@ impl HackRf {
         // Extract USB API version from bcdDevice descriptor field
         let usb_api_version = dev_info.device_version();
 
-        let usb_device = dev_info.open().wait().map_err(Error::OpenFailed)?;
+        let usb_device = dev_info.open().map_err(Error::OpenFailed)?;
 
         // Linux: detach kernel driver if attached (ignore errors)
         #[cfg(target_os = "linux")]
@@ -502,7 +500,7 @@ impl HackRf {
             let _ = usb_device.detach_kernel_driver(0);
         }
 
-        let iface = usb_device.claim_interface(0).wait().map_err(Error::ClaimFailed)?;
+        let iface = usb_device.claim_interface(0).map_err(Error::ClaimFailed)?;
 
         tracing::info!("HackRF device opened successfully");
 
@@ -873,7 +871,7 @@ impl HackRf {
     ///
     /// Architecture:
     /// ```text
-    ///   streaming thread (nusb endpoint queue)  ──sync_channel──▶  consumer
+    ///   streaming thread (usbio endpoint queue)  ──sync_channel──▶  consumer
     ///     └── control commands via mpsc channel   (tune / gain)
     /// ```
     ///
@@ -1042,7 +1040,6 @@ impl HackRf {
                 },
                 USB_TIMEOUT,
             )
-            .wait()
             .map_err(Error::ControlTransfer)?;
 
         tracing::trace!(
@@ -1075,7 +1072,6 @@ impl HackRf {
                 },
                 USB_TIMEOUT,
             )
-            .wait()
             .map_err(Error::ControlTransfer)?;
 
         tracing::trace!(
@@ -1102,7 +1098,7 @@ impl Drop for HackRf {
             }
         }
 
-        // Note: nusb releases the interface automatically when all
+        // Note: usbio releases the interface automatically when all
         // Interface clones are dropped. No explicit release needed.
         tracing::debug!("HackRf device closed");
     }
@@ -1117,7 +1113,7 @@ fn is_hackrf_pid(pid: u16) -> bool {
 
 /// The streaming thread function.
 ///
-/// Uses nusb's Endpoint queue to keep multiple USB bulk transfers in-flight
+/// Uses usbio's Endpoint queue to keep multiple USB bulk transfers in-flight
 /// simultaneously. When one transfer completes, a new one is immediately
 /// re-submitted, so there is **never a gap** where the HackRF has no pending
 /// USB read — preventing internal FIFO overflow and sample loss.
@@ -1129,7 +1125,7 @@ fn is_hackrf_pid(pid: u16) -> bool {
 /// 4. Re-submit a new buffer to keep the queue full
 fn streaming_thread(
     mut dev: HackRf,
-    iface: nusb::Interface,
+    iface: usbio::Interface,
     tx: mpsc::SyncSender<Result<Vec<u8>>>,
     stop: Arc<AtomicBool>,
     ctrl_rx: mpsc::Receiver<StreamControl>,
@@ -1340,13 +1336,13 @@ impl TxFiller {
         idle: &AtomicU64,
         size: usize,
     ) -> (Vec<u8>, bool) {
-        let deadline = std::time::Instant::now() + TX_FILL_WAIT;
+        let deadline = common::time::Instant::now() + TX_FILL_WAIT;
         while self.pend.len() < size {
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let left = deadline.saturating_duration_since(common::time::Instant::now());
             if left.is_zero() {
                 break;
             }
-            match rx.recv_timeout(left) {
+            match common::thread::recv_within(rx, left) {
                 Ok(chunk) => {
                     queued.fetch_sub(1, Ordering::Relaxed);
                     self.pend.extend_from_slice(&chunk);
@@ -1378,7 +1374,7 @@ impl TxFiller {
 #[allow(clippy::too_many_arguments)]
 fn transmitting_thread(
     dev: HackRf,
-    iface: nusb::Interface,
+    iface: usbio::Interface,
     rx: mpsc::Receiver<Vec<u8>>,
     stop: Arc<AtomicBool>,
     idle: Arc<AtomicU64>,

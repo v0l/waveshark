@@ -1,7 +1,7 @@
 use crate::model::Entry;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::num::NonZeroU16;
-use std::time::{Duration, Instant};
+use web_time::{Duration, Instant};
 
 const PCP_PORT: u16 = 5351;
 const LIFETIME_SECS: u32 = 7200;
@@ -456,13 +456,8 @@ impl Igd {
     }
 
     fn at(location: &str) -> Result<Igd, String> {
-        let client = httpc::blocking(SOAP_WAIT).map_err(|e| e.to_string())?;
-        let description = client
-            .get(location)
-            .send()
-            .and_then(|r| r.error_for_status())
-            .and_then(|r| r.text())
-            .map_err(|e| e.to_string())?;
+        let description =
+            httpc::get(location).timeout(SOAP_WAIT).wait().and_then(|r| r.ok()?.text())?;
         let (service, control) = control_url(&description).ok_or("no WAN connection service")?;
         let base = element(&description, "URLBase").map(str::trim).unwrap_or(location);
         let control = resolve(base, &control).ok_or("the control URL does not resolve")?;
@@ -480,16 +475,15 @@ impl Igd {
              <s:Body><u:{action} xmlns:u=\"{service}\">{body}</u:{action}></s:Body></s:Envelope>",
             service = self.service
         );
-        let client = httpc::blocking(SOAP_WAIT).map_err(|e| Fault::Failed(e.to_string()))?;
-        let reply = client
-            .post(&self.control)
+        let reply = httpc::post(&self.control)
+            .timeout(SOAP_WAIT)
             .header("Content-Type", "text/xml; charset=\"utf-8\"")
-            .header("SOAPAction", format!("\"{}#{action}\"", self.service))
+            .header("SOAPAction", &format!("\"{}#{action}\"", self.service))
             .body(envelope)
-            .send()
-            .map_err(|e| Fault::Failed(e.to_string()))?;
-        let ok = reply.status().is_success();
-        let text = reply.text().map_err(|e| Fault::Failed(e.to_string()))?;
+            .wait()
+            .map_err(Fault::Failed)?;
+        let ok = reply.is_success();
+        let text = reply.text().map_err(Fault::Failed)?;
         match ok {
             true => Ok(text),
             false => Err(match element(&text, "errorCode").and_then(|c| c.trim().parse().ok()) {
@@ -730,7 +724,7 @@ mod tests {
         let SocketAddr::V4(at) = sock.local_addr().unwrap() else { unreachable!() };
         let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let log = heard.clone();
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             let mut buf = [0u8; 64];
             while let Ok((n, from)) = sock.recv_from(&mut buf) {
                 let r = &buf[..n];
@@ -782,7 +776,7 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let log = heard.clone();
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             for sock in listener.incoming().flatten() {
                 let mut reader = BufReader::new(sock.try_clone().unwrap());
                 let mut head = Vec::new();

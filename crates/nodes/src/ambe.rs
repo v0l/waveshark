@@ -1,7 +1,7 @@
 //! The AMBE+2 speech path shared by the protocols that key it, behind the
 //! `ambe` feature.
 //!
-//! AMBE is patent-encumbered, so a stock build compiles the stub below: the
+//! AMBE is patent-encumbered, so a stock build compiles `ambe_silent.rs`: the
 //! `Vocoder` is zero-size, decoding yields no samples, and a node holds one
 //! and calls it with no `#[cfg]` of its own. With the feature the `Vocoder`
 //! wraps `mbe::ambe` and turns each 72-bit frame into 20 ms of 8 kHz speech,
@@ -10,12 +10,10 @@
 /// Speech samples one AMBE+2 frame carries, at 8 kHz.
 pub(crate) const SAMPLES_PER_FRAME: usize = 160;
 
-#[cfg(feature = "ambe")]
 pub(crate) struct Vocoder {
     synth: mbe::ambe::AmbeSynthesizer,
 }
 
-#[cfg(feature = "ambe")]
 impl Vocoder {
     pub(crate) fn new() -> Self {
         Vocoder { synth: mbe::ambe::AmbeSynthesizer::new() }
@@ -67,26 +65,5 @@ impl Vocoder {
             }
         }
         out
-    }
-}
-
-#[cfg(not(feature = "ambe"))]
-pub(crate) struct Vocoder;
-
-#[cfg(not(feature = "ambe"))]
-impl Vocoder {
-    pub(crate) fn new() -> Self {
-        Vocoder
-    }
-    pub(crate) fn reset(&mut self) {}
-    pub(crate) fn decode_burst(
-        &mut self,
-        _frames: &[[u8; 9]; 3],
-        _keystream: Option<&[bool; 49]>,
-    ) -> Vec<f32> {
-        Vec::new()
-    }
-    pub(crate) fn decode_channels(&mut self, _channels: &[[bool; 72]]) -> Vec<f32> {
-        Vec::new()
     }
 }

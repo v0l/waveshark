@@ -175,8 +175,8 @@ impl IqBuf {
     }
 
     /// Wall duration this block represents.
-    pub fn duration(&self) -> std::time::Duration {
-        std::time::Duration::from_secs_f64(self.samples.len() as f64 / self.rate.as_f64())
+    pub fn duration(&self) -> crate::time::Duration {
+        crate::time::Duration::from_secs_f64(self.samples.len() as f64 / self.rate.as_f64())
     }
 
     /// Lowest frequency represented, assuming the full Nyquist span is usable.

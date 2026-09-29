@@ -59,8 +59,8 @@
 //! packets in memory.
 
 use crate::row::Reception;
+use common::time::{Duration, Instant};
 use pipeline::event::{Party, PartyKind};
-use std::time::{Duration, Instant};
 
 /// How long after its last packet a link is still counted as live.
 pub const LIVE: Duration = Duration::from_secs(30);

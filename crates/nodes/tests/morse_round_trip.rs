@@ -115,7 +115,7 @@ fn a_capture_of_the_transmission_replays_as_the_same_text() {
     let (mut sink, buf) = sources::FileSink::in_memory(Sps(RATE as u64), SampleFormat::Cs8);
     let mut tx = sink.start_tx().unwrap();
     tx.write(&IqBuf::new(iq, Hz(433_920_000), Sps(RATE as u64), 0)).unwrap();
-    tx.drain(std::time::Duration::from_millis(50));
+    tx.drain(common::time::Duration::from_millis(50));
     assert_eq!(tx.underruns(), 0);
 
     let mut back = Vec::new();

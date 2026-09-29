@@ -15,7 +15,7 @@
 //! choice in one place rather than leaving every caller to invent one.
 
 use crate::cache::{Cache, Error, Source, When};
-use std::time::Duration;
+use common::time::Duration;
 
 /// The whole transmitter table, about four megabytes of JSON.
 ///

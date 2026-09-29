@@ -243,8 +243,8 @@ pub mod tag {
 /// Monotonic-ish nanoseconds for ping timestamps. Only differences measured by
 /// the same host are meaningful.
 pub fn now_ns() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    common::time::SystemTime::now()
+        .duration_since(common::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0)
 }

@@ -86,7 +86,7 @@ pub(super) struct Map<'a> {
     pub sat_group: &'static datasets::tle::Group,
     /// Where tile fetches are run. The application owns the runtime; the pane
     /// is handed a handle for the frame.
-    pub rt: tokio::runtime::Handle,
+    pub rt: crate::task::Spawner,
 }
 
 impl Map<'_> {
@@ -100,7 +100,7 @@ impl Map<'_> {
     /// Returns a position the operator dropped or typed, for the caller to
     /// tell the receiver about.
     pub(super) fn show(self, ui: &mut egui::Ui) -> Option<(f64, f64)> {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         // The pane runs to the window edge, and a table that starts there is
         // unreadable.
         let margin = egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 8));
@@ -228,7 +228,7 @@ impl Map<'_> {
         split_divider(ui, top, usable, frac, splitting, MAP_FRAC_RANGE, DEFAULT_MAP_FRAC)
     }
 
-    fn track_rows(ui: &mut egui::Ui, active: &[&crate::tracks::Track], now: std::time::Instant) {
+    fn track_rows(ui: &mut egui::Ui, active: &[&crate::tracks::Track], now: common::time::Instant) {
         use crate::tracks::Kind;
         let count = |k: Kind| active.iter().filter(|t| t.kind() == k).count();
         ui.horizontal(|ui| {
@@ -537,7 +537,7 @@ mod tests {
     fn clicks_that_open(track: &Track, xs: std::ops::Range<f32>) -> Vec<(Pos2, String)> {
         let ctx = egui::Context::default();
         crate::ui::install(&ctx);
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let frame = |events: Vec<egui::Event>| {
             let input = egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 400.0))),
@@ -582,7 +582,7 @@ mod tests {
             destination: None,
             class_b: false,
         };
-        Track::new(TrackId::Mmsi(mmsi), detail, std::time::Instant::now())
+        Track::new(TrackId::Mmsi(mmsi), detail, common::time::Instant::now())
     }
 
     #[test]
@@ -609,8 +609,11 @@ mod tests {
 
     #[test]
     fn an_aircraft_row_has_no_link() {
-        let plane =
-            Track::new(TrackId::Icao(0x4ca068), Detail::new_aircraft(), std::time::Instant::now());
+        let plane = Track::new(
+            TrackId::Icao(0x4ca068),
+            Detail::new_aircraft(),
+            common::time::Instant::now(),
+        );
         assert!(clicks_that_open(&plane, ID_COLUMN).is_empty());
     }
 }

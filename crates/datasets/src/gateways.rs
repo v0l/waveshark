@@ -15,7 +15,7 @@
 //! way round.
 
 use crate::cache::{Cache, Error, Source, When};
-use std::time::Duration;
+use common::time::Duration;
 
 /// One published host file: where it lives, and how to read it.
 #[derive(Debug)]
@@ -25,6 +25,7 @@ pub struct HostFile {
     /// File name under the cache directory, and the metadata key.
     pub file: &'static str,
     pub url: &'static str,
+    pub cross_origin: bool,
     /// Who publishes it, for the line under the name in the settings pane.
     pub publisher: &'static str,
     /// What the file is, for the pane that offers to download it.
@@ -44,7 +45,11 @@ pub struct HostFile {
 
 impl HostFile {
     pub fn source(&'static self) -> Source {
-        Source::http(self.file, self.url, self.max_age)
+        let src = Source::http(self.file, self.url, self.max_age);
+        match self.cross_origin {
+            true => src.cross_origin(),
+            false => src,
+        }
     }
 }
 
@@ -67,6 +72,7 @@ pub static M17: HostFile = HostFile {
     name: "M17",
     file: "m17-hosts.json",
     url: "https://m17-project.github.io/hostfiles/M17Hosts.json",
+    cross_origin: true,
     publisher: "m17project.org",
     about: "Every M17 reflector, with the modules each carries. The one \
      network here this receiver already decodes.",
@@ -81,6 +87,7 @@ pub static DMR: HostFile = HostFile {
     name: "DMR",
     file: "pistar-dmr-hosts.txt",
     url: "https://www.pistar.uk/downloads/DMR_Hosts.txt",
+    cross_origin: false,
     publisher: "pistar.uk",
     about: "Every DMR master a hotspot can register with, as Pi-Star \
      publishes it. Speech there is AMBE, which needs a vocoder this \
@@ -96,6 +103,7 @@ pub static DPLUS: HostFile = HostFile {
     name: "D-Star (DPlus)",
     file: "pistar-dplus-hosts.txt",
     url: "https://www.pistar.uk/downloads/DPlus_Hosts.txt",
+    cross_origin: false,
     publisher: "pistar.uk",
     about: "D-Star reflectors reachable over DPlus.",
     page: "https://www.pistar.uk/downloads/",
@@ -109,6 +117,7 @@ pub static DEXTRA: HostFile = HostFile {
     name: "D-Star (DExtra)",
     file: "pistar-dextra-hosts.txt",
     url: "https://www.pistar.uk/downloads/DExtra_Hosts.txt",
+    cross_origin: false,
     publisher: "pistar.uk",
     about: "D-Star reflectors reachable over DExtra.",
     page: "https://www.pistar.uk/downloads/",
@@ -122,6 +131,7 @@ pub static DCS: HostFile = HostFile {
     name: "D-Star (DCS)",
     file: "pistar-dcs-hosts.txt",
     url: "https://www.pistar.uk/downloads/DCS_Hosts.txt",
+    cross_origin: false,
     publisher: "pistar.uk",
     about: "D-Star reflectors reachable over DCS.",
     page: "https://www.pistar.uk/downloads/",

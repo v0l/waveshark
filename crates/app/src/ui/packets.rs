@@ -161,7 +161,7 @@ impl Log<'_> {
         if asked.save_sub
             && let Some(save) = super::burst::sub_save(rec)
         {
-            let stem = save.file_stem(rec.protocol(), std::time::SystemTime::now());
+            let stem = save.file_stem(rec.protocol(), common::time::SystemTime::now());
             self.st.sub_save.ask(ui.ctx(), save.text(), stem);
         }
         if let Some(said) = &self.st.sub_save.said {

@@ -13,10 +13,10 @@ fn main() {
     };
     println!("watching {t} for {secs}s");
     let src = Source::start(Config::new(t));
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let until = common::time::Instant::now() + common::time::Duration::from_secs(secs);
     let mut last = None;
-    while std::time::Instant::now() < until {
-        std::thread::sleep(std::time::Duration::from_millis(500));
+    while common::time::Instant::now() < until {
+        std::thread::sleep(common::time::Duration::from_millis(500));
         let fix = src.fix();
         if fix != last {
             match fix {

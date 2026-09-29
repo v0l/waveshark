@@ -12,7 +12,7 @@
 //! Nothing here keys anything. It produces samples.
 
 use super::config::{Config, Speech};
-use crate::transcripts::{Fetch, Health, ModelState};
+use crate::transcripts::{Health, ModelState};
 use serde_json::json;
 use std::sync::Mutex;
 
@@ -25,7 +25,7 @@ const PCM_RATE: f64 = 24_000.0;
 
 /// How long a sentence may take to come back. Generous: a local speech
 /// server on a CPU is slower than the radio it is talking to.
-const PATIENCE: std::time::Duration = std::time::Duration::from_secs(120);
+const PATIENCE: common::time::Duration = common::time::Duration::from_secs(120);
 
 /// Speech, and the rate it was produced at.
 pub struct Said {
@@ -55,14 +55,6 @@ pub(super) fn report(f: impl FnOnce(&mut Health)) {
     }
 }
 
-/// The download, as the hub reports it.
-pub(super) fn fetching(file: &str, done: u64, total: u64, files_done: usize, files: usize) {
-    report(|h| {
-        h.state = ModelState::Fetching;
-        h.fetch = Fetch { file: file.to_string(), done, total, files_done, files };
-    });
-}
-
 /// Say `text`, however this receiver is set up to.
 ///
 /// The local model runs on a thread of its own rather than on the runtime:
@@ -90,7 +82,7 @@ pub async fn speak(config: &Config, text: &str) -> Result<Said, String> {
 #[cfg(feature = "tts")]
 async fn local_speak(config: Config, text: String) -> Result<Said, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    std::thread::Builder::new()
+    common::thread::Builder::new()
         .name("tts".into())
         .spawn(move || {
             let _ = tx.send(local::speak(&config, &text));

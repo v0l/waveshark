@@ -45,14 +45,20 @@
 //! a talkgroup is not a thing in a house, and one entity per talkgroup on a
 //! busy trunked network is a house nobody can read.
 
+#[cfg(feature = "homeassistant")]
+mod mqtt;
+#[cfg(not(feature = "homeassistant"))]
+#[path = "homeassistant_nodes/mqtt_offline.rs"]
+mod mqtt;
+
 use common::Result;
+use common::time::{Duration, Instant};
 use pipeline::node::{Node, NodeCtx, PortSpec};
 use pipeline::port::{Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, StageDesc};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 /// How long the broker holds a reading before Home Assistant shows the entity
 /// as unavailable. Long enough for a sensor that reports twice an hour, short
@@ -201,7 +207,7 @@ pub struct Publisher {
     /// them apart at the broker.
     instance: u64,
     broker: Mutex<Option<Broker>>,
-    client: Mutex<Option<rumqttc::Client>>,
+    client: Mutex<Option<mqtt::Client>>,
     /// Bumped on every connection, so a node re-announces its devices to a
     /// broker that has restarted and lost the retained configurations.
     generation: AtomicU64,
@@ -257,7 +263,9 @@ impl Publisher {
     /// no broker cleared the broker of the one that had.
     pub fn running() -> Arc<Self> {
         let p = Self::inert();
-        p.start();
+        if mqtt::CONNECTS {
+            p.start();
+        }
         p
     }
 
@@ -287,7 +295,7 @@ impl Publisher {
             return;
         }
         let p = self.clone();
-        let _ = std::thread::Builder::new().name("ha-mqtt".into()).spawn(move || p.run());
+        let _ = common::thread::Builder::new().name("ha-mqtt".into()).spawn(move || p.run());
     }
 
     /// Where to publish, or `None` to stop. Changing it drops the connection,
@@ -315,7 +323,7 @@ impl Publisher {
         if let Ok(mut c) = self.client.lock()
             && let Some(client) = c.take()
         {
-            let _ = client.try_disconnect();
+            client.disconnect();
         }
     }
 
@@ -359,10 +367,9 @@ impl Publisher {
             self.offline.fetch_add(1, Ordering::Relaxed);
             return;
         };
-        let sent = client.try_publish(topic, rumqttc::QoS::AtMostOnce, retain, payload);
-        match sent {
-            Ok(()) => self.published.fetch_add(1, Ordering::Relaxed),
-            Err(_) => self.dropped.fetch_add(1, Ordering::Relaxed),
+        match client.publish(topic, retain, false, payload) {
+            true => self.published.fetch_add(1, Ordering::Relaxed),
+            false => self.dropped.fetch_add(1, Ordering::Relaxed),
         };
     }
 
@@ -406,29 +413,10 @@ impl Publisher {
         // so two publishers in one process take turns throwing each other
         // off and neither of them ever settles.
         let id = format!("waveshark-{}-{}", std::process::id(), self.instance);
-        let mut opts = rumqttc::MqttOptions::new(id, broker.host.trim(), broker.port);
-        opts.set_keep_alive(Duration::from_secs(30));
-        opts.set_max_packet_size(64 * 1024, 64 * 1024);
-        if !broker.username.is_empty() {
-            opts.set_credentials(broker.username.clone(), broker.password.clone());
-        }
-        // What the broker says on this receiver's behalf if it stops saying
-        // anything: every entity's availability points here, so a receiver
-        // that was switched off reads as unavailable rather than as a house
-        // full of sensors stuck at their last value.
-        opts.set_last_will(rumqttc::LastWill::new(
-            broker.availability(),
-            "offline",
-            rumqttc::QoS::AtLeastOnce,
-            true,
-        ));
-        let (client, mut conn) = rumqttc::Client::new(opts, QUEUE);
-        for event in conn.iter() {
+        let (client, mut conn) = mqtt::open(id, broker, QUEUE);
+        while let Some(event) = conn.accepted() {
             match event {
-                Ok(rumqttc::Event::Incoming(rumqttc::Packet::ConnAck(ack))) => {
-                    if ack.code != rumqttc::ConnectReturnCode::Success {
-                        return Err(format!("the broker refused the connection: {:?}", ack.code));
-                    }
+                Ok(true) => {
                     // The client is only published to the nodes once the
                     // broker has accepted: a queue filling up against a
                     // connection that was refused is readings thrown away
@@ -436,22 +424,17 @@ impl Publisher {
                     if let Ok(mut held) = self.client.lock() {
                         *held = Some(client.clone());
                     }
-                    let _ = client.try_publish(
-                        broker.availability(),
-                        rumqttc::QoS::AtLeastOnce,
-                        true,
-                        "online",
-                    );
+                    client.publish(&broker.availability(), true, true, "online".into());
                     self.generation.fetch_add(1, Ordering::Relaxed);
                     self.connected.store(true, Ordering::Relaxed);
                     if let Ok(mut e) = self.error.lock() {
                         *e = None;
                     }
                 }
-                Ok(_) => {}
+                Ok(false) => {}
                 Err(e) => {
                     self.disconnect();
-                    return Err(e.to_string());
+                    return Err(e);
                 }
             }
             // The operator changed the address, or this publisher is done,
@@ -1420,8 +1403,8 @@ mod tests {
         assert!(publisher.is_running(), "the thread is up");
 
         drop(feed);
-        let until = std::time::Instant::now() + Duration::from_secs(5);
-        while publisher.is_running() && std::time::Instant::now() < until {
+        let until = common::time::Instant::now() + Duration::from_secs(5);
+        while publisher.is_running() && common::time::Instant::now() < until {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(publisher.is_stopped(), "the publisher was told to stop");
@@ -2085,7 +2068,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
         let port = listener.local_addr().unwrap().port();
         let (tx, rx) = std::sync::mpsc::channel::<(String, String)>();
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             let (mut sock, _) = listener.accept().expect("a connection");
             let mut buf = Vec::new();
             let mut chunk = [0u8; 4096];
@@ -2127,7 +2110,7 @@ mod tests {
         let broker = Broker { port, ..Broker::new("127.0.0.1") };
         publisher.set_broker(Some(broker));
         let p = publisher.clone();
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             let b = p.broker().unwrap();
             let _ = p.connect(&b);
         });

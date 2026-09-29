@@ -12,6 +12,8 @@ members = [
     "crates/airspy",
     "crates/airspy-usb",
     "crates/rtlsdr-usb",
+    "crates/usbio",
+    "crates/webspin",
     "crates/rtlsdr",
     "crates/limesdr-sys",
     "crates/limesdr",
@@ -52,6 +54,7 @@ default-members = [
     "crates/airspy",
     "crates/airspy-usb",
     "crates/rtlsdr-usb",
+    "crates/usbio",
     "crates/rtlsdr",
     "crates/limesdr-sys",
     "crates/limesdr",
@@ -94,7 +97,7 @@ hfmodel = { path = "crates/hfmodel" }
 dsp = { path = "crates/dsp" }
 identify = { path = "crates/identify" }
 pipeline = { path = "crates/pipeline" }
-nodes = { path = "crates/nodes" }
+nodes = { path = "crates/nodes", default-features = false }
 audio = { path = "crates/audio" }
 hackrf = { path = "crates/hackrf" }
 airspy = { path = "crates/airspy" }
@@ -102,20 +105,21 @@ airspy-usb = { path = "crates/airspy-usb" }
 hackrf-usb = { path = "crates/hackrf-usb" }
 rtlsdr = { path = "crates/rtlsdr" }
 rtlsdr-usb = { path = "crates/rtlsdr-usb" }
+usbio = { path = "crates/usbio" }
 limesdr = { path = "crates/limesdr" }
 limesdr-sys = { path = "crates/limesdr-sys" }
-remote = { path = "crates/remote" }
+remote = { path = "crates/remote", default-features = false }
 sources = { path = "crates/sources" }
 decode = { path = "crates/decode" }
-datasets = { path = "crates/datasets" }
+datasets = { path = "crates/datasets", default-features = false }
 mbe = { path = "crates/mbe" }
 gps = { path = "crates/gps" }
-survey = { path = "crates/survey" }
-httpc = { path = "crates/httpc" }
+survey = { path = "crates/survey", default-features = false }
+httpc = { path = "crates/httpc", default-features = false }
 orbit = { path = "crates/orbit" }
-iqstream = { path = "crates/iqstream" }
-sdr-directory = { path = "crates/sdr-directory" }
-nostr-directory = { path = "crates/nostr-directory" }
+iqstream = { path = "crates/iqstream", default-features = false }
+sdr-directory = { path = "crates/sdr-directory", default-features = false }
+nostr-directory = { path = "crates/nostr-directory", default-features = false }
 
 anyhow = "1.0"
 # Raw ffmpeg, for the container and the codecs a broadcast multiplex uses.
@@ -153,7 +157,6 @@ hmac = "0.13"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
-    "blocking",
     "multipart",
 ] }
 wgpu = "29"

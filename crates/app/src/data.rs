@@ -10,6 +10,7 @@
 //! and nothing asks it a question until a digital voice frame arrives, so
 //! they load on first use and stay loaded.
 
+use common::time::{SystemTime, UNIX_EPOCH};
 use datasets::aircraft::Fleet;
 use datasets::airports::Airport;
 use datasets::cells::{Cells, Operators};
@@ -24,7 +25,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The zoom at which airports first appear on the map. Below this the view is
 /// wide enough that every marker would be a blob under a handful of aircraft,
@@ -174,7 +174,7 @@ pub fn set_repaint(ctx: egui::Context) {
 
 pub fn repaint() {
     if let Some(ctx) = REPAINT.get() {
-        ctx.request_repaint();
+        crate::window::repaint(ctx);
     }
 }
 
@@ -376,6 +376,57 @@ impl Which {
             );
             v
         })
+    }
+
+    pub fn built(self) -> bool {
+        match self {
+            Which::SpyServers => remote::Proto::SpyServer.built(),
+            Which::KiwiSdrs => remote::Proto::KiwiSdr.built(),
+            Which::Artemis => crate::build::Feature::Artemis.built(),
+            Which::Airports
+            | Which::Aircraft
+            | Which::Repeaters
+            | Which::DmrIds
+            | Which::NxdnIds
+            | Which::Gateway(_)
+            | Which::CellOperators
+            | Which::CellTowers
+            | Which::SigIdUnid
+            | Which::Satellites(_)
+            | Which::Transmitters
+            | Which::LaunchSites
+            | Which::Repo(_) => true,
+        }
+    }
+
+    fn reachable(self) -> bool {
+        let cross_origin = match self {
+            Which::Repo(r) => r.cross_origin,
+            Which::CellTowers => datasets::cells::towers_source(0, "").cross_origin,
+            Which::Airports
+            | Which::Aircraft
+            | Which::Repeaters
+            | Which::DmrIds
+            | Which::NxdnIds
+            | Which::Gateway(_)
+            | Which::CellOperators
+            | Which::Artemis
+            | Which::SigIdUnid
+            | Which::Satellites(_)
+            | Which::Transmitters
+            | Which::LaunchSites
+            | Which::SpyServers
+            | Which::KiwiSdrs => self.sources().iter().all(|s| s.cross_origin),
+        };
+        cross_origin || !common::platform::cross_origin_only()
+    }
+
+    pub fn available(self) -> bool {
+        self.built() && self.reachable()
+    }
+
+    pub fn shown() -> impl Iterator<Item = Which> {
+        Which::all().iter().copied().filter(|w| w.available())
     }
 
     /// The stable name a tool or a command line calls it by. The label is
@@ -812,9 +863,7 @@ pub struct Row {
 
 pub fn status() -> Vec<Row> {
     let cache = cache();
-    Which::all()
-        .iter()
-        .copied()
+    Which::shown()
         .map(|which| {
             let mut bytes = 0;
             let mut oldest: Option<u64> = None;
@@ -892,13 +941,16 @@ pub fn refresh(which: Which) {
 /// Load or refresh one dataset on a thread of its own, so a slow 85 MB
 /// download does not hold up the three small ones or the frame.
 fn load(which: Which, when: When) {
+    if !which.available() {
+        return;
+    }
     let w = work_slot(which);
     if w.busy.swap(true, Ordering::AcqRel) {
         return;
     }
     w.attempted.store(true, Ordering::Release);
     let name = which.label();
-    let started = std::thread::Builder::new()
+    let started = common::thread::Builder::new()
         .name(format!("dataset-{}", which.index()))
         .spawn(move || {
             let outcome = cache().map_or_else(

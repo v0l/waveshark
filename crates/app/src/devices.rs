@@ -5,6 +5,42 @@
 
 use common::{Device, DriverKind, Error, Result, Sps};
 
+#[cfg(feature = "airspy")]
+mod airspy;
+#[cfg(feature = "hackrf")]
+mod hackrf;
+#[cfg(feature = "limesdr")]
+mod limesdr;
+#[cfg(feature = "pluto")]
+mod pluto;
+#[cfg(feature = "rtlsdr")]
+mod rtlsdr;
+
+trait Driver {
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    fn usb_ids(&self) -> &'static [(u16, u16)];
+    fn list(&self) -> Vec<Entry>;
+    fn open(&self, e: &Entry) -> Option<Result<Box<dyn Device>>>;
+}
+
+const DRIVERS: &[&dyn Driver] = &[
+    #[cfg(feature = "rtlsdr")]
+    &rtlsdr::RtlSdr,
+    #[cfg(feature = "hackrf")]
+    &hackrf::HackRf,
+    #[cfg(feature = "airspy")]
+    &airspy::Airspy,
+    #[cfg(feature = "limesdr")]
+    &limesdr::LimeSdr,
+    #[cfg(feature = "pluto")]
+    &pluto::Pluto,
+];
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn usb_ids() -> Vec<(u16, u16)> {
+    DRIVERS.iter().flat_map(|d| d.usb_ids().iter().copied()).collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub kind: DriverKind,
@@ -32,7 +68,7 @@ pub struct Entry {
 }
 
 impl Entry {
-    fn local(
+    fn new(
         kind: DriverKind,
         index: usize,
         label: String,
@@ -71,19 +107,12 @@ fn combinations(hw: &[Entry]) -> Vec<Entry> {
         }
         let each = parts[0].rates.end().0;
         let span = Sps(each * n as u64);
+        let label = format!("{n} x {} ({})", kind.as_str(), span_label(span.as_f64()));
+        // The widest span and nothing else: a combiner exists to buy
+        // span, and a narrower one is one of the radios on its own.
         out.push(Entry {
-            kind: DriverKind::Combined,
-            index: out.len(),
-            label: format!("{n} x {} ({})", kind.as_str(), span_label(span.as_f64())),
-            // The widest span and nothing else: a combiner exists to buy
-            // span, and a narrower one is one of the radios on its own.
-            rates: span..=span,
-            steps: Vec::new(),
-            addr: None,
-            proto: None,
-            path: None,
-            pinned: None,
             parts,
+            ..Entry::new(DriverKind::Combined, out.len(), label, span..=span)
         });
     }
     out
@@ -92,48 +121,14 @@ fn combinations(hw: &[Entry]) -> Vec<Entry> {
 /// Rates an RTL-SDR will accept. See `rtlsdr::RtlSdr::open` for why the
 /// ceiling is below what the chip claims.
 pub const RTL_RATES: std::ops::RangeInclusive<Sps> = Sps(225_000)..=Sps(2_400_000);
-pub const HACKRF_RATES: std::ops::RangeInclusive<Sps> = Sps(2_000_000)..=Sps(20_000_000);
 
 /// Every attached radio, RTL-SDR first because they are the common case.
 pub fn list() -> Vec<Entry> {
-    let mut v = Vec::new();
-    let rtls = rtlsdr::enumerate();
-    for (d, label) in rtls.iter().zip(rtl_labels(&rtls)) {
-        v.push(Entry::local(DriverKind::RtlSdr, d.index, label, RTL_RATES));
-    }
-    for (i, serial) in hackrf::enumerate().into_iter().enumerate() {
-        v.push(Entry::local(
-            DriverKind::HackRf,
-            i,
-            format!("HackRF One {}", short(&serial)),
-            HACKRF_RATES,
-        ));
-    }
-    for a in airspy::enumerate() {
-        v.push(airspy_entry(&a));
-    }
-    for a in airspy::hf::enumerate() {
-        v.push(airspy_hf_entry(&a));
-    }
-    #[cfg(feature = "limesdr")]
-    for e in limesdr::enumerate() {
-        v.push(Entry::local(
-            DriverKind::LimeSdr,
-            e.index,
-            e.label(),
-            Sps(1_000_000)..=e.rate_max(),
-        ));
-    }
-    for (i, p) in remote::pluto::attached().into_iter().enumerate() {
-        v.push(Entry {
-            addr: Some(remote::pluto::USB_ADDR.to_string()),
-            ..Entry::local(DriverKind::Pluto, i, p.label(), remote::pluto::RATES)
-        });
-    }
+    let mut v: Vec<Entry> = DRIVERS.iter().flat_map(|d| d.list()).collect();
     // After the radios themselves: a stitched receiver is a thing somebody
     // chooses, not what a fresh session should open on.
     v.extend(combinations(&v));
-    for (i, r) in streams().into_iter().enumerate() {
+    for (i, r) in streams().into_iter().enumerate().filter(|(_, r)| r.proto.built()) {
         v.extend(stream_entries(i, &r));
     }
     // Last, so plugging a radio in does not change which receiver a fresh
@@ -143,21 +138,6 @@ pub fn list() -> Vec<Entry> {
         v.push(c.entry(i));
     }
     v
-}
-
-fn airspy_entry(a: &airspy::Found) -> Entry {
-    let mut e = Entry::local(DriverKind::Airspy, a.index, a.label(), airspy::rate_range(&a.rates));
-    e.steps = a.rates.iter().map(|r| Sps(*r as u64)).collect();
-    e.steps.sort();
-    e
-}
-
-fn airspy_hf_entry(a: &airspy::hf::Found) -> Entry {
-    let mut e =
-        Entry::local(DriverKind::AirspyHf, a.index, a.label(), airspy::hf::rate_range(&a.rates));
-    e.steps = a.rates.iter().map(|r| Sps(*r as u64)).collect();
-    e.steps.sort();
-    e
 }
 
 /// A capture on disk, offered as a receiver that plays it back.
@@ -183,20 +163,14 @@ pub struct Capture {
 impl Capture {
     pub fn entry(&self, index: usize) -> Entry {
         let name = self.path.file_name().and_then(|s| s.to_str()).unwrap_or("capture");
+        let label = format!("{name} ({:.1}s)", self.seconds);
         Entry {
-            kind: DriverKind::File,
-            index,
-            label: format!("{name} ({:.1}s)", self.seconds),
-            rates: self.rate..=self.rate,
-            steps: Vec::new(),
-            addr: None,
-            proto: None,
             path: Some(self.path.clone()),
             // A recording was taken at one frequency and cannot be moved off
             // it. Retuning would leave the dial saying one thing while the
             // samples said another.
             pinned: self.center,
-            parts: Vec::new(),
+            ..Entry::new(DriverKind::File, index, label, self.rate..=self.rate)
         }
     }
 }
@@ -228,19 +202,22 @@ pub fn add_capture(
     format: common::SampleFormat,
 ) -> Option<Capture> {
     let path = path.into();
-    std::fs::metadata(&path).ok().filter(|m| m.is_file())?;
+    common::fs::blocking::metadata(&path).ok().filter(|m| m.is_file())?;
     let bytes = sources::sigmf::locate(&path).ok()?.bytes;
     let len = bytes.end - bytes.start;
     if rate.0 == 0 {
         return None;
     }
-    let c = Capture {
+    Some(keep_capture(Capture {
         path,
         rate,
         center,
         format,
         seconds: (len / format.bytes_per_sample() as u64) as f64 / rate.as_f64(),
-    };
+    }))
+}
+
+pub fn keep_capture(c: Capture) -> Capture {
     let mut v = CAPTURES.lock();
     // Opening the same file twice is the same receiver, not a second one.
     if let Some(i) = v.iter().position(|x| x.path == c.path) {
@@ -248,7 +225,7 @@ pub fn add_capture(
     } else {
         v.push(c.clone());
     }
-    Some(c)
+    c
 }
 
 pub fn remove_capture(path: &std::path::Path) {
@@ -365,16 +342,9 @@ fn stream_entries(index: usize, r: &Remote) -> Vec<Entry> {
         Err(e) => {
             tracing::debug!("{} {}: {e}", r.proto, r.addr);
             vec![Entry {
-                kind: DriverKind::Network,
-                index,
-                label: format!("{name} (offline)"),
-                rates: RTL_RATES,
-                steps: Vec::new(),
                 addr: Some(r.addr.clone()),
                 proto: Some(r.proto),
-                path: None,
-                pinned: None,
-                parts: Vec::new(),
+                ..Entry::new(DriverKind::Network, index, format!("{name} (offline)"), RTL_RATES)
             }]
         }
     }
@@ -410,47 +380,11 @@ fn answered(index: usize, name: &str, proto: remote::Proto, p: remote::Probe) ->
     }
 }
 
-/// What each dongle is called in the receiver list
-///
-/// Nearly every dongle ships with the serial `00000001`, so two of a kind
-/// read the same and the port each is plugged into is the only thing telling
-/// them apart.
-fn rtl_labels(found: &[rtlsdr::Enumerated]) -> Vec<String> {
-    found
-        .iter()
-        .map(|d| {
-            let name = if d.product.is_empty() { &d.name } else { &d.product };
-            let tail = short(&d.serial);
-            let label = if tail.is_empty() { name.clone() } else { format!("{name} {tail}") };
-            let twin = found
-                .iter()
-                .any(|o| o.index != d.index && o.product == d.product && o.serial == d.serial);
-            match twin {
-                true => format!("{label} ({})", d.port),
-                false => label,
-            }
-        })
-        .collect()
-}
-
-/// Serial tails identify a unit; the leading zeros do not.
-fn short(s: &str) -> String {
-    let t = s.trim_start_matches('0');
-    if t.len() > 8 { t[t.len() - 8..].to_string() } else { t.to_string() }
-}
-
 pub fn open(e: &Entry) -> Result<Box<dyn Device>> {
+    if let Some(opened) = DRIVERS.iter().find_map(|d| d.open(e)) {
+        return opened;
+    }
     match e.kind {
-        DriverKind::RtlSdr => Ok(Box::new(rtlsdr::RtlSdr::open(e.index as u32)?)),
-        DriverKind::HackRf => Ok(Box::new(hackrf::HackRfDevice::open(e.index)?)),
-        DriverKind::Airspy => Ok(Box::new(airspy::Airspy::open(e.index)?)),
-        DriverKind::AirspyHf => Ok(Box::new(airspy::hf::AirspyHf::open(e.index)?)),
-        #[cfg(feature = "limesdr")]
-        DriverKind::LimeSdr => Ok(Box::new(limesdr::LimeSdr::open(e.index)?)),
-        DriverKind::Pluto => {
-            let addr = e.addr.as_deref().ok_or(Error::NoDevice)?;
-            Ok(Box::new(remote::pluto::Pluto::open(addr, DriverKind::Pluto)?))
-        }
         DriverKind::Network => {
             let addr = e.addr.as_deref().ok_or(Error::NoDevice)?;
             e.proto.ok_or(Error::NoDevice)?.open(addr)
@@ -622,65 +556,6 @@ mod tests {
     }
 
     #[test]
-    fn an_airspy_offers_its_firmware_rates_and_the_slowest_narrowed_to_78_khz() {
-        let spans = |rates: Vec<u32>, model| {
-            let found = airspy::Found { index: 0, serial: "A74068C82F531693".into(), model, rates };
-            let e = airspy_entry(&found);
-            assert_eq!(e.kind, DriverKind::Airspy);
-            spans_of(&e).iter().map(|s| (s.label.clone(), s.rate, s.zoom)).collect::<Vec<_>>()
-        };
-        let r2 = spans(vec![10_000_000, 2_500_000], airspy::Model::R2);
-        let want = |base: f64, top: f64, top_label: &str, base_label: &str, zooms: &[&str]| {
-            let mut v: Vec<(String, f64, usize)> = zooms
-                .iter()
-                .rev()
-                .enumerate()
-                .map(|(i, l)| (l.to_string(), base, 1 << (zooms.len() - i)))
-                .collect();
-            v.push((base_label.into(), base, 1));
-            v.push((top_label.into(), top, 1));
-            v
-        };
-        assert_eq!(
-            r2,
-            want(2.5e6, 10e6, "10M", "2.500M", &["1.250M", "625k", "312k", "156k", "78k"])
-        );
-        let mini = spans(vec![6_000_000, 3_000_000], airspy::Model::Mini);
-        assert_eq!(mini, want(3e6, 6e6, "6M", "3M", &["1.500M", "750k", "375k", "188k", "94k"]));
-    }
-
-    #[test]
-    fn an_airspy_hf_offers_every_firmware_rate_and_narrows_the_slowest_to_48_khz() {
-        let found = airspy::hf::Found {
-            index: 0,
-            serial: "3952C3DA2A3C0B35".into(),
-            product: "AIRSPY HF+ Discovery".into(),
-            rates: vec![912_000, 768_000, 456_000, 384_000, 256_000, 192_000],
-        };
-        let e = airspy_hf_entry(&found);
-        assert_eq!(
-            (e.kind, e.label.as_str()),
-            (DriverKind::AirspyHf, "Airspy HF+ Discovery 2A3C0B35")
-        );
-        let spans: Vec<(String, usize)> =
-            spans_of(&e).iter().map(|s| (s.label.clone(), s.zoom)).collect();
-        let want: Vec<(String, usize)> = [
-            ("48k", 4),
-            ("96k", 2),
-            ("192k", 1),
-            ("256k", 1),
-            ("384k", 1),
-            ("456k", 1),
-            ("768k", 1),
-            ("912k", 1),
-        ]
-        .iter()
-        .map(|(l, z)| (l.to_string(), *z))
-        .collect();
-        assert_eq!(spans, want);
-    }
-
-    #[test]
     fn a_hackrf_can_be_narrowed_to_a_pmr_channel() {
         // 12.5 kHz channels on a 2 MHz span are half a pixel wide. The
         // narrowest span offered has to make one of them readable, which
@@ -736,40 +611,12 @@ mod tests {
         assert_eq!(span_label(625_000.0), "625k");
     }
 
-    /// Two dongles of a kind carry the same serial, so the list has to say
-    /// which is which or a second receiver cannot be picked at all.
-    #[test]
-    fn two_dongles_of_a_kind_are_told_apart_by_their_port() {
-        let dongle = |index: usize, serial: &str, port: &str| rtlsdr::Enumerated {
-            index,
-            vid: 0x0bda,
-            pid: 0x2838,
-            name: "RTL2838UHIDIR".into(),
-            manufacturer: "Realtek".into(),
-            product: "RTL2838UHIDIR".into(),
-            serial: serial.into(),
-            port: port.into(),
-        };
-        let twins = [dongle(0, "00000001", "7-4"), dongle(1, "00000001", "7-8")];
-        assert_eq!(rtl_labels(&twins), ["RTL2838UHIDIR 1 (7-4)", "RTL2838UHIDIR 1 (7-8)"]);
-
-        let pair = [dongle(0, "00000001", "7-4"), dongle(1, "3579c1df", "7-8")];
-        assert_eq!(rtl_labels(&pair), ["RTL2838UHIDIR 1", "RTL2838UHIDIR 3579c1df"]);
-    }
-
-    #[test]
-    fn serials_shorten_to_the_identifying_tail() {
-        assert_eq!(short("0000000000000000457863dc3579c1df"), "3579c1df");
-        assert_eq!(short("00000001"), "1");
-        assert_eq!(short(""), "");
-    }
-
     /// A capture is a receiver. What makes it usable is that the filename
     /// carries the rate and the centre, so the entry can say what it will
     /// deliver before anything opens it.
     #[test]
     fn a_capture_opened_by_hand_is_offered_as_a_receiver() {
-        let dir = std::env::temp_dir().join("sr_capture_open");
+        let dir = common::platform::scratch_dir().join("sr_capture_open");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // A second of 250 kS/s, eight bit complex.
@@ -833,7 +680,7 @@ mod tests {
     /// reach the source that reads the bytes.
     #[test]
     fn a_capture_named_for_nothing_is_a_receiver_once_it_is_described() {
-        let dir = std::env::temp_dir().join("sr_capture_described");
+        let dir = common::platform::scratch_dir().join("sr_capture_described");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("someone elses recording.iq");
@@ -865,7 +712,7 @@ mod tests {
 
     #[test]
     fn a_sigmf_recording_is_a_receiver_as_its_metadata_describes_it() {
-        let dir = std::env::temp_dir().join("sr_capture_sigmf");
+        let dir = common::platform::scratch_dir().join("sr_capture_sigmf");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let data = dir.join("handheld.bin");
@@ -897,9 +744,9 @@ mod tests {
     #[test]
     fn matching_dongles_are_offered_as_one_wider_receiver() {
         let hw = vec![
-            Entry::local(DriverKind::RtlSdr, 0, "RTL a".into(), RTL_RATES),
-            Entry::local(DriverKind::RtlSdr, 1, "RTL b".into(), RTL_RATES),
-            Entry::local(DriverKind::HackRf, 0, "HackRF".into(), HACKRF_RATES),
+            Entry::new(DriverKind::RtlSdr, 0, "RTL a".into(), RTL_RATES),
+            Entry::new(DriverKind::RtlSdr, 1, "RTL b".into(), RTL_RATES),
+            Entry::new(DriverKind::HackRf, 0, "HackRF".into(), Sps(2_000_000)..=Sps(20_000_000)),
         ];
         let combos = combinations(&hw);
         assert_eq!(combos.len(), 1, "one HackRF cannot be combined with itself");
@@ -914,7 +761,7 @@ mod tests {
 
         // Three of them are one receiver of three, not three pairs.
         let three: Vec<Entry> = (0..3)
-            .map(|i| Entry::local(DriverKind::RtlSdr, i, format!("RTL {i}"), RTL_RATES))
+            .map(|i| Entry::new(DriverKind::RtlSdr, i, format!("RTL {i}"), RTL_RATES))
             .collect();
         let combos = combinations(&three);
         assert_eq!(combos.len(), 1);
@@ -924,8 +771,8 @@ mod tests {
         // Radios that cannot run at the same rate cannot be slices of one
         // span: the seam would sit somewhere different for each.
         let odd = vec![
-            Entry::local(DriverKind::RtlSdr, 0, "RTL a".into(), RTL_RATES),
-            Entry::local(DriverKind::RtlSdr, 1, "RTL b".into(), Sps(225_000)..=Sps(2_048_000)),
+            Entry::new(DriverKind::RtlSdr, 0, "RTL a".into(), RTL_RATES),
+            Entry::new(DriverKind::RtlSdr, 1, "RTL b".into(), Sps(225_000)..=Sps(2_048_000)),
         ];
         assert!(combinations(&odd).is_empty());
 
@@ -935,8 +782,8 @@ mod tests {
 
     #[test]
     fn the_same_index_on_two_drivers_is_not_the_same_device() {
-        let a = Entry::local(DriverKind::RtlSdr, 0, "a".into(), RTL_RATES);
-        let b = Entry::local(DriverKind::HackRf, 0, "b".into(), HACKRF_RATES);
+        let a = Entry::new(DriverKind::RtlSdr, 0, "a".into(), RTL_RATES);
+        let b = Entry::new(DriverKind::HackRf, 0, "b".into(), Sps(2_000_000)..=Sps(20_000_000));
         assert_ne!(a, b, "device identity must include the driver");
     }
 

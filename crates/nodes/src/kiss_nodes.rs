@@ -46,7 +46,7 @@ const QUEUE_DEPTH: usize = 32;
 ///
 /// A blocked socket must not stall the packet bus: a client that cannot keep
 /// up is disconnected instead.
-const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+const WRITE_TIMEOUT: common::time::Duration = common::time::Duration::from_millis(100);
 
 /// What both nodes share: the listener, the clients, and the queue between
 /// them.
@@ -69,7 +69,7 @@ pub struct Tnc {
     error: Mutex<Option<String>>,
     stop: AtomicBool,
     next_id: AtomicU64,
-    accepting: Mutex<Option<std::thread::JoinHandle<()>>>,
+    accepting: Mutex<Option<common::thread::JoinHandle<()>>>,
 }
 
 struct Client {
@@ -196,7 +196,7 @@ pub fn close(addr: SocketAddr) {
     }
 }
 
-const WAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+const WAKE_TIMEOUT: common::time::Duration = common::time::Duration::from_secs(1);
 
 fn reachable(bound: SocketAddr) -> SocketAddr {
     let ip = match bound.ip() {
@@ -238,7 +238,7 @@ pub fn server(addr: SocketAddr) -> Arc<Tnc> {
         Ok(l) => {
             *tnc.bound.lock().unwrap() = l.local_addr().ok();
             let t = tnc.clone();
-            *tnc.accepting.lock().unwrap() = std::thread::Builder::new()
+            *tnc.accepting.lock().unwrap() = common::thread::Builder::new()
                 .name(format!("kiss-{addr}"))
                 .spawn(move || accept_loop(l, t))
                 .ok();
@@ -270,7 +270,7 @@ fn accept_loop(listener: TcpListener, tnc: Arc<Tnc>) {
             tnc.connected.store(clients.len(), Ordering::Relaxed);
         }
         let t = tnc.clone();
-        let _ = std::thread::Builder::new()
+        let _ = common::thread::Builder::new()
             .name(format!("kiss-client-{id}"))
             .spawn(move || read_loop(reader, id, t));
     }
@@ -469,12 +469,12 @@ mod tests {
     /// Wait for something the client threads do, rather than sleeping a
     /// guessed interval: a connection and a read are on other threads.
     fn until(what: &str, mut done: impl FnMut() -> bool) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while std::time::Instant::now() < deadline {
+        let deadline = common::time::Instant::now() + common::time::Duration::from_secs(5);
+        while common::time::Instant::now() < deadline {
             if done() {
                 return;
             }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::thread::sleep(common::time::Duration::from_millis(5));
         }
         panic!("timed out waiting for {what}");
     }
@@ -490,7 +490,7 @@ mod tests {
     fn frames_off_the_bus_reach_a_client_as_kiss() {
         let (tnc, addr) = serving();
         let mut client = TcpStream::connect(addr).expect("connected");
-        client.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        client.set_read_timeout(Some(common::time::Duration::from_secs(5))).unwrap();
         until("the server to see the client", || tnc.connected() == 1);
 
         let mut node = KissTncNode::attach(tnc.clone());
@@ -655,7 +655,7 @@ mod tests {
         let addr = free_port();
         let tnc = server(addr);
         let mut client = TcpStream::connect(addr).expect("connected");
-        client.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        client.set_read_timeout(Some(common::time::Duration::from_secs(5))).unwrap();
         until("the server to see the client", || tnc.connected() == 1);
         let mut keying = crate::aprs_nodes::AprsTxNode::keying(addr);
         assert!(Arc::ptr_eq(keying.attached().unwrap(), &tnc));

@@ -18,7 +18,7 @@ fn main() {
     let mut open_now = 0usize;
     let mut max_open = 0usize;
     let mut hist = std::collections::BTreeMap::<i64, usize>::new();
-    let t0 = std::time::Instant::now();
+    let t0 = common::time::Instant::now();
     for chunk in iq.chunks(block) {
         for ev in det.process(chunk) {
             match ev {

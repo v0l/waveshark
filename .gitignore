@@ -48,3 +48,4 @@ testdata/survey/
 
 # Rendered videos, one per run.
 brag-output/
+.wrangler/

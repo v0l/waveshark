@@ -11,21 +11,10 @@
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
-/// The mark the window manager, the dock and the task bar draw.
-///
-/// Compiled in rather than read from a path beside the binary: the release
-/// archives hold an executable and a text file, so anything looked up at run
-/// time is missing on every machine but a checkout.
-fn window_icon() -> Option<egui::IconData> {
-    let png = include_bytes!("../../../assets/logo/waveshark-icon.png");
-    let img = image::load_from_memory(png).ok()?.into_rgba8();
-    let (width, height) = img.dimensions();
-    Some(egui::IconData { rgba: img.into_raw(), width, height })
-}
-
 mod agent;
 mod bands;
 mod beacondb;
+mod build;
 mod calllog;
 mod calls;
 mod chain;
@@ -36,8 +25,8 @@ mod corpus;
 mod data;
 mod devices;
 mod dial;
+mod dialog;
 mod directories;
-mod gpu;
 mod heatmap;
 mod i18n;
 mod icons;
@@ -67,6 +56,7 @@ mod session;
 mod shutdown;
 mod station;
 mod stations;
+mod task;
 mod tracks;
 /// The transcript view and the model behind it. Only the `stt` feature
 /// transcodes anything, so without it the machinery is compiled and never
@@ -79,7 +69,9 @@ mod ui;
 mod update;
 mod videobus;
 mod waterfall;
+mod webusb;
 mod wheel;
+mod window;
 mod wspkt;
 
 /// `--probe <mhz>` runs the radio thread without a window and reports what the
@@ -123,12 +115,12 @@ fn squelch_probe(mhz: f64, mode: radio::Demod) {
         "muted".into(),
         pipeline::param::ParamValue::Bool(true),
     ));
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    std::thread::sleep(common::time::Duration::from_secs(2));
 
     let mut readings = Vec::new();
-    let start = std::time::Instant::now();
+    let start = common::time::Instant::now();
     while start.elapsed().as_secs_f32() < 6.0 {
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(common::time::Duration::from_millis(50));
         let Some(st) = r.status.channel_state(1) else {
             continue;
         };
@@ -200,13 +192,13 @@ fn probe(mhz: f64, listen: bool, want: Option<String>, dc_on: bool) {
         ));
         println!("decoding a WFM channel while measuring");
     }
-    let start = std::time::Instant::now();
+    let start = common::time::Instant::now();
     let mut n = 0;
     // RDS needs longer than a spectrum check: a station name is four groups
     // and radiotext is sixteen, repeated every couple of seconds.
     let secs = if listen { 25 } else { 8 };
     while start.elapsed().as_secs() < secs {
-        let Ok(f) = r.frames.recv_timeout(std::time::Duration::from_secs(3)) else {
+        let Ok(f) = r.frames.recv_timeout(common::time::Duration::from_secs(3)) else {
             break;
         };
         n += 1;
@@ -315,7 +307,7 @@ fn mpx_report(mhz: f64) {
         (a * a + b * b - c * a * b).sqrt() / x.len() as f64
     };
 
-    let start = std::time::Instant::now();
+    let start = common::time::Instant::now();
     let mut n = 0;
     while start.elapsed().as_secs() < 12 {
         let Ok(buf) = stream.read() else { break };
@@ -364,7 +356,7 @@ fn bench_audio() {
         let mut a = radio::Audio::new(120_000.0, rate, mode, 48_000.0);
         a.process(&sig, 0.5);
         let reps = 24;
-        let t = std::time::Instant::now();
+        let t = common::time::Instant::now();
         for _ in 0..reps {
             a.process(&sig, 0.5);
         }
@@ -429,13 +421,13 @@ fn bench_iq(spec: &str, block: usize) -> anyhow::Result<()> {
     let mut blocks: Vec<Blk> = Vec::with_capacity(per_pass * passes);
     let mut prev: Vec<u64> = rx.node_costs().into_iter().map(|(_, us)| us).collect();
     let mut delta = vec![0u64; prev.len()];
-    let wall = std::time::Instant::now();
+    let wall = common::time::Instant::now();
     for _ in 0..passes {
         for chunk in buf.samples.chunks(block) {
             if chunk.len() < block {
                 break;
             }
-            let t = std::time::Instant::now();
+            let t = common::time::Instant::now();
             if rx.process(chunk).is_err() {
                 anyhow::bail!("the graph refused a block");
             }
@@ -456,7 +448,7 @@ fn bench_iq(spec: &str, block: usize) -> anyhow::Result<()> {
             for (i, (_, us)) in now.iter().enumerate() {
                 prev[i] = *us;
             }
-            let _ = rx.rows(std::time::Instant::now());
+            let _ = rx.rows(common::time::Instant::now());
             blocks.push(Blk { us, top });
         }
     }
@@ -611,7 +603,7 @@ fn bench_tune() {
     const N: usize = 60;
     for i in 0..N {
         let f = 95_000_000 + (i as u64 % 20) * 25_000;
-        let t = std::time::Instant::now();
+        let t = common::time::Instant::now();
         let _ = dev.set_center(Hz(f));
         let ms = t.elapsed().as_secs_f64() * 1e3;
         best = best.min(ms);
@@ -641,12 +633,12 @@ fn bench_pan() {
 
     let count = |label: &str, drag: bool| {
         // Settle, then count for three seconds.
-        std::thread::sleep(std::time::Duration::from_millis(600));
+        std::thread::sleep(common::time::Duration::from_millis(600));
         while r.frames.try_recv().is_ok() {}
-        let t = std::time::Instant::now();
+        let t = common::time::Instant::now();
         let mut n = 0;
         let mut step = 0u64;
-        while t.elapsed() < std::time::Duration::from_secs(3) {
+        while t.elapsed() < common::time::Duration::from_secs(3) {
             if drag {
                 // One per frame at 60 fps, which is what a drag produces.
                 step = (step + 1) % 200;
@@ -655,7 +647,7 @@ fn bench_pan() {
             while r.frames.try_recv().is_ok() {
                 n += 1;
             }
-            std::thread::sleep(std::time::Duration::from_millis(16));
+            std::thread::sleep(common::time::Duration::from_millis(16));
         }
         println!("{label:22}  {:.1} frames/s", n as f64 / 3.0);
     };
@@ -669,7 +661,7 @@ fn bench_pan() {
         true,
     );
     r.send(radio::Cmd::Stop);
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::thread::sleep(common::time::Duration::from_millis(300));
 }
 
 /// Decode a capture, or a directory of them, and print what came out.
@@ -801,13 +793,13 @@ fn scan(
     if print {
         println!("{}", row::Reception::line_header());
     }
-    let start = std::time::Instant::now();
+    let start = common::time::Instant::now();
     let mut n = 0u64;
     loop {
         // The spectrum frames are for a window; drained so the radio thread
         // never waits on a display that is not there.
         while r.frames.try_recv().is_ok() {}
-        match r.decodes.recv_timeout(std::time::Duration::from_millis(500)) {
+        match r.decodes.recv_timeout(common::time::Duration::from_millis(500)) {
             Ok(recs) => {
                 for rec in recs {
                     n += 1;
@@ -1476,9 +1468,16 @@ fn attach_console() {
 #[cfg(not(windows))]
 fn attach_console() {}
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
+    run(Args::parse())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+fn run(args: Args) -> eframe::Result<()> {
     attach_console();
-    let args = Args::parse();
 
     // Registered before anything enumerates: a radio on the network is
     // configuration, and nothing on the bus will reveal it.
@@ -1627,18 +1626,9 @@ fn main() -> eframe::Result<()> {
     // the first frames draw.
     update::check();
 
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size(if args.shot.is_some() { [1400.0, 860.0] } else { [1280.0, 800.0] })
-        .with_min_inner_size([800.0, 500.0])
-        .with_title("waveshark");
-    if let Some(icon) = window_icon() {
-        viewport = viewport.with_icon(icon);
-    }
-    let mut opts = eframe::NativeOptions { viewport, ..Default::default() };
-    gpu::prefer_dx12_on_windows(&mut opts.wgpu_options);
-    eframe::run_native(
-        "waveshark",
-        opts,
+    let large = args.shot.is_some();
+    window::open(
+        large,
         Box::new(move |cc| {
             let mut app = ui::App::new(cc, args.device.as_deref());
             if let Some(db) = args.rf_gain {
@@ -1841,7 +1831,7 @@ mod tests {
     /// nothing out of noise either way.
     #[test]
     fn a_replay_reads_a_recording_named_for_nothing_once_the_argument_describes_it() {
-        let dir = std::env::temp_dir().join("sr_replay_spec");
+        let dir = common::platform::scratch_dir().join("sr_replay_spec");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("someone elses recording.iq");

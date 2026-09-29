@@ -12,19 +12,19 @@
 //! catching its flights, and 120 of the 900 have no schedule at all.
 
 use crate::cache::{Cache, Error, Source, When};
-use std::time::Duration;
+use common::time::Duration;
 
 /// Sites are added and corrected by hand, a few a week at most, so a check a
 /// day apart is already far oftener than the file changes.
 const MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 
 pub fn source() -> Source {
-    Source::http("sondehub-sites.json", "https://api.v2.sondehub.org/sites", MAX_AGE).checked(
-        |head| match head.starts_with(b"{") {
+    Source::http("sondehub-sites.json", "https://api.v2.sondehub.org/sites", MAX_AGE)
+        .checked(|head| match head.starts_with(b"{") {
             true => Ok(()),
             false => Err("SondeHub did not answer with the launch site list".into()),
-        },
-    )
+        })
+        .cross_origin()
 }
 
 /// What a station flies, from the WMO radiosonde type in BUFR table 0 02 011.

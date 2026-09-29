@@ -21,7 +21,7 @@ fn main() {
     d.set_center(Hz(95_800_000)).unwrap();
     let mut s = d.start_rx().unwrap();
     // Warm up, then sweep gain and check the level actually follows.
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     let (mut n, mut blocks) = (0u64, 0u64);
     while t.elapsed().as_secs_f64() < 3.0 {
         if let Ok(b) = s.read() {

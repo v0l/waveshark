@@ -80,7 +80,7 @@ fn main() -> common::Result<()> {
         if half { "half duplex" } else { "full duplex" }
     );
     let blocks = (secs * RATE / BLOCK as f64).ceil() as usize;
-    let start = std::time::Instant::now();
+    let start = common::time::Instant::now();
     for _ in 0..blocks {
         let buf = g.input_buf();
         buf.clear();
@@ -94,7 +94,7 @@ fn main() -> common::Result<()> {
     if let Some(n) = g.node_mut(id)
         && let Some(tx) = n.as_any_mut().downcast_mut::<TxSinkNode>()
     {
-        tx.finish(std::time::Duration::from_secs(2));
+        tx.finish(common::time::Duration::from_secs(2));
         sent = tx.written();
         idle = tx.underruns();
     }

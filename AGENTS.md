@@ -49,7 +49,7 @@ without touching it? If not, it is in the wrong file.
 `tea` is TETRA decryption, `ambe` is DMR speech through `crates/mbe`. Both
 default on, so `cargo test` at the root builds them; `crates/mbe` is not a
 default workspace member and `cargo test -p mbe` must be asked for by name.
-Releases build `--no-default-features --features limesdr,stt,cuda,mcp`, with
+Releases build `--no-default-features --features native,limesdr,stt,cuda,mcp`, with
 `ffmpeg` added on macOS alone: Homebrew has a new enough one, where the
 release's Linux image has ffmpeg 4.4 and Windows has none at all, so those
 binaries show no pictures off a multiplex. macOS drops `cuda` for Metal.
@@ -66,6 +66,82 @@ build with `cuda` on starts where there is no NVIDIA runtime and reads speech
 on the CPU. Building it still needs the toolkit, because the kernels are
 compiled. `readelf -d` naming libcudart or libcublas means the fork has been
 lost and the release binary will not start on most machines.
+
+## A distinct feature is a cargo feature
+
+Anything somebody could want a build without gets its own feature, on by
+default: a tuner driver, a network protocol, a native library, a model, a
+server. The browser build is the reason. It is `tools/web.sh`, nightly with
+shared memory so rayon runs on Web Workers (`tools/web.sh check` to only
+check it, `crates/app/web/serve.py` to serve it cross-origin isolated,
+`tools/web.sh deploy` to publish it to the `waveshark-app` Pages project), and
+the build with everything the browser cannot carry turned off, and it only
+works if every such thing can be turned off on its own. In the app each
+tuner is a feature (`rtlsdr`, `hackrf`, `airspy`, `pluto`, `limesdr`), as is
+each network protocol (`iqstream`, `rtl_tcp`, `spyserver`, `kiwisdr`), `homeassistant`, `gps`,
+`update`, `survey`, `artemis` and `feeds`; `usb` and `native` gather them for
+the release lines. A browser cannot open a socket or read a host without CORS,
+so it gets no feeds, no remote tuners and only the datasets that allow it; the
+protocol descriptions are copied next to the wasm by `tools/web.sh` from
+`testdata/protocols` and read from there.
+
+The RTL-SDR, HackRF and Airspy drivers reach USB through `usbio`, which is
+nusb natively and, in the browser, a WebUSB worker that owns the devices while
+the radio thread blocks on it. A browser's page thread may not block at all,
+so `tools/web.sh` runs `webspin` over the module to make every wait on that
+thread spin instead; a lock the interface shares with a worker would otherwise
+stop the page the first time it was contended.
+
+Gate the module, never the lines. There are two shapes, and a feature takes
+whichever fits:
+
+- **A table entry.** The optional code is a module behind a trait, and the
+  feature goes on its `mod` line and its one entry in the table the program
+  walks. `crates/app/src/devices.rs` has a `mod` per driver and one
+  `DRIVERS` table; `remote::PROTOCOLS` is the same for the network tuners.
+- **A stand-in.** Where the rest of the program names the thing's types, the
+  feature swaps the module for a stand-in with the same API:
+  `#[cfg(feature = "x")] mod m;` beside
+  `#[cfg(not(feature = "x"))] #[path = "m_offline.rs"] mod m;`. A stand-in
+  never pretends: a constructor returns the error that says what the build
+  left out, and a type that can then never exist is
+  `struct Server(std::convert::Infallible)` with every method
+  `match self.0 {}`. `iqstream::server`, `nostr_directory::NostrDirectory`,
+  the MQTT client under `homeassistant_nodes` and `nodes::ambe` are built
+  this way, and the code that uses them has no `cfg` at all.
+
+What differs by platform rather than by choice takes the same stand-in
+shape keyed on `target_arch = "wasm32"`: `common::thread` for threads, which
+are rayon workers in the browser, `common::fs` for files, which is async and
+lives in OPFS in the browser, `common::fs::blocking` for the same calls
+from a worker thread (it refuses the page's own thread), `common::store` for
+the small settings files the interface reads and writes, `crate::task` for
+async work, `crate::dialog` for file pickers, `crate::window` for the event
+loop, and `httpc::get` for a request made from a worker thread.
+
+- The optional code lives in its own module or crate with its tests beside
+  it, so the tests go with the feature.
+- A helper two optional modules share goes somewhere always built
+  (`common::serial_tail`), not behind `cfg(any(..))`.
+- A `#[cfg]` inside a function body or on a `match` arm means the seam is in
+  the wrong place.
+- A library crate turns its own features on by default and is named in the
+  workspace manifest with `default-features = false`, so the app decides.
+
+What a build leaves out is not on the screen. A view, a card, a choice in a
+list, a button or an agent tool that needs a feature asks
+`crate::build::Feature::X.built()` and is not drawn without it, rather than
+being drawn and answering with the stand-in's error. The question goes to
+the data the pane already walks (`View::built`, `remote::Proto::built_all`,
+`Directory::built`, `data::Which::shown`, `Speech::built`, a catalogue tool's
+`needs`), so the pane itself stays free of feature names. A new feature is a
+variant of `build::Feature`, whose test checks it against the manifest.
+
+A new feature is listed in `default`. Where a
+release should carry it, add it to the `features:` lines in
+`.github/workflows/build.yml`, `ci.yml` and `tools/deps.ceiling` together.
+CI checks the app with every feature off, natively and for the browser,
+without a warning of its own.
 
 ## Everything the receiver does is a node
 
@@ -212,10 +288,15 @@ dialog (`radio`, `spectrum`, `waterfall`, `log`, `scanners`, `memory`,
 
 ## Every HTTP request goes out under the same name
 
-`crates/httpc` holds the user agent and builds every client, async or
-blocking. No `reqwest::Client::builder()` anywhere else, and no second HTTP
-client crate: `crates/datasets` and `crates/hfmodel` fetch through
-`httpc::blocking` and `httpc::blocking_download` too.
+`crates/httpc` holds the user agent and builds every client. No
+`reqwest::Client::builder()` anywhere else, no second HTTP client crate, and
+no `reqwest::blocking`: every request is asynchronous, because that is the
+only kind a browser makes. A request is `httpc::get` or `httpc::post`.
+Asynchronous code awaits `.send()`. Something the interface asks for is a
+`poll_promise::Promise` from `crate::task`, never a thread waiting on a
+socket. A worker thread that has to have the answer before it goes on calls
+`.wait()`, which runs the request on the async side (the page's own thread in
+the browser) and blocks only the worker; the interface thread never calls it.
 
 ## Every packet carries what it was heard at
 

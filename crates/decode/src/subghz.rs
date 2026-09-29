@@ -21,7 +21,7 @@ use crate::protocols::keyfob::encode::{self, INTER_FRAME_GAP_US};
 
 use crate::slicer::Timing;
 use common::pulse::Pulse;
-use std::time::Duration;
+use common::time::Duration;
 
 /// Why a `.sub` file could not be read.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -237,9 +237,9 @@ impl Save {
     /// A name for the file, with no directory and no extension: what it is,
     /// where it was, and when, because a second press of the same button is
     /// a different file the operator still wants to keep.
-    pub fn file_stem(&self, protocol: &str, at: std::time::SystemTime) -> String {
+    pub fn file_stem(&self, protocol: &str, at: common::time::SystemTime) -> String {
         let secs =
-            at.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or_default();
+            at.duration_since(common::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or_default();
         let safe: String =
             protocol.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
         format!("{safe}_{:.2}MHz_{secs}", self.frequency as f64 / 1e6)

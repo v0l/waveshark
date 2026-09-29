@@ -30,11 +30,11 @@
 //! side of a seam.
 
 use common::device::{Choice, Device, DeviceInfo, DriverKind, GainMode, RxStream, TunerRange};
+use common::time::{Duration, Instant};
 use common::{C32, Error, Hz, IqBuf, Result, Sps, Tuning};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
 
 /// How much of a slice is given up to be heard by its neighbour as well.
 ///
@@ -575,7 +575,7 @@ impl Slice {
         let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<C32>>(4);
         let lost = Arc::new(AtomicU64::new(0));
         let mine = lost.clone();
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
                 match stream.read() {
                     Ok(buf) => {

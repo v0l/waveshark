@@ -12,11 +12,7 @@
 //! So: **no `reqwest::Client::builder()` anywhere else.** Take one from here,
 //! with the timeout the caller needs.
 
-use std::time::Duration;
-
 pub use reqwest;
-
-pub type BlockingClient = reqwest::blocking::Client;
 
 /// What this program calls itself to every server it talks to.
 ///
@@ -25,30 +21,22 @@ pub type BlockingClient = reqwest::blocking::Client;
 pub const USER_AGENT: &str =
     concat!("WaveShark/", env!("CARGO_PKG_VERSION"), " (https://github.com/v0l/waveshark)");
 
-/// An asynchronous client, for anything running on the interface's runtime.
-pub fn client(timeout: Duration) -> Result<reqwest::Client, reqwest::Error> {
-    reqwest::Client::builder().user_agent(USER_AGENT).timeout(timeout).build()
-}
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "native.rs"]
+mod platform;
+#[cfg(target_arch = "wasm32")]
+#[path = "web.rs"]
+mod platform;
 
-/// A blocking client, for a worker thread of its own.
-///
-/// Must not be built or used on a runtime thread: `reqwest`'s blocking client
-/// drives its own runtime and panics when it finds itself inside another.
-pub fn blocking(timeout: Duration) -> Result<reqwest::blocking::Client, reqwest::Error> {
-    reqwest::blocking::Client::builder().user_agent(USER_AGENT).timeout(timeout).build()
-}
+pub use platform::{Chunks, client};
+pub use request::{Body, Method, Part, Request, Response, get, post};
 
-pub fn blocking_download(connect: Duration) -> Result<reqwest::blocking::Client, reqwest::Error> {
-    reqwest::blocking::Client::builder()
-        .user_agent(USER_AGENT)
-        .connect_timeout(connect)
-        .timeout(None)
-        .build()
-}
+mod request;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// The string is what a server operator sees, so it has to name the
     /// program, its version and where to complain.

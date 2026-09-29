@@ -21,12 +21,12 @@ fn main() {
     )
     .unwrap();
     let block: usize = std::env::var("BLOCK").ok().and_then(|s| s.parse().ok()).unwrap_or(16_384);
-    let t0 = std::time::Instant::now();
+    let t0 = common::time::Instant::now();
     let mut packets = 0usize;
     let mut worst = 0.0f64;
     let mut slow_blocks = 0usize;
     for (i, b) in iq.chunks(block).enumerate() {
-        let t = std::time::Instant::now();
+        let t = common::time::Instant::now();
         let evs = g.feed_iq(b).unwrap();
         if std::env::var_os("EVENTS").is_some() {
             for e in evs {

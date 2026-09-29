@@ -55,7 +55,7 @@ struct Offloaded {
     /// Blocks the thread was too far behind to take. Not silent: a receiver
     /// that cannot keep up says so rather than reporting a bad signal.
     pub dropped: u64,
-    thread: Option<std::thread::JoinHandle<()>>,
+    thread: Option<common::thread::JoinHandle<()>>,
 }
 
 /// What the thread has to say about the multiplex, for the stages that ask
@@ -74,7 +74,7 @@ struct Heard {
 const QUEUE: usize = 16;
 
 /// How long the graph will wait on a full queue before giving the block up.
-const WAIT: std::time::Duration = std::time::Duration::from_millis(200);
+const WAIT: common::time::Duration = common::time::Duration::from_millis(200);
 
 impl Offloaded {
     fn new() -> Self {
@@ -84,7 +84,7 @@ impl Offloaded {
         let heard = std::sync::Arc::new(std::sync::Mutex::new(Heard::default()));
         let mine = heard.clone();
         let back = give_back.clone();
-        let thread = std::thread::Builder::new()
+        let thread = common::thread::Builder::new()
             .name("dvbt".into())
             .spawn(move || {
                 let mut rx = dvbtdec::DvbtReceiver::new();
@@ -128,7 +128,7 @@ impl Offloaded {
         block.clear();
         block.extend_from_slice(iq);
         let Some(tx) = &self.iq else { return };
-        if tx.send_timeout(block, WAIT).is_err() {
+        if crate::wait::send_within(&tx, block, WAIT).is_err() {
             self.dropped += 1;
         }
     }
@@ -638,7 +638,7 @@ impl TsSourceNode {
             true => Some(Source::Encoded(decode::transcode::ToTs::bars(self.bitrate))),
             #[cfg(not(feature = "ffmpeg"))]
             true => None,
-            false => match std::fs::File::open(&self.path) {
+            false => match common::fs::blocking::File::open(&self.path) {
                 Ok(f) => Some(self.read_as(f)),
                 Err(e) => {
                     tracing::warn!("ts_source: {}: {e}", self.path);
@@ -652,7 +652,7 @@ impl TsSourceNode {
     /// A transport stream is read as it is; anything else goes through
     /// ffmpeg. What it is is read off the front of the file rather than off
     /// its name, because a transport stream is often called something else.
-    fn read_as(&self, f: std::fs::File) -> Source {
+    fn read_as(&self, f: common::fs::blocking::File) -> Source {
         use std::io::Read;
         let mut head = [0u8; 2 * mpegts::PACKET + 1];
         let mut probe = std::io::BufReader::new(f);
@@ -822,7 +822,7 @@ impl pipeline::node::Simple for TsSourceNode {
 
 /// Where a transmitted stream comes from: the file, or ffmpeg encoding it.
 enum Source {
-    Packets(std::io::BufReader<std::fs::File>),
+    Packets(std::io::BufReader<common::fs::blocking::File>),
     #[cfg(feature = "ffmpeg")]
     Encoded(decode::transcode::ToTs),
 }
@@ -878,7 +878,7 @@ struct Modulating {
     packets: Option<crossbeam_channel::Sender<Vec<u8>>>,
     air: crossbeam_channel::Receiver<Vec<C32>>,
     give_back: crossbeam_channel::Sender<Vec<C32>>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    thread: Option<common::thread::JoinHandle<()>>,
     /// Packets the queue could not take, which is a hole in the multiplex.
     dropped: u64,
 }
@@ -889,7 +889,7 @@ impl Modulating {
         let (send, air) = crossbeam_channel::bounded::<Vec<C32>>(TX_QUEUE);
         let (give_back, spare) = crossbeam_channel::bounded::<Vec<C32>>(TX_QUEUE + 2);
         let back: crossbeam_channel::Receiver<Vec<C32>> = spare.clone();
-        let thread = std::thread::Builder::new()
+        let thread = common::thread::Builder::new()
             .name("dvbt-mod".into())
             .spawn(move || {
                 let mut tx = DvbtModulator::new(params);
@@ -919,7 +919,7 @@ impl Modulating {
     /// afford to.
     fn push(&mut self, bytes: Vec<u8>) {
         let Some(tx) = &self.packets else { return };
-        if tx.send_timeout(bytes, WAIT).is_err() {
+        if crate::wait::send_within(&tx, bytes, WAIT).is_err() {
             self.dropped += 1;
         }
     }
@@ -941,7 +941,7 @@ impl Modulating {
         self.packets = None;
         while self.thread.as_ref().is_some_and(|t| !t.is_finished()) {
             self.take(out);
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            std::thread::sleep(common::time::Duration::from_millis(1));
         }
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -955,7 +955,7 @@ impl Drop for Modulating {
         self.packets = None;
         while self.thread.as_ref().is_some_and(|t| !t.is_finished()) {
             while self.air.try_recv().is_ok() {}
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            std::thread::sleep(common::time::Duration::from_millis(1));
         }
         if let Some(t) = self.thread.take() {
             let _ = t.join();
@@ -1305,12 +1305,12 @@ mod tests {
             rx.push(&[C32::default(); 4096]);
         }
         let (done, gone) = crossbeam_channel::bounded(1);
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             drop(rx);
             let _ = done.send(());
         });
         assert!(
-            gone.recv_timeout(std::time::Duration::from_secs(2)).is_ok(),
+            gone.recv_timeout(common::time::Duration::from_secs(2)).is_ok(),
             "dropping the stage waited on a thread blocked handing back packets nobody reads"
         );
     }
@@ -1427,7 +1427,7 @@ mod node_tests {
             code_rate_lp: CodeRate::R1_2,
             cell_id: Some(0x2F1A),
         };
-        let path = std::env::temp_dir().join("waveshark-dvbt-tx-test.ts");
+        let path = common::platform::scratch_dir().join("waveshark-dvbt-tx-test.ts");
         let mut file = Vec::new();
         for n in 0..240u16 {
             file.extend_from_slice(&packet(n));

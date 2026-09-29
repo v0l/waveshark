@@ -43,7 +43,7 @@ pub type Reply = Result<serde_json::Value, String>;
 /// graph or a screenshot all land on frames after the one that took the
 /// request. Short enough that an interface which has stopped drawing is
 /// reported as such rather than hanging the agent.
-const PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
+const PATIENCE: common::time::Duration = common::time::Duration::from_secs(20);
 
 /// Whoever has to be nudged when a job lands on the desk.
 ///
@@ -95,10 +95,10 @@ impl Desk {
         let (reply, answer) = tokio::sync::oneshot::channel();
         self.jobs.send(Ask { action, reply }).map_err(|_| "the interface has gone".to_string())?;
         self.bell.ring();
-        match tokio::time::timeout(PATIENCE, answer).await {
-            Ok(Ok(r)) => r,
-            Ok(Err(_)) => Err("the interface dropped the request".into()),
-            Err(_) => Err(format!("the interface did not answer in {:?}", PATIENCE)),
+        match crate::task::timeout(PATIENCE, answer).await {
+            Some(Ok(r)) => r,
+            Some(Err(_)) => Err("the interface dropped the request".into()),
+            None => Err(format!("the interface did not answer in {:?}", PATIENCE)),
         }
     }
 }
@@ -893,7 +893,7 @@ pub mod args {
 #[cfg(feature = "mcp")]
 pub fn serve(
     addr: std::net::SocketAddr,
-    rt: &tokio::runtime::Handle,
+    rt: &crate::task::Spawner,
     desk: Desk,
 ) -> anyhow::Result<()> {
     let listener = std::net::TcpListener::bind(addr)?;

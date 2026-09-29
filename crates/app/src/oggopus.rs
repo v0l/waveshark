@@ -27,9 +27,9 @@ const OGG_RATE: u64 = 48_000;
 /// here produces.
 pub fn write(path: &Path, packets: &[Vec<u8>], rate: u32, frame: usize) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+        common::fs::blocking::create_dir_all(dir)?;
     }
-    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut f = std::io::BufWriter::new(common::fs::blocking::File::create(path)?);
     f.write_all(&bytes(packets, rate, frame))?;
     f.flush()
 }

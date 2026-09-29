@@ -229,7 +229,7 @@ pub struct DedupeNode {
 /// A burst that has already been reported.
 #[derive(Clone, Copy, Debug)]
 struct Heard {
-    at: std::time::Instant,
+    at: common::time::Instant,
     freq: f64,
     channel_hz: f64,
     modulation: common::Modulation,
@@ -292,7 +292,7 @@ impl Seen {
         }
     }
 
-    fn heard_at(&self, at: std::time::Instant) -> Heard {
+    fn heard_at(&self, at: common::time::Instant) -> Heard {
         Heard {
             at,
             freq: self.freq,
@@ -316,7 +316,7 @@ impl Seen {
 ///
 /// Long enough to cover that, short enough that a device repeating its packet
 /// two or three times a second still gets a row per repeat.
-const DEDUPE_WINDOW: std::time::Duration = std::time::Duration::from_millis(300);
+const DEDUPE_WINDOW: common::time::Duration = common::time::Duration::from_millis(300);
 
 /// Whether a new report is the same burst as one already reported.
 ///
@@ -357,7 +357,7 @@ fn same_burst(kept: &Heard, new: &Seen) -> bool {
 /// The strongest report of a burst wins, and a real decode beats an unknown
 /// however loud, because a protocol that matched its own CRC is better
 /// evidence than a stronger guess.
-fn first_reports(block: &[Seen], at: std::time::Instant) -> Vec<bool> {
+fn first_reports(block: &[Seen], at: common::time::Instant) -> Vec<bool> {
     let mut order: Vec<usize> = (0..block.len()).collect();
     order.sort_by(|&a, &b| {
         let key = |s: &Seen| (s.known, s.rssi_dbfs);
@@ -378,7 +378,7 @@ fn first_reports(block: &[Seen], at: std::time::Instant) -> Vec<bool> {
 
 impl DedupeNode {
     /// Whether a burst is new, remembering it if so.
-    fn accept(&mut self, s: &Seen, now: std::time::Instant) -> bool {
+    fn accept(&mut self, s: &Seen, now: common::time::Instant) -> bool {
         self.recent.retain(|k| now.saturating_duration_since(k.at) < DEDUPE_WINDOW);
         if self.recent.iter().any(|k| same_burst(k, s)) {
             return false;
@@ -405,7 +405,7 @@ impl Simple for DedupeNode {
         // Wall clock rather than the stream's: the window is about how a
         // burst falls across the blocks a radio delivers, and a replay is
         // driven at whatever speed the machine manages.
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let seen: Vec<Seen> = packets.iter().map(Seen::of).collect();
         let first = first_reports(&seen, now);
         for (n, p) in packets.iter().enumerate() {
@@ -858,8 +858,8 @@ mod tests {
         // rows 31 kHz apart, because reads from the radio are milliseconds
         // long and each was deduped alone.
         let mut sc = DedupeNode::default();
-        let t0 = std::time::Instant::now();
-        let block = std::time::Duration::from_millis(7);
+        let t0 = common::time::Instant::now();
+        let block = common::time::Duration::from_millis(7);
         let mut kept = 0;
         for (n, freq) in [868_362_300.0, 868_393_400.0, 868_331_100.0].iter().enumerate() {
             let at = t0 + block * n as u32;
@@ -876,9 +876,9 @@ mod tests {
         // not a second reading of the first, and a sensor that sends its
         // packet three times should show three rows.
         let mut sc = DedupeNode::default();
-        let t0 = std::time::Instant::now();
+        let t0 = common::time::Instant::now();
         for n in 0..3u32 {
-            let at = t0 + std::time::Duration::from_millis(60) * n;
+            let at = t0 + common::time::Duration::from_millis(60) * n;
             assert!(sc.accept(&ook_at(868_362_300.0), at), "repeat {n} was swallowed");
         }
     }
@@ -886,15 +886,15 @@ mod tests {
     #[test]
     fn a_neighbour_is_only_a_duplicate_while_the_burst_is_recent() {
         let mut sc = DedupeNode::default();
-        let t0 = std::time::Instant::now();
+        let t0 = common::time::Instant::now();
         assert!(sc.accept(&ook_at(868_362_300.0), t0));
 
-        let soon = t0 + std::time::Duration::from_millis(50);
+        let soon = t0 + common::time::Duration::from_millis(50);
         assert!(!sc.accept(&ook_at(868_393_400.0), soon), "a skirt slipped through");
 
         // Long enough later and it is a different burst that happens to be
         // next door, which is the whole reason the memory expires.
-        let later = t0 + DEDUPE_WINDOW + std::time::Duration::from_millis(10);
+        let later = t0 + DEDUPE_WINDOW + common::time::Duration::from_millis(10);
         assert!(sc.accept(&ook_at(868_393_400.0), later), "the memory never expired");
     }
 
@@ -903,7 +903,7 @@ mod tests {
     #[test]
     fn a_retune_forgets_what_was_reported() {
         let mut sc = DedupeNode::default();
-        let t0 = std::time::Instant::now();
+        let t0 = common::time::Instant::now();
         assert!(sc.accept(&ook_at(868_362_300.0), t0));
         Simple::reset(&mut sc);
         assert!(sc.accept(&ook_at(868_362_300.0), t0), "the memory survived a retune");
@@ -914,7 +914,7 @@ mod tests {
         // Long enough to cover a block boundary, short enough that a sensor
         // repeating its packet two or three times a second still gets a row
         // per repeat.
-        assert!(DEDUPE_WINDOW >= std::time::Duration::from_millis(250));
-        assert!(DEDUPE_WINDOW <= std::time::Duration::from_millis(400));
+        assert!(DEDUPE_WINDOW >= common::time::Duration::from_millis(250));
+        assert!(DEDUPE_WINDOW <= common::time::Duration::from_millis(400));
     }
 }

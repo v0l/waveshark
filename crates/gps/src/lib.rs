@@ -32,6 +32,15 @@
 
 pub mod modem;
 pub mod nmea;
+#[cfg(unix)]
+#[path = "serial/unix.rs"]
+mod serial;
+#[cfg(windows)]
+#[path = "serial/windows.rs"]
+mod serial;
+#[cfg(not(any(unix, windows)))]
+#[path = "serial/none.rs"]
+mod serial;
 pub mod source;
 
 pub use modem::{Found, GpsState, Info};

@@ -1,9 +1,9 @@
+use common::time::{Duration, Instant};
 use datasets::geocode::{Geocoder, Place, Query};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::sync::mpsc::{Sender, channel};
-use std::time::{Duration, Instant};
 
 const RETRY_AFTER: Duration = Duration::from_secs(600);
 const SPACING: Duration = Duration::from_millis(250);
@@ -29,7 +29,7 @@ fn places() -> &'static Places {
     static PLACES: OnceLock<Places> = OnceLock::new();
     PLACES.get_or_init(|| {
         let (tx, rx) = channel::<Query>();
-        let _ = std::thread::Builder::new().name("geocode".into()).spawn(move || {
+        let _ = common::thread::Builder::new().name("geocode".into()).spawn(move || {
             let backend = geocoder();
             for q in rx {
                 let answer = backend.locate(&q);
@@ -45,7 +45,7 @@ fn places() -> &'static Places {
                     },
                 );
                 if let Some(ctx) = p.repaint.lock().as_ref() {
-                    ctx.request_repaint();
+                    crate::window::repaint(&ctx);
                 }
                 std::thread::sleep(SPACING);
             }

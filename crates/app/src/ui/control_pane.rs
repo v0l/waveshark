@@ -20,7 +20,7 @@ pub(super) struct ControlView<'a> {
 
 impl ControlView<'_> {
     pub(super) fn show(self, ui: &mut egui::Ui) {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let links: Vec<Control> = self.st.list.active(now).into_iter().cloned().collect();
 
         ui.add_space(8.0);
@@ -72,7 +72,7 @@ impl ControlView<'_> {
 }
 
 /// One handset: what it is, how it is being heard, and its channels.
-fn link_card(ui: &mut egui::Ui, c: &Control, now: std::time::Instant) {
+fn link_card(ui: &mut egui::Ui, c: &Control, now: common::time::Instant) {
     let live = c.live(now);
     panel::card(
         ui,
@@ -129,7 +129,7 @@ fn link_card(ui: &mut egui::Ui, c: &Control, now: std::time::Instant) {
 /// frame did not: a stick that stops being sent has not moved to zero, and a
 /// gap in the grid would make a sixteen channel model look like an eight
 /// channel one every other frame.
-fn channels(ui: &mut egui::Ui, c: &Control, now: std::time::Instant) {
+fn channels(ui: &mut egui::Ui, c: &Control, now: common::time::Instant) {
     let carried = c.channels.iter().rposition(Option::is_some).map_or(0, |i| i + 1);
     if carried == 0 {
         return;
@@ -165,8 +165,8 @@ fn channel_row(
     row: egui::Rect,
     index: usize,
     us: Option<u16>,
-    at: Option<std::time::Instant>,
-    now: std::time::Instant,
+    at: Option<common::time::Instant>,
+    now: common::time::Instant,
 ) {
     let label_w = 34.0;
     let value_w = 56.0;
@@ -220,7 +220,7 @@ fn channel_row(
     );
 }
 
-fn age(d: std::time::Duration) -> String {
+fn age(d: common::time::Duration) -> String {
     let s = d.as_secs();
     match s {
         0 => format!("{} ms", d.as_millis()),

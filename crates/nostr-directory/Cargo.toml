@@ -5,23 +5,28 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-mock-relay = []
+default = ["relay"]
+relay = ["dep:httpc", "dep:rustls", "dep:tungstenite", "dep:webpki-roots"]
+mock-relay = ["relay"]
 
 [dependencies]
 bech32 = { version = "0.11", default-features = false, features = ["alloc"] }
 common.workspace = true
 getrandom = "0.4"
 hex = "0.4"
-httpc.workspace = true
-rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+httpc = { workspace = true, optional = true }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"], optional = true }
 sdr-directory.workspace = true
 secp256k1 = { version = "0.33", default-features = false, features = ["std"] }
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
-webpki-roots = "1"
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"], optional = true }
+webpki-roots = { version = "1", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 sdr-directory = { workspace = true, features = ["fixtures"] }
@@ -29,3 +34,7 @@ sdr-directory = { workspace = true, features = ["fixtures"] }
 [[test]]
 name = "relay"
 required-features = ["mock-relay"]
+
+[[example]]
+name = "list"
+required-features = ["relay"]

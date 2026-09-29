@@ -12,11 +12,11 @@
 //! missing ones keep their defaults, which is what makes both of those true.
 
 use common::GainMode;
+use common::time::Instant;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
 
 /// The one copy of what the operator has set, shared by whoever needs it.
 ///
@@ -52,7 +52,7 @@ struct Saved {
 /// Dragging the dial changes the centre on every frame, and a file written
 /// sixty times a second to record a frequency nobody stopped on is a lot of
 /// writes for no information.
-const SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+const SETTLE: common::time::Duration = common::time::Duration::from_secs(2);
 
 impl Settings {
     pub fn new(session: Session) -> Self {
@@ -797,10 +797,7 @@ impl Session {
 
     /// `$XDG_CONFIG_HOME/waveshark/session`, or `~/.config` when unset.
     pub fn path() -> Option<PathBuf> {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(base.join("waveshark").join("session"))
+        Some(common::platform::config_dir()?.join("session"))
     }
 
     /// Load, falling back to defaults for anything missing or unreadable.
@@ -810,17 +807,14 @@ impl Session {
     /// any setting it could restore.
     pub fn load() -> Self {
         Self::path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|p| common::store::read(&p).ok())
             .map(|s| Self::parse(&s))
             .unwrap_or_default()
     }
 
     pub fn save(&self) {
         let Some(path) = Self::path() else { return };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, self.render());
+        let _ = common::store::write(&path, &self.render());
     }
 
     pub fn parse(text: &str) -> Self {

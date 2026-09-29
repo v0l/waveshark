@@ -1,10 +1,10 @@
 use crate::cache::{Cache, Error, Source, When};
+use common::time::Duration;
 use remote::kiwisdr::Status;
 use sdr_directory::{
     Accuracy, Author, Dial, Entry, Hardware, Listing, Location, Protocol, Station, Tuner,
 };
 use std::collections::HashMap;
-use std::time::Duration;
 
 pub const PROXY_PORT: u16 = 8073;
 

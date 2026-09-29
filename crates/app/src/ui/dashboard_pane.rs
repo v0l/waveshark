@@ -50,6 +50,7 @@ struct Quick {
     note: &'static str,
     rail: Rail,
     goes: Goes,
+    needs: Option<crate::build::Feature>,
 }
 
 /// The six worth a card. Everything else is a line in the list under them:
@@ -62,6 +63,7 @@ const CARDS: [Quick; 6] = [
         note: "Drag the span, scroll to zoom, click a signal to put a channel on it.",
         rail: Rail::Set,
         goes: Goes::View(View::Spectrum),
+        needs: None,
     },
     Quick {
         place: "scanner table",
@@ -70,6 +72,7 @@ const CARDS: [Quick; 6] = [
                something else.",
         rail: Rail::Set,
         goes: Goes::Settings(Settings::Scanners),
+        needs: None,
     },
     Quick {
         place: "map",
@@ -78,6 +81,7 @@ const CARDS: [Quick; 6] = [
                your antenna.",
         rail: Rail::Heard,
         goes: Goes::View(View::Map),
+        needs: None,
     },
     Quick {
         place: "calls",
@@ -86,6 +90,7 @@ const CARDS: [Quick; 6] = [
                beside it.",
         rail: Rail::Heard,
         goes: Goes::View(View::Calls),
+        needs: None,
     },
     Quick {
         place: "messages",
@@ -93,6 +98,7 @@ const CARDS: [Quick; 6] = [
         note: "Pagers, TETRA, APRS and mesh, in one column, repeats folded into one line.",
         rail: Rail::Heard,
         goes: Goes::View(View::Messages),
+        needs: None,
     },
     Quick {
         place: "devices",
@@ -101,6 +107,7 @@ const CARDS: [Quick; 6] = [
                levels it was heard at.",
         rail: Rail::Heard,
         goes: Goes::View(View::Devices),
+        needs: None,
     },
 ];
 
@@ -112,6 +119,7 @@ const MORE: [Quick; 5] = [
         note: "Unlock the graph and wire a demodulator yourself.",
         rail: Rail::Set,
         goes: Goes::View(View::Chain),
+        needs: None,
     },
     Quick {
         place: "satellites",
@@ -119,6 +127,7 @@ const MORE: [Quick; 5] = [
         note: "When it rises, where to point, and the Doppler on the downlink.",
         rail: Rail::Heard,
         goes: Goes::View(View::Satellites),
+        needs: None,
     },
     Quick {
         place: "radio settings",
@@ -126,6 +135,7 @@ const MORE: [Quick; 5] = [
         note: "Raw IQ of the whole span, or just the bursts in it.",
         rail: Rail::Set,
         goes: Goes::Settings(Settings::Radio),
+        needs: None,
     },
     Quick {
         place: "packet log settings",
@@ -133,6 +143,7 @@ const MORE: [Quick; 5] = [
         note: "Beast or AVR over TCP, joining the same packet bus as the local front ends.",
         rail: Rail::Set,
         goes: Goes::Settings(Settings::PacketLog),
+        needs: Some(crate::build::Feature::Feeds),
     },
     Quick {
         place: "memory",
@@ -140,6 +151,7 @@ const MORE: [Quick; 5] = [
         note: "Its mode, width and squelch, in a group.",
         rail: Rail::Set,
         goes: Goes::Settings(Settings::Memory),
+        needs: None,
     },
 ];
 
@@ -219,7 +231,8 @@ impl Dashboard<'_> {
                 // it does not: a card whose note wraps to four lines is a card
                 // nobody finishes reading.
                 let cols = if ui.available_width() > 900.0 { 3 } else { 2 };
-                for row in CARDS.chunks(cols) {
+                let cards: Vec<&Quick> = CARDS.iter().filter(|q| q.built()).collect();
+                for row in cards.chunks(cols) {
                     ui.columns(cols, |c| {
                         for (i, q) in row.iter().enumerate() {
                             if let Some(a) = Self::quick_card(&mut c[i], q) {
@@ -230,7 +243,7 @@ impl Dashboard<'_> {
                 }
 
                 ui.add_space(6.0);
-                for q in &MORE {
+                for q in MORE.iter().filter(|q| q.built()) {
                     if let Some(a) = Self::quick_row(ui, q) {
                         acts.push(a);
                     }
@@ -583,6 +596,16 @@ impl Dashboard<'_> {
 }
 
 impl Quick {
+    fn built(&self) -> bool {
+        if self.needs.is_some_and(|f| !f.built()) {
+            return false;
+        }
+        match self.goes {
+            Goes::View(v) => v.built(),
+            Goes::Settings(_) => true,
+        }
+    }
+
     fn action(&self) -> Action {
         match self.goes {
             Goes::View(v) => Action::Open(v),

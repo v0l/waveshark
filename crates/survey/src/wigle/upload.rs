@@ -12,7 +12,7 @@
 //! anonymously, but then it cannot be attributed, retracted or found again,
 //! so it is refused here rather than done quietly.
 
-use std::time::Duration;
+use common::time::Duration;
 
 /// Where a file goes.
 const URL: &str = "https://api.wigle.net/api/v2/file/upload";
@@ -62,28 +62,21 @@ pub fn upload(account: &Account, filename: &str, csv: Vec<u8>) -> Result<Receipt
     if !account.is_complete() {
         return Err("no WiGLE API name and token set".into());
     }
-    let part = reqwest::blocking::multipart::Part::bytes(csv)
-        .file_name(filename.to_string())
-        .mime_str("text/csv")
-        .map_err(|e| e.to_string())?;
-    let form = reqwest::blocking::multipart::Form::new()
-        .part("file", part)
-        .text("donate", if account.donate { "on" } else { "off" });
-    let http = httpc::blocking(TIMEOUT).map_err(|e| e.to_string())?;
-    let resp = http
-        .post(URL)
-        .basic_auth(account.name.trim(), Some(account.token.trim()))
+    let resp = httpc::post(URL)
+        .timeout(TIMEOUT)
+        .basic_auth(account.name.trim(), account.token.trim())
         .header("Accept", "application/json")
-        .multipart(form)
-        .send()
-        .map_err(|e| e.to_string())?;
-    let status = resp.status();
+        .file_part("file", filename, "text/csv", csv)
+        .text_part("donate", if account.donate { "on" } else { "off" })
+        .wait()?;
+    let status = resp.status;
+    let ok = resp.is_success();
     let body = resp.text().unwrap_or_default();
-    if status == reqwest::StatusCode::UNAUTHORIZED {
+    if status == 401 {
         return Err("WiGLE refused the API name and token".into());
     }
-    if !status.is_success() {
-        return Err(format!("WiGLE answered {}: {}", status.as_u16(), first_line(&body)));
+    if !ok {
+        return Err(format!("WiGLE answered {status}: {}", first_line(&body)));
     }
     read_receipt(&body)
 }

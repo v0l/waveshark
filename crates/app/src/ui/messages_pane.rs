@@ -26,7 +26,7 @@ pub(super) enum Action {
 impl Msgs<'_> {
     /// Draw the list, and say what a click asked for.
     pub(super) fn show(self, ui: &mut egui::Ui) -> Option<Action> {
-        let now = std::time::Instant::now();
+        let now = common::time::Instant::now();
         let msgs: Vec<Message> = self.st.list.recent().into_iter().cloned().collect();
         let mut act = None;
 
@@ -122,7 +122,7 @@ impl Msgs<'_> {
 }
 
 /// One message: a header saying where it came from, then the words.
-fn message_card(ui: &mut egui::Ui, m: &Message, now: std::time::Instant) -> egui::Response {
+fn message_card(ui: &mut egui::Ui, m: &Message, now: common::time::Instant) -> egui::Response {
     let inner = panel::card(
         ui,
         // Cyan for what the receiver heard, and no rail for what it read
@@ -169,7 +169,7 @@ fn message_card(ui: &mut egui::Ui, m: &Message, now: std::time::Instant) -> egui
 }
 
 /// How long ago, short enough for the corner of a header.
-fn age(d: std::time::Duration) -> String {
+fn age(d: common::time::Duration) -> String {
     let s = d.as_secs();
     match s {
         0..=59 => format!("{s}s"),

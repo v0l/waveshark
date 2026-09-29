@@ -17,8 +17,8 @@ pub const SILENCE_DBFS: f32 = -200.0;
 /// front ends rounding the same clock three ways put packets of one burst a
 /// microsecond apart.
 pub fn now_us() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    crate::time::SystemTime::now()
+        .duration_since(crate::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
         .unwrap_or(0)
 }

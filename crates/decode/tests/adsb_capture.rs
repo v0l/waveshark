@@ -211,10 +211,10 @@ fn the_second_pass_costs_a_fraction_of_the_time_the_capture_covers() {
     // tight enough to catch the pass being made an order of magnitude
     // dearer.
     let seconds = || -> Option<f64> {
-        let t = std::time::Instant::now();
+        let t = common::time::Instant::now();
         decode(ModeSConfig::default())?;
         let both = t.elapsed().as_secs_f64();
-        let t = std::time::Instant::now();
+        let t = common::time::Instant::now();
         decode(ModeSConfig { crc_framing: false, ..ModeSConfig::default() })?;
         Some(both - t.elapsed().as_secs_f64())
     };
@@ -236,7 +236,7 @@ fn the_whole_read_costs_less_than_the_time_it_covers() {
     // through libm and the window sum was written out since, which is 0.50 s
     // on x86 here against 0.63 s; the ten second radarpi file on that Pi
     // went from 8.5 s to 6.7 s (#159).
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     skip_without_fixture!(decode(ModeSConfig::default()));
     let el = t.elapsed().as_secs_f64();
     assert!(el < 4.0, "reading four seconds of capture took {el:.3} s");

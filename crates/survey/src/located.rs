@@ -81,7 +81,7 @@ fn fit_all(trails: &[Vec<crate::Sighting>], threads: usize) -> Vec<Option<Estima
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "db"))]
 mod tests {
     use super::*;
     use crate::{Report, Sighting, metres};

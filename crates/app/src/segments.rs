@@ -12,9 +12,9 @@
 //! take the receiver down or fill the fault line: a log is a convenience, and
 //! losing it is not worth losing what is on screen.
 
+use common::time::{Duration, Instant};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 /// What one log's files are: their extension, the header each carries, and
 /// how large a segment grows before the next is started.
@@ -37,7 +37,7 @@ pub struct Segments {
     dir: PathBuf,
     fmt: Format,
     /// The day currently open, as `YYYY-MM-DD`, and its writer.
-    open: Option<(String, std::io::BufWriter<std::fs::File>)>,
+    open: Option<(String, std::io::BufWriter<common::fs::blocking::File>)>,
     /// The segment being written, as `YYYY-MM-DD.NNN`, which is the one file
     /// in the folder a trim may not delete.
     segment: Option<String>,
@@ -182,24 +182,19 @@ impl Segments {
         if self.total() < cap {
             return true;
         }
-        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+        let Ok(entries) = common::fs::blocking::read_dir(&self.dir) else {
             return false;
         };
         // The name is the date and a sequence, so alphabetical order is
         // chronological.
-        let mut days: Vec<PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.extension().is_some_and(|x| x == self.fmt.ext)
-                    && p.file_stem().is_some_and(|s| s != open)
-            })
-            .collect();
-        days.sort();
-        for path in days {
-            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            if std::fs::remove_file(&path).is_ok() {
-                self.older = self.older.saturating_sub(size);
+        let days = entries.into_iter().filter(|e| {
+            let p = e.path();
+            p.extension().is_some_and(|x| x == self.fmt.ext)
+                && p.file_stem().is_some_and(|s| s != open)
+        });
+        for e in days {
+            if common::fs::blocking::remove_file(e.path()).is_ok() {
+                self.older = self.older.saturating_sub(e.len());
             }
             if self.total() < cap {
                 return true;
@@ -210,7 +205,10 @@ impl Segments {
 
     /// Open or roll the day's file, returning nothing once logging has
     /// stopped.
-    fn writer(&mut self, at_us: u64) -> Option<&mut std::io::BufWriter<std::fs::File>> {
+    fn writer(
+        &mut self,
+        at_us: u64,
+    ) -> Option<&mut std::io::BufWriter<common::fs::blocking::File>> {
         if self.full {
             return None;
         }
@@ -220,18 +218,17 @@ impl Segments {
             // The old segment's buffer goes out before its writer does, or a
             // roll silently truncates the file it just closed.
             self.flush();
-            if std::fs::create_dir_all(&self.dir).is_err() {
+            if common::fs::blocking::create_dir_all(&self.dir).is_err() {
                 self.full = true;
                 return None;
             }
             let (name, path) = self.next_segment(&day);
-            let fresh = !path.exists();
-            let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else {
+            let Ok(f) = common::fs::blocking::File::append(&path) else {
                 self.full = true;
                 return None;
             };
             let mut w = std::io::BufWriter::with_capacity(self.fmt.buf_bytes, f);
-            self.bytes = w.get_ref().metadata().map(|m| m.len()).unwrap_or(0);
+            self.bytes = w.get_ref().len();
             self.older = measure(&self.dir, self.fmt.ext, Some(&name));
             self.measured = Instant::now();
             // A receiver started against a folder already over its limit
@@ -241,7 +238,7 @@ impl Segments {
                 self.full = true;
                 return None;
             }
-            if fresh || self.bytes == 0 {
+            if self.bytes == 0 {
                 let head = w.write_all(self.fmt.magic).is_ok()
                     && w.write_all(&self.fmt.version.to_le_bytes()).is_ok();
                 if !head {
@@ -263,9 +260,9 @@ impl Segments {
     /// a receiver stopped and started ten times leaves ten minutes of log in
     /// one file rather than ten files of a minute.
     fn next_segment(&self, day: &str) -> (String, PathBuf) {
-        let mut last: Option<(u32, PathBuf)> = None;
-        if let Ok(entries) = std::fs::read_dir(&self.dir) {
-            for e in entries.flatten() {
+        let mut last: Option<(u32, u64)> = None;
+        if let Ok(entries) = common::fs::blocking::read_dir(&self.dir) {
+            for e in entries {
                 let p = e.path();
                 if p.extension().is_none_or(|x| x != self.fmt.ext) {
                     continue;
@@ -283,14 +280,17 @@ impl Segments {
                     continue;
                 };
                 if last.as_ref().is_none_or(|(n, _)| seq > *n) {
-                    last = Some((seq, p));
+                    last = Some((seq, e.len()));
                 }
             }
         }
         let next = match last {
-            Some((seq, ref p)) => {
-                let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-                if size >= self.fmt.segment_bytes { seq + 1 } else { seq }
+            Some((seq, size)) => {
+                if size >= self.fmt.segment_bytes {
+                    seq + 1
+                } else {
+                    seq
+                }
             }
             None => 0,
         };
@@ -315,18 +315,17 @@ pub fn folder_bytes(dir: &Path, ext: &str) -> u64 {
 
 /// Add up the segments on the disk, other than the one named.
 fn measure(dir: &Path, ext: &str, except: Option<&str>) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Ok(entries) = common::fs::blocking::read_dir(dir) else {
         return 0;
     };
     entries
-        .flatten()
+        .iter()
         .filter(|e| {
             let p = e.path();
             p.extension().is_some_and(|x| x == ext)
                 && except.is_none_or(|e| p.file_stem().is_some_and(|s| s != e))
         })
-        .filter_map(|e| e.metadata().ok())
-        .map(|m| m.len())
+        .map(|e| e.len())
         .sum()
 }
 

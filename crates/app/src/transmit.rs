@@ -13,13 +13,13 @@
 //! everything a person reads off the transmitter is an atomic.
 
 use common::TxStream;
+use common::time::{Duration, Instant};
 use parking_lot::Mutex;
 use pipeline::Graph;
 use pipeline::graph::Topology;
 use pipeline::param::ParamValue;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
 
 /// How much of a transmission may be built ahead of real time.
 ///
@@ -107,7 +107,7 @@ enum Job {
 /// A handle on the thread that transmits.
 pub struct Transmitter {
     to: crossbeam_channel::Sender<Job>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    thread: Option<common::thread::JoinHandle<()>>,
     readings: Arc<Readings>,
     /// The chain it was last given, so a rebuild that changes nothing about
     /// the transmitter leaves it alone: rebuilding would restart whatever
@@ -132,8 +132,10 @@ impl Transmitter {
         let (to, work) = crossbeam_channel::unbounded::<Job>();
         let readings = Arc::new(Readings::default());
         let mine = readings.clone();
-        let thread =
-            std::thread::Builder::new().name("transmit".into()).spawn(move || run(work, mine)).ok();
+        let thread = common::thread::Builder::new()
+            .name("transmit".into())
+            .spawn(move || run(work, mine))
+            .ok();
         Self { to, thread, readings, built: None, mic: false, armed: false }
     }
 
@@ -293,7 +295,7 @@ impl Transmitter {
     /// what it was set to a block ago.
     pub fn settled(&self, patience: Duration) -> bool {
         let (reply, done) = crossbeam_channel::bounded(1);
-        self.to.send(Job::Settled(reply)).is_ok() && done.recv_timeout(patience).is_ok()
+        self.to.send(Job::Settled(reply)).is_ok() && crate::task::within(&done, patience).is_some()
     }
 }
 

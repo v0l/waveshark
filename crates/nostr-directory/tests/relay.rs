@@ -1,10 +1,10 @@
+use common::time::Duration;
 use nostr_directory::mock::MockRelay;
 use nostr_directory::{Config, NostrDirectory, new_identity};
 use sdr_directory::{
     Accuracy, Author, Dial, Entry, Hardware, Location, Protocol, Query, SdrDirectory, Station,
     Tuner, Version, now,
 };
-use std::time::Duration;
 
 const WAIT: Duration = Duration::from_secs(5);
 

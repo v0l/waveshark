@@ -1,0 +1,10 @@
+[package]
+name = "webspin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rewrites a threaded wasm module so the page's thread spins where a worker would wait"
+publish = false
+
+[dependencies]
+walrus = "0.26"

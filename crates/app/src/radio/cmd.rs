@@ -155,8 +155,8 @@ impl SubFile {
 
     /// Parse a `.sub` file from disk.
     pub fn open(path: &std::path::Path) -> Result<Self, decode::subghz::SubError> {
-        let text =
-            std::fs::read_to_string(path).map_err(|_| decode::subghz::SubError::NotASubFile)?;
+        let text = common::fs::blocking::read_to_string(path)
+            .map_err(|_| decode::subghz::SubError::NotASubFile)?;
         Ok(Self { path: path.display().to_string(), file: decode::subghz::parse(&text)? })
     }
 }

@@ -46,12 +46,12 @@ pub struct Spectrum {
 #[derive(Clone, Copy, Debug)]
 pub struct SeenSource {
     pub source: crate::chain::LiveSource,
-    pub last_seen: std::time::Instant,
+    pub last_seen: common::time::Instant,
     pub live: bool,
 }
 
 /// How long a closed source stays on the waterfall.
-pub const SOURCE_LINGER: std::time::Duration = std::time::Duration::from_secs(6);
+pub const SOURCE_LINGER: common::time::Duration = common::time::Duration::from_secs(6);
 
 /// Blocks of speed history kept for the sparkline in the head. At a few
 /// hundred blocks a second this is a second or two of the recent past, which

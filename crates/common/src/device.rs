@@ -54,6 +54,23 @@ impl DriverKind {
     }
 }
 
+/// Serial tails identify a unit; the leading zeros do not.
+pub fn serial_tail(s: &str) -> String {
+    let t = s.trim_start_matches('0');
+    if t.len() > 8 { t[t.len() - 8..].to_string() } else { t.to_string() }
+}
+
+#[cfg(test)]
+mod serial_tests {
+    #[test]
+    fn serials_shorten_to_the_identifying_tail() {
+        assert_eq!(super::serial_tail("0000000000000000457863dc3579c1df"), "3579c1df");
+        assert_eq!(super::serial_tail("00000001"), "1");
+        assert_eq!(super::serial_tail("abc"), "abc");
+        assert_eq!(super::serial_tail(""), "");
+    }
+}
+
 /// A tunable span. Tuners like the E4000 have gaps, so a device reports a list.
 #[derive(Clone, Debug)]
 pub struct TunerRange {
@@ -393,8 +410,8 @@ pub trait Device: Send {
     /// holds it. A receiver drops this much and starts again. Five
     /// milliseconds covers a tuner that only reprograms a divider; one that
     /// recalibrates its VCO says so by overriding this.
-    fn settle(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(5)
+    fn settle(&self) -> crate::time::Duration {
+        crate::time::Duration::from_millis(5)
     }
 
     /// Where the receiver is, on the aerial's side.
@@ -623,7 +640,7 @@ pub trait TxStream: Send {
 
     /// Block until everything already written has been handed to the device,
     /// or until the timeout expires. Returns whether it emptied.
-    fn drain(&mut self, timeout: std::time::Duration) -> bool;
+    fn drain(&mut self, timeout: crate::time::Duration) -> bool;
 
     /// Stop transmitting. Anything not yet sent is discarded, so call
     /// [`Self::drain`] first if the tail matters.

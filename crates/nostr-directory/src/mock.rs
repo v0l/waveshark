@@ -1,10 +1,10 @@
 use crate::event::{DELETION, Event};
+use common::time::Duration;
 use serde_json::{Value, json};
 use std::io::ErrorKind;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tungstenite::{Message, WebSocket};
 
 #[derive(Default)]
@@ -85,12 +85,12 @@ impl MockRelay {
         let stop = Arc::new(AtomicBool::new(false));
         let store = Arc::new(Mutex::new(Store::default()));
         let stopped = stop.clone();
-        std::thread::Builder::new().name("mock-relay".into()).spawn(move || {
+        common::thread::Builder::new().name("mock-relay".into()).spawn(move || {
             while !stopped.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((sock, _)) => {
                         let (store, stopped) = (store.clone(), stopped.clone());
-                        std::thread::spawn(move || serve(sock, store, stopped));
+                        common::thread::spawn(move || serve(sock, store, stopped));
                     }
                     Err(e) if e.kind() == ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(10))

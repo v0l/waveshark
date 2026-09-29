@@ -1,18 +1,17 @@
+#[cfg(feature = "iqstream")]
 pub mod serve;
 
 use crate::{CONNECT_TIMEOUT, Probe, Proto, QUEUE_DEPTH};
 use common::device::{
     Device as DeviceTrait, DeviceInfo, DriverKind, GainMode, Number, RxStream, TunerRange,
 };
+use common::time::{Duration, Instant};
 use common::{Error, Hz, IqBuf, Result, SampleFormat, Sps};
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
-
-pub const DEFAULT_PORT: u16 = 5555;
 
 const PROTOCOL_VERSION: u32 = (2 << 24) | 1700;
 
@@ -641,7 +640,7 @@ impl DeviceTrait for Device {
         let counted = dropped.clone();
         let halt = stop.clone();
         let addr = self.addr.clone();
-        let join = std::thread::Builder::new()
+        let join = common::thread::Builder::new()
             .name("spyserver-rx".into())
             .spawn(move || {
                 if let Err(e) = pump(sock, rate, landed, tx, counted, halt) {
@@ -729,7 +728,7 @@ struct NetStream {
     dropped: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     sock: Option<TcpStream>,
-    join: Option<std::thread::JoinHandle<()>>,
+    join: Option<common::thread::JoinHandle<()>>,
 }
 
 impl RxStream for NetStream {
@@ -759,6 +758,26 @@ impl Drop for NetStream {
         if let Some(j) = self.join.take() {
             let _ = j.join();
         }
+    }
+}
+
+pub(crate) struct Remote;
+
+impl crate::Protocol for Remote {
+    fn proto(&self) -> Proto {
+        Proto::SpyServer
+    }
+
+    fn probe(&self, addr: &str) -> Result<Probe> {
+        probe(addr)
+    }
+
+    fn probe_within(&self, addr: &str, within: Duration) -> Result<Probe> {
+        probe_within(addr, within)
+    }
+
+    fn open(&self, addr: &str) -> Result<Box<dyn common::Device>> {
+        Ok(Box::new(Device::open(addr)?))
     }
 }
 
@@ -809,7 +828,7 @@ mod tests {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap().to_string();
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             let (mut sock, _) = l.accept().unwrap();
             let mut head = [0u8; COMMAND_HEADER];
             sock.read_exact(&mut head).unwrap();
@@ -873,7 +892,7 @@ mod tests {
     fn a_server_that_accepts_and_says_nothing_is_given_up_on_within_the_window() {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap().to_string();
-        let held = std::thread::spawn(move || l.accept().map(|(s, _)| s));
+        let held = common::thread::spawn(move || l.accept().map(|(s, _)| s));
         let started = Instant::now();
         assert!(probe_within(&addr, Duration::from_millis(300)).is_err());
         let took = started.elapsed();

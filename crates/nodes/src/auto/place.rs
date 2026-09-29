@@ -1,11 +1,11 @@
 //! Which decoders a source gets, when, and what they make of a block.
 
 use common::packet::Packet;
+use common::time::Instant;
 use common::{C32, Hz, Result, SourceBlock, SourceId, SourceState};
 use pipeline::event::Event;
 use pipeline::port::StreamSpec;
 use rayon::prelude::*;
-use std::time::Instant;
 
 use super::evidence::Evidence;
 use super::locks::{Claimed, LockId};

@@ -184,7 +184,7 @@ fn offered_rates(settings: &[Setting], tunable: bool) -> Vec<Sps> {
     rates
 }
 
-const RATE_SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
+const RATE_SETTLE: common::time::Duration = common::time::Duration::from_secs(5);
 
 pub struct Device {
     addr: String,
@@ -392,7 +392,7 @@ impl DeviceTrait for Device {
                 if started.elapsed() >= RATE_SETTLE {
                     return Err(Error::other(format!("{host} did not move to {} S/s", r.0)));
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                tokio::time::sleep(common::time::Duration::from_millis(100)).await;
             }
         })?;
         self.rate = r;
@@ -550,7 +550,7 @@ impl DeviceTrait for Device {
         let dial = self.dial.as_ref().map(|d| (d.want.subscribe(), d.at.clone()));
         let asks = self.controls.queue.lock().ok().and_then(|mut q| q.take());
         let settings = self.controls.now.clone();
-        let join = std::thread::Builder::new()
+        let join = common::thread::Builder::new()
             .name("iqstream-rx".into())
             .spawn(move || {
                 match runtime() {
@@ -717,7 +717,7 @@ struct NetStream {
     rx: Receiver<IqBuf>,
     dropped: Arc<AtomicU64>,
     stop: tokio::sync::watch::Sender<bool>,
-    join: Option<std::thread::JoinHandle<()>>,
+    join: Option<common::thread::JoinHandle<()>>,
 }
 
 impl RxStream for NetStream {
@@ -743,6 +743,26 @@ impl Drop for NetStream {
         if let Some(j) = self.join.take() {
             let _ = j.join();
         }
+    }
+}
+
+pub(crate) struct Remote;
+
+impl crate::Protocol for Remote {
+    fn proto(&self) -> Proto {
+        Proto::IqStream
+    }
+
+    fn probe(&self, addr: &str) -> Result<Probe> {
+        probe(addr)
+    }
+
+    fn probe_all(&self, addr: &str) -> Result<Vec<Probe>> {
+        probe_all(addr)
+    }
+
+    fn open(&self, addr: &str) -> Result<Box<dyn common::Device>> {
+        Ok(Box::new(Device::open(addr)?))
     }
 }
 
@@ -871,7 +891,7 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let owner = {
             let (tuner, stop) = (tuner.clone(), stop.clone());
-            std::thread::spawn(move || {
+            common::thread::spawn(move || {
                 while !stop.load(Ordering::SeqCst) {
                     for ask in tuner.asked() {
                         if let SettingValue::Choice(v) = &ask.value
@@ -882,7 +902,7 @@ mod tests {
                             tuner.set_settings(vec![gain(20.0), Setting::rate_choice(r, &rates)]);
                         }
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    std::thread::sleep(common::time::Duration::from_millis(20));
                 }
             })
         };

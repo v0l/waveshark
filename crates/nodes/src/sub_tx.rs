@@ -10,11 +10,11 @@
 
 use common::Result;
 use common::pulse::Pulse;
+use common::time::Duration;
 use pipeline::node::{Node, NodeCtx, PortSpec, Simple};
 use pipeline::param::{Param, ParamValue};
 use pipeline::port::{Domain, Flow, Payload, PortKind, StreamSpec};
 use pipeline::registry::{Category, Settings, SettingsExt, StageDesc};
-use std::time::Duration;
 
 /// How many times the file plays per key-down. A remote sends its frame
 /// several times because a receiver misses bursts; a replay needs the same

@@ -1,3 +1,4 @@
+use common::time::Duration;
 use nostr_directory::{Config, NostrDirectory};
 use sdr_directory::SdrDirectory;
 use sdr_directory::airspy::{self, AirspyDirectory};
@@ -6,7 +7,6 @@ use sdr_directory::lister::{Lister, Offer};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
 
 pub type Listing = Offer<Config>;
 pub type AirspyListing = Offer<airspy::Config>;
@@ -115,9 +115,9 @@ pub fn offered(addr: SocketAddr) -> Option<Listing> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::time::Instant;
     use nostr_directory::mock::MockRelay;
     use sdr_directory::{Author, Hardware, SdrDirectory};
-    use std::time::Instant;
 
     const WAIT: Duration = Duration::from_secs(10);
 

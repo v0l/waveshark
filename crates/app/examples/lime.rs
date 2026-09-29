@@ -32,7 +32,7 @@ fn main() {
     println!("actual  : {} S/s at {} Hz", d.actual_rate().0, d.actual_center().0);
 
     let mut s = d.start_rx().unwrap();
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     let (mut n, mut blocks) = (0u64, 0u64);
     while t.elapsed().as_secs_f64() < 3.0 {
         match s.read() {

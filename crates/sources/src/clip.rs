@@ -182,7 +182,7 @@ pub fn clip_file_as(
     let rate =
         meta.rate.ok_or_else(|| Error::other(format!("no sample rate in {}", input.display())))?;
     let mut bytes = Vec::new();
-    let mut f = std::fs::File::open(&located.data)?;
+    let mut f = common::fs::blocking::File::open(&located.data)?;
     std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(located.bytes.start))?;
     std::io::Read::read_to_end(
         &mut std::io::Read::take(f, located.bytes.end - located.bytes.start),
@@ -198,7 +198,7 @@ pub fn clip_file_as(
     for (a, b) in &spans {
         out.extend_from_slice(&bytes[a * bps..b * bps]);
     }
-    std::fs::write(output, &out)?;
+    common::fs::blocking::write(output, &out)?;
     Ok(Clipped { path: output.to_path_buf(), spans, kept, total: bytes.len() / bps })
 }
 
@@ -251,14 +251,14 @@ fn trim_zeros(s: &str) -> String {
 
 /// A name no file is at yet, by counting up from `wanted`.
 pub fn free_name(wanted: PathBuf) -> PathBuf {
-    if !wanted.exists() {
+    if !common::fs::blocking::exists(&wanted) {
         return wanted;
     }
     let stem = wanted.file_stem().and_then(|s| s.to_str()).unwrap_or("capture").to_string();
     let ext = wanted.extension().and_then(|s| s.to_str()).unwrap_or("cu8").to_string();
     for n in 2..1000 {
         let p = wanted.with_file_name(format!("{stem}-{n}.{ext}"));
-        if !p.exists() {
+        if !common::fs::blocking::exists(&p) {
             return p;
         }
     }
@@ -368,7 +368,7 @@ mod tests {
 
     #[test]
     fn a_clipped_file_reads_back_at_the_same_rate_and_centre() {
-        let dir = std::env::temp_dir().join("sr_clip_test");
+        let dir = common::platform::scratch_dir().join("sr_clip_test");
         std::fs::create_dir_all(&dir).unwrap();
         let input = dir.join("bench_433.92M_250k.cu8");
         std::fs::write(&input, write(&three_bursts(250_000.0))).unwrap();
@@ -424,7 +424,7 @@ mod tests {
     /// and the cut says it in its own name so nothing has to be told twice.
     #[test]
     fn a_cut_of_a_described_recording_carries_the_description_into_its_name() {
-        let dir = std::env::temp_dir().join("sr_clip_described");
+        let dir = common::platform::scratch_dir().join("sr_clip_described");
         std::fs::create_dir_all(&dir).unwrap();
         let input = dir.join("someone elses recording.iq");
         std::fs::write(&input, write(&three_bursts(250_000.0))).unwrap();

@@ -264,7 +264,7 @@ pub struct Receiver {
     /// What the log folder holds while nothing is writing to it, and when it
     /// was last added up.
     log_folder: u64,
-    log_measured: Option<std::time::Instant>,
+    log_measured: Option<common::time::Instant>,
     /// Where the receiver is: one position, whether it was typed in or came
     /// from a GPS, carrying the quality fields when a fix supplied it.
     ///
@@ -890,7 +890,7 @@ impl Receiver {
     /// for a test that then looks at what went out.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn tx_settled(&self) -> bool {
-        self.tx.settled(std::time::Duration::from_secs(5))
+        self.tx.settled(common::time::Duration::from_secs(5))
     }
 
     /// The node a transmit stage became, named so the interface and a test
@@ -2523,7 +2523,7 @@ impl Receiver {
     ///
     /// One place, because there is one decoder: whatever the front end, a
     /// packet went onto the bus and came off it as a row.
-    pub fn rows(&self, at: std::time::Instant) -> Vec<crate::row::Reception> {
+    pub fn rows(&self, at: common::time::Instant) -> Vec<crate::row::Reception> {
         // Read off the bus rather than out of the node, and from the far side
         // of the dedupe: the packets there carry what they decoded to and one
         // row per burst, so the list sees exactly what the map and the device
@@ -2600,13 +2600,13 @@ impl Receiver {
     /// Add the log folder up again when nothing is writing to it. Throttled,
     /// and skipped entirely while a sink is counting its own writes.
     pub fn refresh_log_folder(&mut self) {
-        const EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+        const EVERY: common::time::Duration = common::time::Duration::from_secs(2);
         let writing =
             self.stage::<nodes::PacketBusNode>(derived::BUS).is_some_and(|b| b.has_sink());
         if writing || self.log_measured.is_some_and(|t| t.elapsed() < EVERY) {
             return;
         }
-        self.log_measured = Some(std::time::Instant::now());
+        self.log_measured = Some(common::time::Instant::now());
         let dir = self.log_dir.clone().or_else(crate::wspkt::PacketLog::default_dir);
         self.log_folder = dir.map(|d| crate::wspkt::folder_bytes(&d)).unwrap_or(0);
     }
@@ -2635,7 +2635,7 @@ impl Receiver {
     }
 
     /// Tracks heard recently, in the order they were first heard.
-    pub fn tracks(&self, now: std::time::Instant) -> Vec<crate::tracks::Track> {
+    pub fn tracks(&self, now: common::time::Instant) -> Vec<crate::tracks::Track> {
         self.stage::<crate::tracks::TracksNode>(derived::TRACKS)
             .map(|n| n.rows(now))
             .unwrap_or_default()
@@ -2659,7 +2659,6 @@ impl Receiver {
     /// `None` when there is no transcriber in the graph at all, which is a
     /// different thing from one that has read nothing and has to read as one
     /// on screen.
-    #[cfg(feature = "stt")]
     pub fn transcriber(&self) -> Option<crate::transcripts::Engine> {
         let id = self.node_of_stage(derived::TRANSCRIBE)?;
         let n = downcast::<crate::transcripts::LiveTranscribeNode>(&self.graph, id)?;
@@ -3122,7 +3121,6 @@ pub mod derived {
     /// The span kept as readings, for a heatmap export.
     pub const HEATMAP: u64 = Patch::DERIVED_BASE + 31;
     /// Where the live transcriber is drawn, when the build has one.
-    #[cfg(feature = "stt")]
     pub const TRANSCRIBE: u64 = Patch::DERIVED_BASE + 15;
     pub const AUDIO: u64 = Patch::DERIVED_BASE + 9;
     /// The transmit chain: its clock, what is modulated, the modulator, and
@@ -3746,7 +3744,7 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
     // bus below because a call is audio: on the packet bus alone the call bus
     // and the on-air lamp were silent on a receiver listening to an analogue
     // channel, which is a receiver with no packet bus at all.
-    {
+    if crate::build::Feature::HomeAssistant.built() {
         let ha = p.add_derived(derived::HOMEASSISTANT, "homeassistant", Settings::new());
         p.connect(Source::Stage(derived::HEARD, 0), (ha, 1));
     }
@@ -3827,7 +3825,9 @@ pub fn derived_patch(plan: &Plan) -> crate::patch::Patch {
         p.connect(Source::Stage(rows, 0), (beacondb, 0));
 
         // And the house is a fourth, on the packets half of its feed.
-        p.connect(Source::Stage(rows, 0), (derived::HOMEASSISTANT, 0));
+        if crate::build::Feature::HomeAssistant.built() {
+            p.connect(Source::Stage(rows, 0), (derived::HOMEASSISTANT, 0));
+        }
 
         // The walk over a band is a fifth: what a step turned up is whatever
         // reached the bus on it, so the walk asks the same question the
@@ -5033,7 +5033,7 @@ pub fn registry() -> pipeline::registry::Registry {
 /// where it was not, and the whole patch coming back as an error cost the
 /// receiver its head, its spectrum and every channel for the sake of one
 /// stage nobody could build.
-const RETIRE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+const RETIRE_GRACE: common::time::Duration = common::time::Duration::from_millis(500);
 
 fn retire(pool: HashMap<u64, NodePart>) {
     if pool.is_empty() {
@@ -5041,11 +5041,11 @@ fn retire(pool: HashMap<u64, NodePart>) {
     }
     let names: Vec<String> = pool.values().map(|p| p.label.clone()).collect();
     let (done, finished) = crossbeam_channel::bounded::<()>(1);
-    let spawned = std::thread::Builder::new().name("retire".into()).spawn(move || {
+    let spawned = common::thread::Builder::new().name("retire".into()).spawn(move || {
         drop(pool);
         let _ = done.send(());
     });
-    if spawned.is_ok() && finished.recv_timeout(RETIRE_GRACE).is_err() {
+    if spawned.is_ok() && crate::task::within(&finished, RETIRE_GRACE).is_none() {
         tracing::warn!(
             "stages still shutting down after {RETIRE_GRACE:?}, left to finish: {}",
             names.join(", ")
@@ -5374,7 +5374,7 @@ pub fn scan_marks(scanners: &crate::scanners::Scanners, center: f64, rate: f64) 
 pub fn models_root() -> PathBuf {
     crate::wspkt::PacketLog::default_dir()
         .map(|d| d.with_file_name("models"))
-        .unwrap_or_else(|| std::env::temp_dir().join("waveshark-models"))
+        .unwrap_or_else(|| common::platform::scratch_dir().join("waveshark-models"))
 }
 
 /// Where the files of the model that runs when none was chosen are, or
@@ -5389,7 +5389,7 @@ pub fn default_model_dir() -> PathBuf {
 pub fn default_capture_dir() -> PathBuf {
     crate::wspkt::PacketLog::default_dir()
         .map(|d| d.with_file_name("captures"))
-        .unwrap_or_else(|| std::env::temp_dir().join("waveshark-captures"))
+        .unwrap_or_else(|| common::platform::scratch_dir().join("waveshark-captures"))
 }
 
 /// Where `.sub` files written from packets go, and where the scripts panel
@@ -5398,7 +5398,7 @@ pub fn default_capture_dir() -> PathBuf {
 pub fn default_sub_dir() -> PathBuf {
     crate::wspkt::PacketLog::default_dir()
         .map(|d| d.with_file_name("sub"))
-        .unwrap_or_else(|| std::env::temp_dir().join("waveshark-sub"))
+        .unwrap_or_else(|| common::platform::scratch_dir().join("waveshark-sub"))
 }
 
 /// The spectrum stage the waterfall is drawn from: the receiver's own,
@@ -5490,20 +5490,20 @@ pub(crate) mod tests {
                 node: Box::new(StuckOnDrop(Some(held))),
             },
         );
-        let started = std::time::Instant::now();
+        let started = common::time::Instant::now();
         retire(pool);
         let waited = started.elapsed();
         assert!(
             (RETIRE_GRACE..RETIRE_GRACE * 2).contains(&waited),
             "waited {waited:?}, floor the grace, ceiling twice it"
         );
-        std::thread::spawn(move || {
+        common::thread::spawn(move || {
             let _ = release.send(());
             let _ = gone_tx.send(());
         });
-        assert!(gone.recv_timeout(std::time::Duration::from_secs(5)).is_ok());
+        assert!(gone.recv_timeout(common::time::Duration::from_secs(5)).is_ok());
 
-        let started = std::time::Instant::now();
+        let started = common::time::Instant::now();
         let mut quick = HashMap::new();
         quick.insert(
             8,
@@ -5831,7 +5831,7 @@ pub(crate) mod tests {
         let log = rx.transcript().clone();
         log.lock().push(crate::transcripts::Utterance {
             key: key.clone(),
-            at: std::time::Instant::now(),
+            at: common::time::Instant::now(),
             seconds: 1.0,
             text: "still here".into(),
             settled: true,
@@ -5884,7 +5884,7 @@ pub(crate) mod tests {
         let rx = Receiver::build(&plan, Default::default()).expect("a receiver");
         assert!(!rx.recorder().expect("a call recorder").on);
 
-        let dir = std::env::temp_dir().join("sr-calls-record");
+        let dir = common::platform::scratch_dir().join("sr-calls-record");
         plan.calls = Some(dir.clone());
         let rx = Receiver::build(&plan, Default::default()).expect("a receiver");
         let rec = rx.recorder().expect("a call recorder");
@@ -7851,7 +7851,7 @@ pub(crate) mod tests {
         // which of them heard one is a property of the record, not the file.
         let mut p = plan(2_400_000.0, Hz::mhz(433));
         p.log = true;
-        let d = std::env::temp_dir().join(format!("sr-chainlog-{}", std::process::id()));
+        let d = common::platform::scratch_dir().join(format!("sr-chainlog-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let rx = Receiver::build(&p, Sinks { packet_log: Some(d.clone()), ..Default::default() })
             .unwrap();
@@ -8061,7 +8061,8 @@ pub(crate) mod tests {
     /// holding eight.
     #[test]
     fn the_log_folder_is_reported_with_nothing_writing_to_it() {
-        let d = std::env::temp_dir().join(format!("sr-logfolder-{}", std::process::id()));
+        let d =
+            common::platform::scratch_dir().join(format!("sr-logfolder-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("2026-09-08.000.wspkt"), vec![0u8; 65_536]).unwrap();
@@ -8219,7 +8220,7 @@ pub(crate) mod tests {
         // says so. Every sink with state has this failure mode.
         let mut p = plan(2_400_000.0, Hz::mhz(433));
         p.log = true;
-        let d = std::env::temp_dir().join(format!("sr-keeplog-{}", std::process::id()));
+        let d = common::platform::scratch_dir().join(format!("sr-keeplog-{}", std::process::id()));
         let mut rx =
             Receiver::build(&p, Sinks { packet_log: Some(d), ..Default::default() }).unwrap();
         p.center = Hz::mhz(868);
@@ -8240,7 +8241,7 @@ pub(crate) mod tests {
         // that was built without one.
         let mut p = plan(2_400_000.0, Hz::mhz(433));
         let mut rx = Receiver::build(&p, Sinks::default()).unwrap();
-        let d = std::env::temp_dir().join(format!("sr-latelog-{}", std::process::id()));
+        let d = common::platform::scratch_dir().join(format!("sr-latelog-{}", std::process::id()));
         rx.set_packet_log(Some(d));
         p.log = true;
         rx.rebuild(&p).unwrap();
@@ -8256,7 +8257,7 @@ pub(crate) mod tests {
         // the packet, so the ring must run ahead of the banks.
         let mut p = plan(2_400_000.0, Hz::mhz(433));
         p.record = true;
-        let dir = std::env::temp_dir().join(format!("sr-chain-{}", std::process::id()));
+        let dir = common::platform::scratch_dir().join(format!("sr-chain-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let rec = Recorder::new(&dir, p.eff_rate(), p.center).unwrap();
         let rx = Receiver::build(&p, Sinks { recorder: Some(rec), ..Default::default() }).unwrap();
@@ -8554,7 +8555,7 @@ mod tx_tests {
         if let Some(n) = g.node_mut(id)
             && let Some(s) = n.as_any_mut().downcast_mut::<nodes::TxSinkNode>()
         {
-            s.finish(std::time::Duration::from_millis(50));
+            s.finish(common::time::Duration::from_millis(50));
         }
         let mut iq = Vec::new();
         SampleFormat::Cs8.convert(&buf.lock(), &mut iq);
@@ -8672,7 +8673,7 @@ mod tx_tests {
         if let Some(n) = g.node_mut(id)
             && let Some(s) = n.as_any_mut().downcast_mut::<nodes::TxSinkNode>()
         {
-            s.finish(std::time::Duration::from_millis(50));
+            s.finish(common::time::Duration::from_millis(50));
         }
         let mut iq = Vec::new();
         SampleFormat::Cs8.convert(&buf.lock(), &mut iq);
@@ -8744,7 +8745,7 @@ mod tx_tests {
         if let Some(n) = g.node_mut(id)
             && let Some(s) = n.as_any_mut().downcast_mut::<nodes::TxSinkNode>()
         {
-            s.finish(std::time::Duration::from_millis(50));
+            s.finish(common::time::Duration::from_millis(50));
         }
         let mut iq = Vec::new();
         common::SampleFormat::Cs8.convert(&buf.lock(), &mut iq);
@@ -8900,7 +8901,7 @@ mod tx_tests {
         if let Some(n) = g.node_mut(id)
             && let Some(s) = n.as_any_mut().downcast_mut::<nodes::TxSinkNode>()
         {
-            s.finish(std::time::Duration::from_millis(50));
+            s.finish(common::time::Duration::from_millis(50));
         }
         assert!(!buf.lock().is_empty(), "nothing was transmitted");
         assert_eq!(
@@ -8934,7 +8935,7 @@ mod tx_tests {
 
         // Write the capture where the replay reads it, named so the file
         // carries its own centre and rate.
-        let dir = std::env::temp_dir().join("waveshark-sub-e2e");
+        let dir = common::platform::scratch_dir().join("waveshark-sub-e2e");
         let _ = std::fs::create_dir_all(&dir);
         // The sink encodes Cs8, so the file is named `.cs8` to match: a name
         // saying one format and bytes in another is a capture that decodes
@@ -9414,7 +9415,7 @@ mod tx_in_graph_tests {
     /// file's own samples at the stage's level.
     #[test]
     fn a_capture_is_transmitted_as_the_samples_it_holds() {
-        let dir = std::env::temp_dir().join("sr_chain_tx_capture");
+        let dir = common::platform::scratch_dir().join("sr_chain_tx_capture");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("bench_446.05M_2000k.cu8");
         // A quarter-scale constant, which is unmistakable in what comes back:
@@ -9485,7 +9486,7 @@ mod tx_in_graph_tests {
 
     #[test]
     fn each_over_replays_the_capture_from_its_first_sample() {
-        let dir = std::env::temp_dir().join("sr_chain_tx_rewind");
+        let dir = common::platform::scratch_dir().join("sr_chain_tx_rewind");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("steps_446.05M_2000k.cu8");
         let steps: Vec<u8> =
@@ -9528,7 +9529,7 @@ mod tx_in_graph_tests {
     /// extension `.iq` says nothing and the stage would otherwise refuse it.
     #[test]
     fn a_capture_described_by_hand_reaches_the_air() {
-        let dir = std::env::temp_dir().join("sr_chain_tx_described");
+        let dir = common::platform::scratch_dir().join("sr_chain_tx_described");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("someone elses recording.iq");
         std::fs::write(&path, [160u8, 128u8].repeat(200_000)).unwrap();
@@ -9616,7 +9617,7 @@ mod tx_in_graph_tests {
         for _ in 0..8 {
             rx.process(&block).unwrap();
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(common::time::Duration::from_millis(100));
         assert_eq!(
             rx.tx_state().map(|s| s.written),
             Some(0),
@@ -9863,7 +9864,7 @@ vectors:
     /// were in the file at the other end of it.
     #[test]
     fn a_keyed_television_channel_puts_a_readable_multiplex_on_the_air() {
-        let path = std::env::temp_dir().join("waveshark-chain-dvbt-tx.ts");
+        let path = common::platform::scratch_dir().join("waveshark-chain-dvbt-tx.ts");
         let mut file = Vec::new();
         for n in 0..240u16 {
             file.extend_from_slice(&ts_packet(n));
@@ -10025,6 +10026,9 @@ vectors:
         // what_a_television_transmission_costs -- --nocapture`.
         let mut file = None;
         let stream = match std::env::var_os("SR_TX_RADIO").is_some() {
+            #[cfg(not(feature = "hackrf"))]
+            true => panic!("SR_TX_RADIO needs a build with the hackrf feature"),
+            #[cfg(feature = "hackrf")]
             true => {
                 let mut dev = hackrf::HackRfDevice::open_first().expect("a HackRF to transmit on");
                 dev.set_rate(Sps(rate as u64)).unwrap();
@@ -10051,7 +10055,7 @@ vectors:
         let block = vec![C32::new(0.0, 0.0); (rate * 0.02) as usize];
         let seconds = 3.0;
         let blocks = (seconds / 0.02) as usize;
-        let start = std::time::Instant::now();
+        let start = common::time::Instant::now();
         for _ in 0..blocks {
             rx.process(&block).unwrap();
         }
@@ -10146,10 +10150,10 @@ vectors:
     /// Wait for the transmitter, which is a thread: what it has done is
     /// read rather than made to happen. Fails the test rather than hanging.
     fn until(what: &str, mut ready: impl FnMut() -> bool) {
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let until = common::time::Instant::now() + common::time::Duration::from_secs(5);
         while !ready() {
-            assert!(std::time::Instant::now() < until, "waited five seconds for {what}");
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            assert!(common::time::Instant::now() < until, "waited five seconds for {what}");
+            std::thread::sleep(common::time::Duration::from_millis(2));
         }
     }
 
@@ -10180,7 +10184,7 @@ vectors:
     impl common::TxStream for Counted {
         fn write(&mut self, buf: &common::IqBuf) -> Result<()> {
             if let Some(rate) = self.paced_at {
-                std::thread::sleep(std::time::Duration::from_secs_f64(
+                std::thread::sleep(common::time::Duration::from_secs_f64(
                     buf.samples.len() as f64 / rate,
                 ));
             }
@@ -10191,7 +10195,7 @@ vectors:
         fn underruns(&self) -> u64 {
             0
         }
-        fn drain(&mut self, _timeout: std::time::Duration) -> bool {
+        fn drain(&mut self, _timeout: common::time::Duration) -> bool {
             true
         }
         fn stop(&mut self) {}
@@ -10256,7 +10260,7 @@ vectors:
             // the radio the next one gets.
             assert!(rx.tx_settled());
             let sent = radio.samples();
-            std::thread::sleep(std::time::Duration::from_millis(40));
+            std::thread::sleep(common::time::Duration::from_millis(40));
             assert_eq!(radio.samples(), sent, "over {over} went on transmitting after it ended");
         }
     }
@@ -10636,7 +10640,7 @@ vectors:
         until("the vox to have measured something", || {
             rx.vox_state().is_some_and(|v| v.level > 0.01)
         });
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::thread::sleep(common::time::Duration::from_millis(300));
         let state = rx.vox_state().expect("a vox in the chain");
         assert!(!state.open, "the receiver's own audio asked for the key");
         assert!(state.held, "nothing said why the key was up");
@@ -10674,7 +10678,7 @@ vectors:
         // Looked at after a block's worth of time, because a chain still
         // running republishes its topology every block and would put back
         // what the rebuild took away.
-        std::thread::sleep(std::time::Duration::from_millis(80));
+        std::thread::sleep(common::time::Duration::from_millis(80));
         assert!(rx.tx_topology().is_none(), "it is still running the chain it was told to drop");
         assert!(!rx.keyed());
     }
@@ -10694,7 +10698,7 @@ vectors:
             fn underruns(&self) -> u64 {
                 0
             }
-            fn drain(&mut self, _timeout: std::time::Duration) -> bool {
+            fn drain(&mut self, _timeout: common::time::Duration) -> bool {
                 true
             }
             fn stop(&mut self) {}
@@ -10807,7 +10811,7 @@ vectors:
         // And nothing more once the key is up.
         until("the transmitter to stop", || {
             let now = captured.lock().len();
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(common::time::Duration::from_millis(50));
             now == captured.lock().len()
         });
         assert!(captured.lock().len() >= sent, "the radio lost what was already written");

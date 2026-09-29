@@ -23,7 +23,7 @@
 //! decoder fills the report in.
 
 use crate::row::Reception;
-use std::time::{Duration, Instant};
+use common::time::{Duration, Instant};
 
 /// How long after its last frame a link is still counted as live. A control
 /// link sends tens of frames a second, so a second of silence is already a

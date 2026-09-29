@@ -15,4 +15,4 @@ mod transport;
 
 pub use error::{Error, Result};
 pub use r82xx::{Board, Chip};
-pub use rtl2832::{DEF_RTL_XTAL, DirectSampling, Enumerated, Reader, RtlSdr, Tuner};
+pub use rtl2832::{DEF_RTL_XTAL, DirectSampling, Enumerated, Reader, RtlSdr, Tuner, USB_IDS};

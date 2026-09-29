@@ -5,9 +5,9 @@
 //!
 //!     cargo run --release -p pipeline --example overhead -- 8 256
 
+use common::time::Instant;
 use common::{C32, Hz, Result};
 use pipeline::{NodeCtx, Payload, PortSpec, Simple, StreamSpec, chain};
-use std::time::Instant;
 
 struct Pass;
 impl Simple for Pass {

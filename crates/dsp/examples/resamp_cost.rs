@@ -4,7 +4,7 @@ fn main() {
     let iq: Vec<C32> = (0..n).map(|i| C32::new((i as f32 * 0.01).sin(), 0.0)).collect();
     let mut r = dsp::resample::Rational::new(20.48e6, 20e6, 4096).unwrap();
     let mut out = Vec::with_capacity(n);
-    let t = std::time::Instant::now();
+    let t = common::time::Instant::now();
     for b in iq.chunks(65_536) {
         out.clear();
         r.process(b, &mut out);

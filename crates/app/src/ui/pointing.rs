@@ -157,7 +157,7 @@ impl PointingModal<'_> {
         if r.should_close() {
             close = true;
         }
-        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        ctx.request_repaint_after(common::time::Duration::from_millis(250));
         (close, out)
     }
 }

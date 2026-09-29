@@ -45,11 +45,24 @@
 //! asked, because the others are now reading a different piece of spectrum
 //! than the one they subscribed to and nothing else would tell them.
 
+#[cfg(feature = "net")]
 pub mod client;
+mod config;
 pub mod proto;
+#[cfg(feature = "net")]
 pub mod server;
+#[cfg(not(feature = "net"))]
+#[path = "server_offline.rs"]
+pub mod server;
+mod url;
+#[cfg(feature = "net")]
+pub mod ws;
+#[cfg(not(feature = "net"))]
+#[path = "ws_offline.rs"]
 pub mod ws;
 
+#[cfg(feature = "net")]
 pub use client::{Block, ClientConfig, IqStream, Prefer, StreamInfo, list, set};
+pub use config::{Ask, Door, Public, ServerConfig, StreamConfig, Tune};
 pub use proto::{Codec, RATE_SETTING, Setting, SettingKind, SettingValue, StreamDesc, Transport};
-pub use server::{Ask, Public, Server, ServerConfig, Stream, StreamConfig, Tune};
+pub use server::{Server, Stream};

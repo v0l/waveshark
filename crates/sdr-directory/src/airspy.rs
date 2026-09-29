@@ -1,5 +1,5 @@
 use crate::{Author, Dial, Entry, Error, Hardware, Listing, Published, SdrDirectory, Tuner};
-use std::time::Duration;
+use web_time::Duration;
 
 pub const REGISTER: &str = "http://directory.api.airspy.com:8080/register";
 pub const EVERY: Duration = Duration::from_secs(15);
@@ -23,7 +23,6 @@ impl Default for Config {
 
 pub struct AirspyDirectory {
     config: Config,
-    http: reqwest::blocking::Client,
 }
 
 pub fn device_type(hardware: &Hardware) -> &'static str {
@@ -88,8 +87,7 @@ impl SdrDirectory for AirspyDirectory {
     type Config = Config;
 
     fn open(config: &Config, _wait: Duration) -> Result<Self, Error> {
-        let http = httpc::blocking(WAIT).map_err(|e| Error::Unreachable(e.to_string()))?;
-        Ok(Self { config: config.clone(), http })
+        Ok(Self { config: config.clone() })
     }
 
     fn author(&self) -> Option<Author> {
@@ -104,18 +102,17 @@ impl SdrDirectory for AirspyDirectory {
         let body = status(entry, &self.config).ok_or_else(|| {
             Error::Refused(vec![(self.config.register.clone(), "no tuner".into())])
         })?;
-        let answer = self
-            .http
-            .post(&self.config.register)
-            .header(reqwest::header::CONTENT_TYPE, CONTENT_TYPE)
+        let answer = httpc::post(&self.config.register)
+            .timeout(WAIT)
+            .header("Content-Type", CONTENT_TYPE)
             .body(body)
-            .send()
-            .map_err(|e| Error::Unreachable(e.to_string()))?;
-        match answer.status().is_success() {
+            .wait()
+            .map_err(Error::Unreachable)?;
+        match answer.is_success() {
             true => Ok(Published { accepted: 1, refused: Vec::new() }),
             false => Err(Error::Refused(vec![(
                 self.config.register.clone(),
-                answer.status().to_string(),
+                format!("HTTP {}", answer.status),
             )])),
         }
     }
@@ -225,7 +222,7 @@ mod tests {
         use std::io::{Read, Write};
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let register = format!("http://{}/register", l.local_addr().unwrap());
-        let heard = std::thread::spawn(move || {
+        let heard = common::thread::spawn(move || {
             let (mut sock, _) = l.accept().unwrap();
             let mut got = Vec::new();
             let mut buf = [0u8; 4096];

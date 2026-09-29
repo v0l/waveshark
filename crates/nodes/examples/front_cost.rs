@@ -69,7 +69,7 @@ fn main() {
                 continue;
             }
         };
-        let t = std::time::Instant::now();
+        let t = common::time::Instant::now();
         for b in iq.chunks(131_072) {
             g.feed_iq(b).unwrap();
         }

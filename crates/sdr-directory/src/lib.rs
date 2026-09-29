@@ -8,7 +8,7 @@ pub use model::{Accuracy, Dial, Entry, Hardware, Location, Protocol, Station, Tu
 
 use std::collections::HashMap;
 use std::fmt;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use web_time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const STALE_AFTER_SECS: u64 = 24 * 60 * 60;
 pub const ANNOUNCE_EVERY_SECS: u64 = STALE_AFTER_SECS;

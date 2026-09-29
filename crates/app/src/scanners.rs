@@ -355,10 +355,7 @@ impl Default for Scanners {
 impl Scanners {
     /// `$XDG_CONFIG_HOME/waveshark/scanners`, beside the session.
     pub fn path() -> Option<PathBuf> {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(base.join("waveshark").join("scanners"))
+        Some(common::platform::config_dir()?.join("scanners"))
     }
 
     /// Load, writing the defaults out first if there is no file yet, and
@@ -370,7 +367,7 @@ impl Scanners {
         let Some(path) = Self::path() else {
             return Self::default();
         };
-        match std::fs::read_to_string(&path) {
+        match common::store::read(&path) {
             Ok(text) => {
                 let mut t = Self::parse(&text);
                 if t.take_new_blocks() {
@@ -379,10 +376,7 @@ impl Scanners {
                 t
             }
             Err(_) => {
-                if let Some(dir) = path.parent() {
-                    let _ = std::fs::create_dir_all(dir);
-                }
-                let _ = std::fs::write(&path, DEFAULT_TEXT);
+                let _ = common::store::write(&path, DEFAULT_TEXT);
                 Self::default()
             }
         }
@@ -541,10 +535,7 @@ impl Scanners {
         let Some(path) = Self::path() else {
             return Err(std::io::Error::other("no config directory"));
         };
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, self.render())
+        common::store::write(&path, &self.render())
     }
 
     /// Blocks of `key = value` under a `[name]` heading. Anything unparsable

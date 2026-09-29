@@ -90,7 +90,7 @@ fn a_voice_on_the_microphone_keys_the_radio_and_a_quiet_room_lets_it_up() {
     });
     until("the device to be given back", || !watch.keyed());
     let sent = watch.transmitted_len();
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(common::time::Duration::from_millis(100));
     assert_eq!(watch.transmitted_len(), sent, "it went on transmitting after the vox let up");
     assert_eq!(radio.status.error.lock().clone(), None, "the over went out and it complained");
 }
@@ -122,7 +122,7 @@ fn a_hand_key_on_a_vox_channel_is_not_let_up_by_the_vox() {
     radio.send(Cmd::Key(Some(1)));
     until("the hand key to take", || radio.status.keyed.load(Ordering::Relaxed) == 1);
     until("an over on the antenna", || watch.transmitted_len() > 240_000);
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    std::thread::sleep(common::time::Duration::from_millis(200));
     assert_eq!(
         radio.status.keyed.load(Ordering::Relaxed),
         1,
@@ -185,7 +185,7 @@ fn a_channel_added_and_keyed_reaches_the_antenna() {
     until("the key to come up", || radio.status.keyed.load(Ordering::Relaxed) == 0);
     until("the device to be given back", || !watch.keyed());
     let sent = watch.transmitted_len();
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    std::thread::sleep(common::time::Duration::from_millis(50));
     assert_eq!(watch.transmitted_len(), sent, "it went on transmitting after the key came up");
 }
 
@@ -259,7 +259,7 @@ fn a_receiver_switched_off_still_transmits_and_a_transmitter_switched_off_does_n
         "only what the network feeds, and not the radio"
     );
     while radio.frames.try_recv().is_ok() {}
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    std::thread::sleep(common::time::Duration::from_millis(200));
     assert_eq!(radio.frames.try_iter().count(), 0, "the spectrum went on drawing");
 
     radio.send(Cmd::Key(Some(1)));
@@ -344,7 +344,7 @@ fn a_stage_left_out_says_why_on_every_rebuild_until_it_builds() {
     radio.send(Cmd::Edits(edits));
     let rev = radio.status.patch().0;
     until("the edit that builds", || radio.status.patch().0 > rev);
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(common::time::Duration::from_millis(100));
     assert_eq!(radio.status.refused.lock().clone(), None);
 }
 
@@ -507,7 +507,7 @@ fn a_half_duplex_radio_is_not_retuned_until_the_last_of_the_over_has_gone_out() 
     let rate = Sps(2_048_000);
     let dev = sources::FileRadio::silent(center, rate)
         .half_duplex(true)
-        .holding_in_flight(std::time::Duration::from_millis(256))
+        .holding_in_flight(common::time::Duration::from_millis(256))
         .as_fast_as_it_can();
     let watch = dev.watcher();
     let radio = Radio::on_device(Box::new(dev), center, rate, 1024);
@@ -528,7 +528,7 @@ fn a_half_duplex_radio_is_not_retuned_until_the_last_of_the_over_has_gone_out() 
     radio.send(Cmd::Key(None));
     until("the key to come up", || radio.status.keyed.load(Ordering::Relaxed) == 0);
     until("the radio to be given back", || !watch.keyed());
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(common::time::Duration::from_millis(100));
 
     let tail_s = (watch.transmitted_len() - at_release) as f64 / rate.as_f64();
     assert!(

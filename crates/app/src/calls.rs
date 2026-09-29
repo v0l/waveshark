@@ -31,7 +31,7 @@
 //! channel a call was granted. Everything else stays in the packet log where
 //! it belongs.
 
-use std::time::{Duration, Instant};
+use common::time::{Duration, Instant};
 
 /// How long after the last transmission a call is still counted as live.
 ///

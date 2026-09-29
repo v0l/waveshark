@@ -58,7 +58,6 @@ pub fn best_device() -> candle_core::Device {
 /// the reason `stt::open_cuda` gives: the statically linked CUDA runtime
 /// tears its context down at exit and a cuBLAS handle destroyed afterwards
 /// segfaults.
-#[cfg(all(feature = "cuda", not(target_vendor = "apple")))]
 pub fn open_cuda(n: usize) -> Result<candle_core::Device, candle_core::Error> {
     use std::sync::Mutex;
     static OPEN: Mutex<Vec<(usize, candle_core::Device)>> = Mutex::new(Vec::new());

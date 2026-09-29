@@ -12,10 +12,10 @@ dsp.workspace = true
 decode.workspace = true
 sources.workspace = true
 rtlsdr.workspace = true
-remote.workspace = true
-iqstream.workspace = true
+remote = { workspace = true, features = ["iqstream"] }
+iqstream = { workspace = true, features = ["net"] }
 sdr-directory.workspace = true
-nostr-directory.workspace = true
+nostr-directory = { workspace = true, features = ["relay"] }
 tokio = { version = "1", features = ["rt", "signal"] }
 clap.workspace = true
 chrono = { workspace = true, features = ["clock"] }

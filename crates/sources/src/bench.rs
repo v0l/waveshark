@@ -17,11 +17,11 @@
 //! key comes up.
 
 use common::device::{Device, DeviceInfo, DriverKind, GainMode, RxStream, TunerRange, TxInfo};
+use common::time::Duration;
 use common::{C32, Error, Hz, IqBuf, Result, SampleFormat, Sps, TxStream};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
 
 /// What the two sides of the radio share: what is being transmitted, and
 /// whether anything is.
@@ -296,7 +296,7 @@ impl Device for FileRadio {
             realtime: self.realtime,
             at: 0,
             seq: 0,
-            start: std::time::Instant::now(),
+            start: common::time::Instant::now(),
             made: 0,
             stopped: false,
         }))
@@ -319,7 +319,7 @@ struct BenchRx {
     realtime: bool,
     at: usize,
     seq: u64,
-    start: std::time::Instant,
+    start: common::time::Instant,
     /// Samples handed over, for pacing.
     made: u64,
     stopped: bool,

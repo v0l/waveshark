@@ -126,9 +126,9 @@ pub fn register(r: &mut pipeline::registry::Registry) {
 pub fn write_wav(path: &Path, speech: &Speech) -> std::io::Result<()> {
     use std::io::Write;
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+        common::fs::blocking::create_dir_all(dir)?;
     }
-    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut f = std::io::BufWriter::new(common::fs::blocking::File::create(path)?);
     f.write_all(&wav_bytes(speech))?;
     f.flush()
 }
@@ -176,7 +176,8 @@ mod tests {
 
     #[test]
     fn a_transmission_writes_a_wav_that_says_what_it_holds() {
-        let dir = std::env::temp_dir().join(format!("waveshark-call-{}", std::process::id()));
+        let dir =
+            common::platform::scratch_dir().join(format!("waveshark-call-{}", std::process::id()));
         let path = dir.join("call.wav");
         let speech = Speech { pcm: vec![0.5, -0.5, 0.25, 0.0], rate: 8_000.0 };
         write_wav(&path, &speech).expect("wav");

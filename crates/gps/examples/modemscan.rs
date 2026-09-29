@@ -22,9 +22,9 @@ fn main() {
         }
     }
     let src = Source::start(Config::new(Transport::Modem { path, baud: gps::modem::BAUD }));
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(secs);
-    while std::time::Instant::now() < until {
-        std::thread::sleep(std::time::Duration::from_millis(500));
+    let until = common::time::Instant::now() + common::time::Duration::from_secs(secs);
+    while common::time::Instant::now() < until {
+        std::thread::sleep(common::time::Duration::from_millis(500));
         match src.fix() {
             Some(f) => println!("{:.6}, {:.6}  sats {:?}  utc {:?}", f.lat, f.lon, f.sats, f.utc),
             None => println!("no fix (connected {}, {} so far)", src.connected(), src.fixes()),
