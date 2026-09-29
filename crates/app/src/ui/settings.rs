@@ -3327,7 +3327,7 @@ impl App {
         }
         if self.device.is_none() {
             self.device = match &self.awaited {
-                Some(saved) => self.devices.iter().find(|d| d.label == *saved).cloned(),
+                Some(awaited) => awaited.found(&self.devices),
                 None => self.devices.first().cloned(),
             };
             if self.device.is_some() {

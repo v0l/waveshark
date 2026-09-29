@@ -41,6 +41,8 @@ mod messagelog;
 mod messages;
 mod mix;
 mod oggopus;
+#[cfg(any(target_arch = "wasm32", test))]
+mod page_args;
 mod patch;
 mod picsave;
 mod places;

@@ -63,7 +63,14 @@ pub async fn start_app() {
     if let Ok(dir) = datasets::cache::Cache::default_dir() {
         common::store::preload(&dir, datasets::cache::is_meta).await;
     }
-    if let Err(e) = crate::run(crate::Args::parse_from(["waveshark"])) {
+    let search =
+        eframe::web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default();
+    let args =
+        crate::Args::try_parse_from(crate::page_args::from_query(&search)).unwrap_or_else(|e| {
+            tracing::error!("the address asked for {search}: {e}");
+            crate::Args::parse_from(["waveshark"])
+        });
+    if let Err(e) = crate::run(args) {
         tracing::error!("the interface did not start: {e}");
     }
 }

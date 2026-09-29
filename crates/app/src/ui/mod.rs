@@ -146,7 +146,7 @@ pub struct App {
     /// Which half of the setup dialog is showing.
     setup_tab: SetupTab,
     devices: Vec<crate::devices::Entry>,
-    awaited: Option<String>,
+    awaited: Option<Awaited>,
     /// The open-a-capture dialog, while it is up. It runs on its own thread
     /// so the receiver keeps painting behind it.
     picking: Option<
@@ -834,12 +834,20 @@ impl App {
         }
         let devices = crate::devices::list();
         let mut device = choose_device(&devices, asked, s.device.as_deref());
-        let awaited = s.device.clone().filter(|saved| {
-            cfg!(target_arch = "wasm32")
-                && asked.is_none()
-                && device.as_ref().is_none_or(|d| d.label != *saved)
-                && devices.iter().any(|d| d.unanswered)
-        });
+        let awaited = match asked {
+            Some(want) => (cfg!(target_arch = "wasm32")
+                && device.as_ref().is_none_or(|d| d.unanswered))
+            .then(|| Awaited::Asked(want.to_string())),
+            None => s
+                .device
+                .clone()
+                .filter(|saved| {
+                    cfg!(target_arch = "wasm32")
+                        && device.as_ref().is_none_or(|d| d.label != *saved)
+                        && devices.iter().any(|d| d.unanswered)
+                })
+                .map(Awaited::Saved),
+        };
         if awaited.is_some() {
             device = None;
         }
@@ -921,7 +929,11 @@ impl App {
     /// operator's switches.
     fn sync_settings(&mut self) {
         let rs = self.radio_settings.clone();
-        let device = self.device.as_ref().map(|d| d.label.clone()).or_else(|| self.awaited.clone());
+        let device = self
+            .device
+            .as_ref()
+            .map(|d| d.label.clone())
+            .or_else(|| self.awaited.as_ref().and_then(Awaited::saved));
         let (center, rate, zoom, fft) = (self.center, self.rate, self.zoom, self.scope.fft);
         let prefs = self.scope.prefs();
         let layers = self.map.map.layers.saved();
@@ -3195,14 +3207,45 @@ fn sat_label(d: &sats_pane::Downlink) -> String {
 /// without case, so `--device hackrf` finds the board without its serial. A
 /// name nothing answers to is said once and the saved receiver is opened, so
 /// a typo does not leave the window with no radio at all.
+#[derive(Clone, Debug, PartialEq)]
+enum Awaited {
+    Saved(String),
+    Asked(String),
+}
+
+impl Awaited {
+    fn found(&self, devices: &[crate::devices::Entry]) -> Option<crate::devices::Entry> {
+        match self {
+            Awaited::Saved(label) => devices.iter().find(|d| d.label == *label),
+            Awaited::Asked(want) => devices.iter().find(|d| !d.unanswered && asked_for(d, want)),
+        }
+        .cloned()
+    }
+
+    fn saved(&self) -> Option<String> {
+        match self {
+            Awaited::Saved(label) => Some(label.clone()),
+            Awaited::Asked(_) => None,
+        }
+    }
+}
+
+fn asked_for(d: &crate::devices::Entry, want: &str) -> bool {
+    let at = remote::parse_spec(want).map(|(_, addr)| addr);
+    d.label.to_lowercase().contains(&want.to_lowercase())
+        || d.addr
+            .as_deref()
+            .zip(at.as_deref())
+            .is_some_and(|(a, w)| crate::devices::same_server(a, w))
+}
+
 fn choose_device(
     devices: &[crate::devices::Entry],
     asked: Option<&str>,
     saved: Option<&str>,
 ) -> Option<crate::devices::Entry> {
     if let Some(want) = asked {
-        let w = want.to_lowercase();
-        match devices.iter().find(|d| d.label.to_lowercase().contains(&w)) {
+        match devices.iter().find(|d| asked_for(d, want)) {
             Some(d) => return Some(d.clone()),
             None => {
                 let have: Vec<&str> = devices.iter().map(|d| d.label.as_str()).collect();
@@ -4570,6 +4613,36 @@ mod tests {
             vec![("94k", 93_750.0), ("188k", 187_500.0), ("375k", 375_000.0), ("750k", 750_000.0)]
         );
         assert_eq!(a.rate, 750_000.0);
+    }
+
+    #[test]
+    fn a_stream_asked_for_by_its_address_is_opened_once_it_answers() {
+        let stream = |label: &str, addr: &str, unanswered| crate::devices::Entry {
+            kind: common::device::DriverKind::Network,
+            index: 0,
+            label: label.into(),
+            rates: Sps(2_400_000)..=Sps(2_400_000),
+            steps: Vec::new(),
+            addr: Some(addr.into()),
+            proto: Some(remote::Proto::IqStream),
+            path: None,
+            pinned: None,
+            parts: Vec::new(),
+            unanswered,
+        };
+        let want = format!("webrtc://{}", "ab".repeat(32));
+        let offline = stream("listed (offline)", &want, true);
+        let heard = stream("radarpi 1090.000 MHz", &format!("{want}#1"), false);
+        let other = stream("mast 433.920 MHz", "mast.test:5555", false);
+        assert_eq!(
+            choose_device(&[other.clone(), heard.clone()], Some(&want), Some("mast 433.920 MHz")),
+            Some(heard.clone()),
+            "the address asked for beats the saved radio"
+        );
+        let asked = Awaited::Asked(want.clone());
+        assert_eq!(asked.found(&[other.clone(), offline]), None, "nothing until it answers");
+        assert_eq!(asked.found(&[other, heard.clone()]), Some(heard));
+        assert_eq!(asked.saved(), None, "the saved radio is not overwritten with an address");
     }
 
     #[test]
