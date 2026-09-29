@@ -41,7 +41,7 @@ pub use detect::Detection;
 pub use entity::{Entity, Id, Link, Party, PartyKind, Stability};
 pub use fact::{
     Alert, AlertKind, Cell, Channel, Event, EventKind, Fact, FactKind, Facts, Fix, Motion, Named,
-    Quantity, Reading, Severity, Sticks, ThingKind, Written,
+    Quantity, Reading, Severity, Sticks, ThingKind, Written, clock_label,
 };
 pub use frame::{Fec, Frame, Framing, Integrity};
 pub use keying::{Keying, KeyingParams, Knowledge, Symbols};

@@ -484,10 +484,10 @@ mod tests {
         let b = SourceBlock {
             id: SourceId(1),
             state: common::source::SourceState::Opened,
-            center_hz: 517_975,
-            bandwidth_hz: 1_953.0,
-            signal_hz: 610.0,
-            rate: 1_953.0,
+            center_hz: 11_039_300,
+            bandwidth_hz: 4_000.0,
+            signal_hz: 600.0,
+            rate: 4_000.0,
             start_sample: 0,
             snr_db: 22.0,
             samples: Vec::new(),
@@ -496,7 +496,7 @@ mod tests {
         let origin = Origin { span_sample: 0, span_rate_hz: b.rate };
         let (members, _) = found(&b, spec, origin, &registry()).expect("members");
         assert!(
-            members.iter().any(|m| m.name == "navtex"),
+            members.iter().any(|m| m.name == "rtty"),
             "{:?}",
             members.iter().map(|m| m.name).collect::<Vec<_>>()
         );

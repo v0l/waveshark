@@ -103,6 +103,7 @@ pub mod ta61;
 #[cfg(feature = "tea")]
 pub mod tea;
 pub mod tetra;
+pub mod timesignal;
 #[cfg(feature = "ffmpeg")]
 pub mod transcode;
 pub mod twotone;
@@ -112,6 +113,7 @@ pub mod video_channels;
 pub mod videoleak;
 pub mod vocoder;
 pub mod voice;
+pub mod vor;
 pub mod walksnail;
 pub mod wefax;
 pub mod whiten;

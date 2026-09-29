@@ -85,11 +85,13 @@ pub mod sub_tx;
 pub mod survey_nodes;
 pub mod tempest_nodes;
 pub mod tetra_nodes;
+pub mod timesignal_nodes;
 pub mod twotone_nodes;
 pub mod tx_nodes;
 pub mod uat_nodes;
 pub mod vdl2_nodes;
 pub mod video_nodes;
+pub mod vor_nodes;
 mod wait;
 pub mod walksnail_nodes;
 pub mod wefax_nodes;
@@ -294,6 +296,10 @@ const STAGES: &[(StageDesc, fn(&Settings) -> Result<Box<dyn Node>>)] = &[
     (dmr_nodes::DESC, dmr_nodes::build),
     (p25_nodes::DESC, p25_nodes::build),
     (ysf_nodes::DESC, ysf_nodes::build),
+    (vor_nodes::DESC, vor_nodes::build),
+    (timesignal_nodes::MSF_DESC, timesignal_nodes::build_msf),
+    (timesignal_nodes::DCF77_DESC, timesignal_nodes::build_dcf77),
+    (timesignal_nodes::TDF_DESC, timesignal_nodes::build_tdf),
     (nxdn_nodes::DESC, nxdn_nodes::build),
     (pocsag_nodes::DESC, pocsag_nodes::build),
     (flex_nodes::DESC, flex_nodes::build),

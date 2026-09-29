@@ -779,3 +779,49 @@ fn a_fusion_over_through_gb3xp_names_g1rce() {
     assert_eq!(got.frames, 70);
     assert_eq!(got.identities, ["G1RCE"]);
 }
+
+#[test]
+fn ockham_and_biggin_put_the_receiver_on_crossing_radials() {
+    let Some(buf) = fixture("vor_ockham_biggin_115.2M_384k.cs16") else { return };
+    let read = |hz: f64| {
+        let rows = identify::vor::read_at(&buf.samples, buf.rate.as_f64(), buf.center.as_f64(), hz);
+        let radials: Vec<f64> = rows
+            .iter()
+            .flat_map(|r| &r.facts)
+            .filter_map(|f| match f {
+                common::packet::Fact::Sensed(x) => Some(x.value),
+                _ => None,
+            })
+            .collect();
+        let named: Vec<String> =
+            rows.iter().filter_map(|r| r.subject.as_ref().map(|e| e.id.to_string())).collect();
+        (radials, named)
+    };
+    let ((ockham, ock), (biggin, big)) = (read(115_300_000.0), read(115_100_000.0));
+    assert_eq!((ockham.len(), biggin.len()), (2, 2));
+    assert!(ockham.iter().all(|r| (88.0..=94.0).contains(r)), "Ockham {ockham:?}");
+    assert!(biggin.iter().all(|r| (248.0..=264.0).contains(r)), "Biggin {biggin:?}");
+    assert_eq!(ock, ["OCK"]);
+    assert_eq!(big, Vec::<String>::new());
+}
+
+#[test]
+fn msf_dcf77_and_tdf_agree_on_the_minute() {
+    let Some(buf) = fixture("clocks_msf_dcf77_tdf_0.11M_192k.cs16") else { return };
+    let read = identify::read_all(&buf.samples, buf.rate.as_f64(), buf.center.as_f64());
+    let clock = |id: &str| -> Vec<f64> {
+        read.iter()
+            .filter(|r| r.protocol == id)
+            .flat_map(|r| &r.rows)
+            .flat_map(|r| &r.facts)
+            .filter_map(|f| match f {
+                common::packet::Fact::Sensed(x) => Some(x.value),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(clock("msf"), [1_638_129_540.0]);
+    assert_eq!(clock("dcf77"), [1_638_129_540.0]);
+    assert_eq!(clock("tdf"), [1_638_129_540.0]);
+    assert_eq!(common::packet::clock_label(1_638_129_540), "2021-11-28 19:59 UTC");
+}

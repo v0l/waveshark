@@ -59,10 +59,12 @@ pub mod sstv;
 pub mod stdc;
 pub mod tempest;
 pub mod tetra;
+pub mod timesignal;
 pub mod twotone;
 pub mod uat;
 pub mod vdl2;
 pub mod video;
+pub mod vor;
 pub mod walksnail;
 pub mod wefax;
 pub mod wifi;
@@ -202,6 +204,10 @@ pub fn all() -> &'static [&'static dyn Signal] {
         &droneid::DroneId,
         &walksnail::Walksnail,
         &video::Video,
+        &vor::Vor,
+        &timesignal::MSF,
+        &timesignal::DCF77,
+        &timesignal::TDF,
         &tempest::Tempest,
         &acars::Acars,
         &sstv::Sstv,

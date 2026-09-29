@@ -11,6 +11,8 @@ the code is in the commit log.
 
 ### Added
 
+- VOR radials and Morse identifiers.
+- MSF, DCF77 and TDF time and date.
 - System Fusion frames and callsigns, without speech.
 - NAVTEX bulletins on 518, 490 and 4209.5 kHz, by station, subject and number.
 - SSTV PD 50, 90, 120, 160, 180, 240 and 290, received and sent.

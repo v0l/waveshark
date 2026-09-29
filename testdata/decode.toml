@@ -572,15 +572,17 @@ centre, so the 518 kHz here is the NAVTEX channel the tones sit either side
 of.
 
 Ten bulletins from station E, Niton: EA09 to EA39 and EL09, the Plymouth
-and Portland submarine and gunnery warning among them. A NAVTEX channel
-tuned to 518 kHz reads all ten, each character from whichever of its two copies arrived whole. The recording
-is a channel rather than a span, so the carrier sits on the file's centre,
-where an auto block takes it for the tuner's own offset and opens nothing;
-that is why this one is tuned rather than found.
+and Portland submarine and gunnery warning among them, each character read
+from whichever of its two copies arrived whole. The recording is a channel
+rather than a span, so the carrier sits on the file's centre, where the
+detector takes it for the tuner's own offset. NAVTEX is on fixed channels
+and read wherever the span reaches one, so that costs nothing.
 """
 
-channels = """
-518 kHz NAVTEX
+scanners = """
+[NAVTEX]
+range = 517 - 519 kHz
+front = auto
 """
 
 rows = 10
@@ -714,17 +716,24 @@ rows = 0
 
 [[capture]]
 name = "vor_ockham_biggin_115.2M_384k.cs16"
-sha256 = "2ea36165ea047b125e50b556c6fd57a56e35859909e17d55241072e8383b1110"
-url = "https://nostr.download/2ea36165ea047b125e50b556c6fd57a56e35859909e17d55241072e8383b1110.xz"
+sha256 = "51ef6b9f75fdfdf143f841721c6396325d0ca8afaeda5a4ba0bd5cf7546bd885"
+url = "https://nostr.download/51ef6b9f75fdfdf143f841721c6396325d0ca8afaeda5a4ba0bd5cf7546bd885.xz"
 compression = "xz"
 license = "unstated"
 license_source = "SDRangel, sdrangel.org/iq-files vor.zip, cut and converted and re-hosted"
 description = """
-Ten seconds of the Ockham (115.3 MHz) and Biggin (115.1 MHz) VORs, recorded
-on 23 November 2020, from ten seconds into SDRangel's VOR example. The
-.sdriq is 24-bit and is shifted down by two bits here.
+Eleven seconds of the Ockham (115.3 MHz) and Biggin (115.1 MHz) VORs,
+recorded on 23 November 2020, from 4.5 seconds into SDRangel's VOR example,
+which is where Ockham keys its identifier. The .sdriq is 24-bit and is
+shifted down by two bits here.
 
-There is no VOR decoder, and the receiver reads nothing.
+The receiver reads a radial off each every five seconds: about 91 degrees
+from Ockham and 254 to 262 from Biggin, and reads OCK off Ockham's 1020 Hz
+tone. Where the recording was made is not published, so the radials are
+checked against each other rather than a map: due east of Ockham and west
+south west of Biggin cross in south west London, and the other sign
+convention puts the receiver west of one beacon and east of the other at
+once. Biggin keys its identifier here too, too weakly to read.
 """
 
 scanners = """
@@ -733,23 +742,37 @@ range = 108 - 118 MHz
 front = auto
 """
 
-rows = 0
+rows = 3
+
+[[capture.read]]
+protocol = "vor"
+rows = 3
+
+[[capture.read]]
+protocol = "vor"
+on_hz = 115_300_856
+rows = 2
+subjects = ["OCK"]
 
 [[capture]]
 name = "clocks_msf_dcf77_tdf_0.11M_192k.cs16"
-sha256 = "7bde17a4138e73a4e0d3fba7bd7b21cfa405f082971f9dc55bc49fc453fd094f"
-url = "https://nostr.download/7bde17a4138e73a4e0d3fba7bd7b21cfa405f082971f9dc55bc49fc453fd094f.xz"
+sha256 = "dc247a5bc8829fc847ce4ef74f48efc8cf43f9333c29be89aaead6415a9599be"
+url = "https://nostr.download/dc247a5bc8829fc847ce4ef74f48efc8cf43f9333c29be89aaead6415a9599be.xz"
 compression = "xz"
 license = "unstated"
 license_source = "SDRangel, sdrangel.org/iq-files clock.zip, cut and converted and re-hosted"
 description = """
-Ten seconds of the long wave time signals, recorded on 28 November 2021,
+65 seconds of the long wave time signals, recorded on 28 November 2021,
 from ten seconds into SDRangel's radio clock example: MSF at 60 kHz, DCF77
 at 77.5 kHz and TDF at 162 kHz, with the tuner at 110 kHz. The .sdriq is
-24-bit and is shifted down by five bits here. A time code takes a minute,
-so ten seconds holds the second markers and not a whole frame.
+24-bit and is shifted down by five bits here. The cut holds one whole minute
+of each, from the second before its minute marker to the second after the
+next.
 
-There is no time signal decoder, and the receiver reads nothing.
+MSF keys UK time into the carrier's level, DCF77 German time into its
+level and TDF French time into its phase. Each announces the minute that
+follows, and all three read 2021-11-28 19:59 UTC through their own parity
+bits: three transmitters in three countries agreeing to the minute.
 """
 
 scanners = """
@@ -758,7 +781,28 @@ range = 40 - 200 kHz
 front = auto
 """
 
-rows = 0
+rows = 3
+
+[[capture.read]]
+protocol = "msf"
+rows = 1
+checked = true
+subjects = ["MSF"]
+sensed = { clock = 1638129540 }
+
+[[capture.read]]
+protocol = "dcf77"
+rows = 1
+checked = true
+subjects = ["DCF77"]
+sensed = { clock = 1638129540 }
+
+[[capture.read]]
+protocol = "tdf"
+rows = 1
+checked = true
+subjects = ["TDF"]
+sensed = { clock = 1638129540 }
 
 [[capture]]
 name = "airband_london_119.5M_3000k.cs16"

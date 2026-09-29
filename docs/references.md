@@ -117,6 +117,11 @@ which is a different and stronger claim than "it runs".
 - **MMDVMHost** (Jonathan Naylor, `YSFFICH.cpp` and `YSFPayload.cpp`) for
   System Fusion: the interleaving of the frame information and data
   channels, their CRC and the whitening over the callsigns.
+- **NPL's MSF specification**, **PTB's DCF77 description** and the **BIPM
+  time signal tables** for TDF, bit by bit and parity by parity. The
+  SDRangel recording holds one minute of each, and the three agree.
+- **ICAO Annex 10** for the VOR: the 30 Hz variable tone on the carrier and
+  the reference on the 9960 Hz subcarrier, and which lags which.
 - **fldigi** (`src/navtex/navtex.cxx`) for the CCIR 476 table SITOR-B and
   NAVTEX are sent in, the phasing codes, and where the repeat of a character
   sits. The Niton recording SDRangel publishes is what the decoder is checked

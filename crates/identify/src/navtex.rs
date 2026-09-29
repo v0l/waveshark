@@ -29,7 +29,7 @@ impl Signal for Navtex {
             widths: &[CHANNEL_WIDTH_HZ],
             min_rate_hz: 2.0 * CHANNEL_WIDTH_HZ,
             feed_rate_hz: AUDIO_HZ,
-            span_wide: false,
+            span_wide: true,
             families: &[],
         }
     }
