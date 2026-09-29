@@ -3,18 +3,100 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WaveShark</title>
+<title>WaveShark in the browser: an SDR receiver with no install</title>
+<meta name="description" content="WaveShark, the software defined radio receiver, running in your browser. Plug in an RTL-SDR, HackRF or Airspy over WebUSB, or open a public IQStream tuner, and decode ADS-B, AIS, pagers, sensors and voice without installing anything.">
+<meta name="theme-color" content="#16181b">
+<link rel="canonical" href="https://waveshark-app.pages.dev/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="WaveShark">
+<meta property="og:title" content="WaveShark in the browser">
+<meta property="og:description" content="A software defined radio receiver that runs in your browser: WebUSB tuners, public IQStream servers, and the decoders of the desktop app.">
+<meta property="og:url" content="https://waveshark-app.pages.dev/">
+<meta property="og:image" content="https://waveshark.io/assets/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://waveshark.io/assets/og.png">
+<link rel="icon" href="./waveshark-icon.svg" type="image/svg+xml">
+<link rel="icon" href="./favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
+<link rel="manifest" href="./manifest.webmanifest">
 <style>
 html, body { margin: 0; height: 100%; background: #16181b; overflow: hidden; }
 canvas { width: 100%; height: 100%; display: block; }
+#loading {
+  position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 18px; color: #9aa4ad; background: #16181b;
+  font: 14px/1.5 ui-monospace, "IBM Plex Mono", Menlo, Consolas, monospace;
+}
+#loading img { width: 96px; height: 96px; }
+#loading h1 { margin: 0; font-size: 20px; letter-spacing: 0.12em; color: #d6dde3; }
+#loading p { margin: 0; max-width: 34em; text-align: center; padding: 0 16px; }
+#loading .bar { width: min(360px, 80vw); height: 6px; background: #0e1012; border: 1px solid #2a2e33; }
+#loading .bar span { display: block; height: 100%; width: 0; background: #f0a030; transition: width 0.2s; }
+#loading .stage { color: #6fc8d8; min-height: 1.5em; }
+#loading.failed .stage { color: #e05a4a; }
+#loading.failed .bar span { background: #e05a4a; }
 </style>
 </head>
 <body>
 <canvas id="waveshark"></canvas>
+<div id="loading">
+  <img src="./waveshark-icon.svg" alt="">
+  <h1>WAVESHARK</h1>
+  <div class="bar"><span id="loading-bar"></span></div>
+  <div class="stage" id="loading-stage">Loading the receiver</div>
+  <p>A software defined radio receiver that runs in the browser. Plug in an RTL-SDR, HackRF or Airspy, or open a public IQStream tuner, and decode what is on the air.</p>
+  <noscript><p>WaveShark needs JavaScript and WebAssembly to run.</p></noscript>
+</div>
 <script type="module">
 import init, { start_app } from "./waveshark.js";
-await init();
-await start_app();
+
+const loading = document.getElementById("loading");
+const bar = document.getElementById("loading-bar");
+const stage = document.getElementById("loading-stage");
+const size = Number("__WASM_BYTES__") || 0;
+const mb = (n) => (n / 1e6).toFixed(1);
+
+globalThis.wavesharkStage = (text) => { stage.textContent = text; };
+globalThis.wavesharkReady = () => loading.remove();
+globalThis.wavesharkFailed = (text) => {
+  loading.classList.add("failed");
+  stage.textContent = text;
+};
+
+async function counted(url) {
+  const response = await fetch(url);
+  if (!response.ok || !response.body) return response;
+  let seen = 0;
+  const counting = new TransformStream({
+    transform(chunk, controller) {
+      seen += chunk.byteLength;
+      if (size) {
+        bar.style.width = `${Math.min(100, (seen / size) * 90)}%`;
+        stage.textContent = `Downloading ${mb(seen)} of ${mb(size)} MB`;
+      } else {
+        stage.textContent = `Downloading ${mb(seen)} MB`;
+      }
+      controller.enqueue(chunk);
+    },
+  });
+  return new Response(response.body.pipeThrough(counting), {
+    headers: { "Content-Type": "application/wasm" },
+  });
+}
+
+try {
+  if (!globalThis.crossOriginIsolated || typeof SharedArrayBuffer === "undefined") {
+    throw new Error("this browser gives the page no shared memory, which the receiver's threads need");
+  }
+  await init({ module_or_path: counted(new URL("./waveshark_bg.wasm", import.meta.url)) });
+  bar.style.width = "95%";
+  stage.textContent = "Starting";
+  await start_app();
+} catch (e) {
+  globalThis.wavesharkFailed(`The receiver did not start: ${e && e.message ? e.message : e}`);
+}
 </script>
 </body>
 </html>

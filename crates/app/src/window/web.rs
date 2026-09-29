@@ -28,6 +28,24 @@ extern "C" {
     fn resume_sound_on_gesture();
 }
 
+fn tell_page(name: &str, text: Option<&str>) {
+    let Ok(f) = js_sys::Reflect::get(&js_sys::global(), &name.into()) else { return };
+    let Ok(f) = f.dyn_into::<js_sys::Function>() else { return };
+    let _ = match text {
+        Some(t) => f.call1(&wasm_bindgen::JsValue::NULL, &t.into()),
+        None => f.call0(&wasm_bindgen::JsValue::NULL),
+    };
+}
+
+fn stage(text: &str) {
+    tell_page("wavesharkStage", Some(text));
+}
+
+fn failed(text: &str) {
+    tracing::error!("{text}");
+    tell_page("wavesharkFailed", Some(text));
+}
+
 #[wasm_bindgen]
 pub async fn start_app() {
     resume_sound_on_gesture();
@@ -45,18 +63,23 @@ pub async fn start_app() {
         .with_max_level(tracing::Level::INFO)
         .with_writer(|| Console(Vec::new()))
         .try_init();
+    stage("Opening the browser's storage");
     common::fs::start("./waveshark.js").await;
     let cores =
         eframe::web_sys::window().map_or(4, |w| w.navigator().hardware_concurrency() as usize);
+    stage(&format!("Starting {} worker threads", cores.max(2) + LOOPS));
     let pool = wasm_bindgen_rayon::init_thread_pool(cores.max(2) + LOOPS);
     if let Err(e) = wasm_bindgen_futures::JsFuture::from(pool).await {
-        tracing::error!("no worker threads: {e:?}");
+        failed(&format!("no worker threads: {e:?}"));
         return;
     }
+    stage("Loading protocol descriptions");
     crate::protocols::fetch().await;
+    stage("Starting USB and network sockets");
     usbio::start("./waveshark.js");
     httpc::ws::start("./waveshark.js").await;
     usbio::refresh().await;
+    stage("Reading saved settings and datasets");
     if let Some(dir) = common::platform::config_dir() {
         common::store::preload(&dir, |_| true).await;
     }
@@ -70,8 +93,9 @@ pub async fn start_app() {
             tracing::error!("the address asked for {search}: {e}");
             crate::Args::parse_from(["waveshark"])
         });
+    stage("Opening the receiver");
     if let Err(e) = crate::run(args) {
-        tracing::error!("the interface did not start: {e}");
+        failed(&format!("the interface did not start: {e}"));
     }
 }
 
@@ -84,13 +108,14 @@ pub fn open(_: bool, app: eframe::AppCreator<'static>) -> eframe::Result<()> {
             .and_then(|d| d.get_element_by_id(CANVAS))
             .and_then(|e| e.dyn_into::<eframe::web_sys::HtmlCanvasElement>().ok());
         let Some(canvas) = canvas else {
-            tracing::error!("no <canvas id=\"{CANVAS}\"> to draw in");
+            failed(&format!("no <canvas id=\"{CANVAS}\"> to draw in"));
             return;
         };
         let started =
             eframe::WebRunner::new().start(canvas, eframe::WebOptions::default(), app).await;
-        if let Err(e) = started {
-            tracing::error!("the interface did not start: {e:?}");
+        match started {
+            Ok(()) => tell_page("wavesharkReady", None),
+            Err(e) => failed(&format!("the interface did not start: {e:?}")),
         }
     });
     Ok(())

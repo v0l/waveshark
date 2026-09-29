@@ -38,7 +38,11 @@ env -u RUSTFLAGS -u CFLAGS_wasm32_unknown_unknown \
     cargo run -q --release -p webspin -- "$out/waveshark_bg.wasm" "$out/waveshark_bg.wasm"
 sed -i "s|import('../../..')|import('../../../waveshark.js')|" \
     "$out"/snippets/wasm-bindgen-rayon-*/src/workerHelpers.js
-cp crates/app/web/index.html crates/app/web/_headers "$out/"
+cp crates/app/web/index.html crates/app/web/_headers crates/app/web/manifest.webmanifest \
+    crates/app/web/robots.txt crates/app/web/apple-touch-icon.png crates/app/web/icon-192.png "$out/"
+cp assets/logo/waveshark-icon.svg assets/logo/waveshark-icon.png "$out/"
+cp assets/logo/waveshark-icon.ico "$out/favicon.ico"
+sed -i "s|__WASM_BYTES__|$(stat -c %s "$out/waveshark_bg.wasm")|" "$out/index.html"
 
 protocols=${PROTOCOLS_DIR:-testdata/protocols}
 if [[ ! -d $protocols ]]; then

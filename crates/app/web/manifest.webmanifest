@@ -1,0 +1,15 @@
+{
+  "name": "WaveShark",
+  "short_name": "WaveShark",
+  "description": "A software defined radio receiver that runs in the browser.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#16181b",
+  "theme_color": "#16181b",
+  "icons": [
+    { "src": "./waveshark-icon.svg", "type": "image/svg+xml", "sizes": "any" },
+    { "src": "./icon-192.png", "type": "image/png", "sizes": "192x192" },
+    { "src": "./waveshark-icon.png", "type": "image/png", "sizes": "512x512" }
+  ]
+}
