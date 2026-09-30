@@ -153,13 +153,11 @@ impl Media {
     /// Hand over transport packets. Never blocks for long: a decoder that
     /// has fallen behind loses the block rather than the radio losing
     /// samples.
-    pub fn push(&mut self, bytes: &[u8]) {
+    pub fn push(&mut self, bytes: &[u8]) -> bool {
         if bytes.is_empty() {
-            return;
+            return true;
         }
-        if let Some(feed) = &self.feed {
-            let _ = feed.try_send(bytes.to_vec());
-        }
+        self.feed.as_ref().is_none_or(|feed| feed.try_send(bytes.to_vec()).is_ok())
     }
 
     /// Watch one programme by its service identifier, or none for the first
@@ -739,6 +737,13 @@ mod tests {
         out
     }
 
+    fn feed(media: &mut Media, block: &[u8], out: &mut Vec<Out>) {
+        while !media.push(block) {
+            media.take(out);
+            std::thread::sleep(common::time::Duration::from_millis(1));
+        }
+    }
+
     fn pictures(out: &[Out], service: u16) -> usize {
         out.iter().filter(|o| matches!(o, Out::Picture(p) if p.service == Some(service))).count()
     }
@@ -754,16 +759,15 @@ mod tests {
         media.watch(Some(2));
         let mut out = Vec::new();
         for block in ts.chunks(PACKET * 64) {
-            media.push(block);
-            std::thread::sleep(common::time::Duration::from_millis(2));
+            feed(&mut media, block, &mut out);
         }
         media.finish(&mut out);
         assert_eq!(media.fault(), None);
         assert_eq!((pictures(&out, 1), sounds(&out, 1)), (0, 0));
         assert_eq!(
             (pictures(&out, 2), sounds(&out, 2)),
-            (61, 98),
-            "ffprobe 8.1 lists both programmes"
+            (76, 125),
+            "ffprobe 7.1 counts 76 pictures and 125 sounds in each programme"
         );
     }
 
@@ -794,8 +798,7 @@ mod tests {
         let mut out = Vec::new();
         let mut blocks = ts.chunks(PACKET * 64);
         for block in blocks.by_ref() {
-            media.push(block);
-            std::thread::sleep(common::time::Duration::from_millis(2));
+            feed(&mut media, block, &mut out);
             media.take(&mut out);
             if pictures(&out, 1) >= 10 {
                 break;
@@ -805,9 +808,7 @@ mod tests {
         media.watch(Some(2));
         let changed = out.len();
         for block in blocks {
-            media.push(block);
-            std::thread::sleep(common::time::Duration::from_millis(2));
-            media.take(&mut out);
+            feed(&mut media, block, &mut out);
         }
         media.finish(&mut out);
         assert_eq!(media.fault(), None);
@@ -815,12 +816,12 @@ mod tests {
         let (shown, heard) = (pictures(after, 2), sounds(after, 2));
         assert_eq!((pictures(&out[..changed], 2), pictures(after, 1)), (0, 0));
         assert!(
-            (60..=66).contains(&shown),
-            "{shown} pictures after the change, floor 60, ceiling 66"
+            (48..=56).contains(&shown),
+            "{shown} pictures after the change, floor 48, ceiling 56"
         );
         assert!(
-            (100..=110).contains(&heard),
-            "{heard} sounds after the change, floor 100, ceiling 110"
+            (82..=92).contains(&heard),
+            "{heard} sounds after the change, floor 82, ceiling 92"
         );
     }
 
@@ -830,8 +831,7 @@ mod tests {
         let mut probe = Media::new();
         let mut all = Vec::new();
         for block in ts.chunks(PACKET * 64) {
-            probe.push(block);
-            std::thread::sleep(common::time::Duration::from_millis(2));
+            feed(&mut probe, block, &mut all);
         }
         probe.finish(&mut all);
         let first = all
@@ -846,8 +846,7 @@ mod tests {
         media.hear(Some(first));
         let mut early = Vec::new();
         for block in ts.chunks(PACKET * 64) {
-            media.push(block);
-            std::thread::sleep(common::time::Duration::from_millis(2));
+            feed(&mut media, block, &mut early);
             media.take(&mut early);
         }
         let shown: Vec<f64> = early
@@ -869,8 +868,7 @@ mod tests {
         let mut media = Media::new();
         let mut out = Vec::new();
         for block in ts.chunks(PACKET * 64) {
-            media.push(block);
-            std::thread::sleep(common::time::Duration::from_millis(2));
+            feed(&mut media, block, &mut out);
         }
         media.finish(&mut out);
         let at = |o: &Out| match o {
