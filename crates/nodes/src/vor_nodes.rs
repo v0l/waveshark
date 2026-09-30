@@ -13,6 +13,7 @@ pub struct VorNode {
     channel_hz: f64,
     mixer: Mixer,
     decim: FirDecim,
+    audio_rate: f64,
     reader: Reader,
     mixed: Vec<common::C32>,
     narrow: Vec<common::C32>,
@@ -33,6 +34,7 @@ impl VorNode {
             channel_hz,
             mixer: Mixer::new(0.0, 1.0),
             decim: FirDecim::design_hz(AUDIO_HZ, 1, CHANNEL_WIDTH_HZ / 2.0, 60.0),
+            audio_rate: AUDIO_HZ,
             reader: Reader::new(AUDIO_HZ),
             mixed: Vec::new(),
             narrow: Vec::new(),
@@ -61,9 +63,12 @@ impl Simple for VorNode {
         let audio_rate = rate / factor as f64;
         self.mixer = Mixer::new(center - self.channel_hz, rate);
         self.decim = FirDecim::design_hz(rate, factor, CHANNEL_WIDTH_HZ / 2.0, 60.0);
-        self.reader = Reader::new(audio_rate);
-        self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, WINDOW_S)
-            .keyed_as(common::Modulation::Ask);
+        if audio_rate != self.audio_rate {
+            self.audio_rate = audio_rate;
+            self.reader = Reader::new(audio_rate);
+            self.meter = crate::FrameMeter::new(audio_rate, self.channel_hz as u64, WINDOW_S)
+                .keyed_as(common::Modulation::Ask);
+        }
         let mut out = i.spec.with_kind(PortKind::Packets);
         out.center = common::Hz(self.channel_hz as u64);
         out.bandwidth = CHANNEL_WIDTH_HZ;

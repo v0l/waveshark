@@ -51,11 +51,13 @@ pub(super) struct Slot {
     /// for the burst router, which is then the only evidence there is that
     /// anything transmitted. `None` where the router is reading it.
     pub(super) evidence: Option<Evidence>,
+    pub(super) end_sample: u64,
 }
 
 /// What one front end on one source made of a block.
 struct MemberResult {
     name: &'static str,
+    hands_over: bool,
     /// Each event with the front end that produced it, since they are merged
     /// with the other members' before anything is answered.
     events: Vec<(&'static str, Event)>,
@@ -113,6 +115,11 @@ impl Slot {
         // The flush is fed once, on the block that closed the source, not on
         // every block after it.
         let closed = b.is_some() && state == SourceState::Closed;
+        if let Some(b) = b {
+            let span_per_sample = self.origin.span_rate_hz / b.rate;
+            self.end_sample =
+                b.start_sample + (b.samples.len() as f64 * span_per_sample).round() as u64;
+        }
         // The samples are kept for the evidence row too: a row that cannot
         // say what it was read from is half a row, whether a classifier or
         // the detector measured it.
@@ -126,7 +133,7 @@ impl Slot {
                 let mut pk = Vec::new();
                 let t = Instant::now();
                 let mut ev = m.run(samples, at_us, &mut pk, ring);
-                if closed {
+                if closed && m.hands_to.is_none() {
                     let quiet = vec![C32::new(0.0, 0.0); (m.flush_s * rate) as usize];
                     ev.extend(m.run(&quiet, at_us, &mut pk, ring));
                 }
@@ -137,6 +144,7 @@ impl Slot {
                 // itself: a request routed by that is routed by a spelling.
                 MemberResult {
                     name: m.name,
+                    hands_over: m.hands_to.is_some(),
                     events: ev.into_iter().map(|e| (m.name, e)).collect(),
                     packets: pk,
                     read: read.then_some(m.channel_hz),
@@ -155,9 +163,21 @@ impl Slot {
             let ended = matches!(state, SourceState::Closed | SourceState::Superseded);
             packets.extend(e.row(at_us, ended, &self.ring));
         }
+        let superseded = state == SourceState::Superseded;
+        if superseded {
+            // A wider stream for the same transmitter takes over from its
+            // start. Whatever this one made of the sliver it had is half a
+            // burst, and half a burst is not evidence.
+            packets.clear();
+        }
         for r in per {
-            events.extend(r.events);
-            packets.extend(r.packets);
+            let sliver = superseded && !r.hands_over;
+            events.extend(
+                r.events.into_iter().filter(|(_, e)| !sliver || !matches!(e, Event::Decoded(_))),
+            );
+            if !sliver {
+                packets.extend(r.packets);
+            }
             spent.push((r.name, r.spent_us));
             if let Some(width) = r.read {
                 self.heard = true;
@@ -181,14 +201,16 @@ impl Slot {
         // on it.
         let done = matches!(state, SourceState::Closed | SourceState::Superseded)
             && !self.members.iter().any(|m| m.behind());
-        if state == SourceState::Superseded {
-            // A wider stream for the same transmitter takes over from its
-            // start. Whatever this one made of the sliver it had is half a
-            // burst, and half a burst is not evidence.
-            packets.clear();
-            events.retain(|(_, e)| !matches!(e, Event::Decoded(_)));
-        }
         Some(SlotResult { k, events, packets, done, heard, spent })
+    }
+
+    pub(super) fn inherit(&mut self, mut heir: Member) -> Result<()> {
+        heir.take_over(self.spec)?;
+        match self.members.iter_mut().find(|m| m.name == heir.name) {
+            Some(m) => *m = heir,
+            None => self.members.insert(0, heir),
+        }
+        Ok(())
     }
 }
 
@@ -241,6 +263,7 @@ impl AutoNode {
                 origin,
                 ring: Ring::new(spec),
                 evidence: None,
+                end_sample: b.start_sample,
             });
         }
         // A source a lock claimed is that transmitter's, and the front end
@@ -282,6 +305,7 @@ impl AutoNode {
                     Evidence::new(b.center_hz, b.signal_hz, b.snr_db, b.rate)
                         .from_sample(b.start_sample),
                 ),
+                end_sample: b.start_sample,
             });
         }
         let (members, evidence) = found(b, spec, origin, &self.reg)?;
@@ -299,6 +323,7 @@ impl AutoNode {
             origin,
             ring: Ring::new(spec),
             evidence,
+            end_sample: b.start_sample,
         })
     }
 
@@ -520,6 +545,7 @@ mod tests {
             remembered: false,
             locked: None,
             origin: Origin { span_sample: 0, span_rate_hz: rate },
+            end_sample: 0,
             ring: Ring::new(spec),
             evidence: None,
         }

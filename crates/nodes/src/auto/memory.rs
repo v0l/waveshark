@@ -5,7 +5,7 @@ use dsp::Owned;
 use pipeline::event::Event;
 use pipeline::registry::Settings;
 
-use super::AutoNode;
+use super::{AutoNode, Member};
 use crate::protocol::{self, CHANNEL_WIDTH_TOLERANCE, Stickiness};
 
 /// A channel a front end has read something on, kept for as long as the
@@ -65,6 +65,13 @@ pub(super) struct Memory {
     expiring: Vec<SourceId>,
     /// Seconds of stream so far, the clock a hold is measured on.
     now_s: f64,
+    heirs: Vec<Heir>,
+}
+
+pub(super) struct Heir {
+    pub(super) id: SourceId,
+    pub(super) member: Member,
+    pub(super) at: u64,
 }
 
 impl Memory {
@@ -88,6 +95,34 @@ impl Memory {
 
     pub(super) fn wait_for(&mut self, id: SourceId) {
         self.pending.push(id);
+    }
+
+    pub(super) fn kept_for(&self, name: &str, hz: f64) -> Option<SourceId> {
+        self.channels
+            .iter()
+            .find(|s| s.name == name && (s.center_hz - hz).abs() <= s.width_hz / 2.0)
+            .map(|s| s.id)
+    }
+
+    pub(super) fn bequeath(&mut self, heir: Heir) {
+        if self.find(heir.id).is_none() {
+            return;
+        }
+        self.heirs.retain(|h| h.id != heir.id);
+        self.heirs.push(heir);
+    }
+
+    pub(super) fn resumes_at(&self, id: SourceId) -> Option<u64> {
+        self.heirs.iter().find(|h| h.id == id).map(|h| h.at)
+    }
+
+    pub(super) fn inherit(&mut self, id: SourceId) -> Option<Member> {
+        let k = self.heirs.iter().position(|h| h.id == id)?;
+        Some(self.heirs.swap_remove(k).member)
+    }
+
+    pub(super) fn disinherit(&mut self, id: SourceId) {
+        self.heirs.retain(|h| h.id != id);
     }
 
     pub(super) fn take_expiring(&mut self) -> Vec<SourceId> {
@@ -154,6 +189,7 @@ impl Memory {
             true
         });
         self.pending.retain(|id| !ids.contains(id) && !children.contains(id));
+        self.heirs.retain(|h| !ids.contains(&h.id) && !children.contains(&h.id));
         self.expiring.extend(children.iter().copied());
         if !children.is_empty() {
             self.forget(&children);
@@ -204,6 +240,7 @@ impl Memory {
     /// rebuild leaves to be done, since the span it was cut from has gone.
     pub(super) fn cut_again(&mut self) {
         self.pending = self.channels.iter().map(|s| s.id).collect();
+        self.heirs.clear();
     }
 }
 

@@ -143,6 +143,12 @@ impl Watch {
         }
     }
 
+    pub(super) fn resume_channel(&mut self, id: SourceId, center_hz: f64, width_hz: f64, at: u64) {
+        if let Some(e) = self.extractor.as_mut() {
+            e.resume_channel(id, center_hz, width_hz, at);
+        }
+    }
+
     pub(super) fn close_channel(&mut self, id: SourceId) {
         if let Some(e) = self.extractor.as_mut() {
             e.close(id);

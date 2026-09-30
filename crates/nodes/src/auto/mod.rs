@@ -37,7 +37,7 @@ use pipeline::registry::{Category, Registry, Settings, SettingsExt, StageDesc};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 
-use crate::protocol::{self, Wake};
+use crate::protocol::{self, Arrives, Wake};
 
 mod evidence;
 mod locks;
@@ -49,7 +49,7 @@ mod watch;
 
 use locks::Locks;
 use member::{Member, Ring};
-use memory::{Memory, STICKY_ID_BASE};
+use memory::{Heir, Memory, STICKY_ID_BASE};
 use place::{Slot, SlotResult};
 use requests::AskAt;
 use watch::Watch;
@@ -180,6 +180,7 @@ impl AutoNode {
             };
             let (hz, width) = (st.center_hz, st.width_hz);
             if (hz - c0).abs() + width / 2.0 > half {
+                self.memory.disinherit(id);
                 continue;
             }
             // Not while the source that earned it is still open: two
@@ -192,10 +193,39 @@ impl AutoNode {
                 self.memory.wait_for(id);
                 continue;
             }
-            self.watch.open_channel(id, hz, width);
+            match self.memory.resumes_at(id) {
+                Some(at) => self.watch.resume_channel(id, hz, width, at),
+                None => self.watch.open_channel(id, hz, width),
+            }
         }
         for id in self.memory.take_expiring() {
             self.watch.close_channel(id);
+        }
+    }
+
+    fn name_heirs(&mut self, k: usize) {
+        let slot = &mut self.slots[k];
+        if slot.remembered {
+            return;
+        }
+        let hz = slot.center_hz.as_f64();
+        for m in &mut slot.members {
+            let continuous = m.protocol.is_some_and(|p| p.arrives() == Arrives::Continuously);
+            if continuous && m.hands_to.is_none() {
+                m.hands_to = self.memory.kept_for(m.name, hz);
+            }
+        }
+    }
+
+    fn bequeath(&mut self, k: usize) {
+        let slot = &mut self.slots[k];
+        let at = slot.end_sample;
+        let (heirs, rest): (Vec<Member>, Vec<Member>) =
+            std::mem::take(&mut slot.members).into_iter().partition(|m| m.hands_to.is_some());
+        slot.members = rest;
+        for member in heirs {
+            let Some(id) = member.hands_to else { continue };
+            self.memory.bequeath(Heir { id, member, at });
         }
     }
 
@@ -648,7 +678,10 @@ impl Node for AutoNode {
         for b in &blocks {
             if !self.slots.iter().any(|s| s.id == b.id) {
                 let claimed = self.locks.claim(b);
-                let slot = self.open(b, claimed)?;
+                let mut slot = self.open(b, claimed)?;
+                if let Some(heir) = self.memory.inherit(b.id) {
+                    slot.inherit(heir)?;
+                }
                 self.slots.push(slot);
                 self.built += 1;
             }
@@ -772,6 +805,7 @@ impl Node for AutoNode {
                 }
             }
             self.latch(k, &heard);
+            self.name_heirs(k);
             // A remembered channel that is still decoding is kept; one that
             // has gone quiet for its hold is given back to the detector.
             if !pk.is_empty() {
@@ -789,6 +823,7 @@ impl Node for AutoNode {
             // it has.
             if done && !self.slots[k].members.iter().any(|m| m.behind()) {
                 closed.push(self.slots[k].id);
+                self.bequeath(k);
                 // What became of a claimed source: a lock is right about
                 // this transmitter exactly as often as the front end it
                 // handed the burst to read something.

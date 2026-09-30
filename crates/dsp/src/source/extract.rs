@@ -247,7 +247,7 @@ pub struct SourceExtractor {
 /// between blocks lands in the same order, against the same ring, as the
 /// detector's own events do.
 enum Command {
-    Open { id: SourceId, offset_hz: f64, width_hz: f64, from: u64 },
+    Open { id: SourceId, offset_hz: f64, width_hz: f64, start: u64 },
     Close(SourceId),
 }
 
@@ -317,7 +317,16 @@ impl SourceExtractor {
             id,
             offset_hz: center_hz - self.center_hz,
             width_hz,
-            from,
+            start: from.saturating_sub(self.lead),
+        });
+    }
+
+    pub fn resume_channel(&mut self, id: SourceId, center_hz: f64, width_hz: f64, at: u64) {
+        self.commands.push(Command::Open {
+            id,
+            offset_hz: center_hz - self.center_hz,
+            width_hz,
+            start: at,
         });
     }
 
@@ -341,12 +350,13 @@ impl SourceExtractor {
     /// Design an extraction for a source: its centre, and a rate that fits
     /// its width with room for the edges the detector did not see.
     fn open(&mut self, s: &Source) {
-        self.cut(s.id, s.center_hz, s.bandwidth_hz(), s.start_sample, s.peak_snr_db);
+        let start = s.start_sample.saturating_sub(self.lead);
+        self.cut(s.id, s.center_hz, s.bandwidth_hz(), start, s.peak_snr_db);
     }
 
     /// Design an extraction at `offset_hz` from the stream's centre, `width_hz`
-    /// wide, from wideband sample `from`.
-    fn cut(&mut self, id: SourceId, offset_hz: f64, width_hz: f64, from: u64, snr_db: f32) {
+    /// wide, from wideband sample `start`.
+    fn cut(&mut self, id: SourceId, offset_hz: f64, width_hz: f64, start: u64, snr_db: f32) {
         let bw = (width_hz * self.cfg.width_margin).max(self.cfg.bin_hz * 2.0);
         // Oversampled where something will demodulate it, and at its own
         // width where nothing can: see [`SourceConfig::read_width_hz`].
@@ -355,7 +365,7 @@ impl SourceExtractor {
         // Whether the rate came from the width or from the floor, which
         // decides what the extraction filter should keep.
         let floored = bw * over < self.cfg.min_rate_hz;
-        let start = from.saturating_sub(self.lead).max(self.ring.first());
+        let start = start.max(self.ring.first());
         // How far back the stream starts is bounded by the work of reading
         // it, in samples of the stream rather than in time. A candidate can
         // sit unopened for as long as it is present, too wide or with no
@@ -487,8 +497,8 @@ impl SourceExtractor {
         }
         for cmd in std::mem::take(&mut self.commands) {
             match cmd {
-                Command::Open { id, offset_hz, width_hz, from } => {
-                    self.cut(id, offset_hz, width_hz, from, f32::NAN)
+                Command::Open { id, offset_hz, width_hz, start } => {
+                    self.cut(id, offset_hz, width_hz, start, f32::NAN)
                 }
                 Command::Close(id) => {
                     if let Some(c) = self.chans.iter_mut().find(|c| c.id == id) {

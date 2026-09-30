@@ -3,7 +3,7 @@
 //! with.
 
 use common::packet::Packet;
-use common::{C32, Result};
+use common::{C32, Result, SourceId};
 use pipeline::event::Event;
 use pipeline::port::{PortKind, StreamSpec};
 use pipeline::registry::{Registry, Settings};
@@ -213,6 +213,7 @@ pub(super) struct Member {
     /// dropped samples; spread over a few blocks it costs a few times a
     /// block each and nothing is lost.
     pub(super) backlog: VecDeque<C32>,
+    pub(super) hands_to: Option<SourceId>,
 }
 
 /// How many blocks' worth of backlog a member reads per block, over the
@@ -326,7 +327,17 @@ impl Member {
             since_detected_s: f64::INFINITY,
             sleeping: true,
             keeps_samples: !pulses_empty || !packets_empty || router.is_some(),
+            hands_to: None,
         })
+    }
+
+    pub(super) fn take_over(&mut self, spec: StreamSpec) -> Result<()> {
+        self.graph.set_input_spec(spec)?;
+        self.read = 0;
+        self.since = 0;
+        self.backlog.clear();
+        self.hands_to = None;
+        Ok(())
     }
 
     /// Whether this front end wants this block, and account for it either

@@ -739,10 +739,8 @@ Biggin cross in south west London, and the other sign convention puts the
 receiver west of one beacon and east of the other at once.
 
 Under the auto block, Biggin's channel passes from the source that found it
-to the channel kept for it after its identifier has begun, and an
-identifier heard from the middle is not read, so this reads Biggin's radial
-and not its name. `crates/identify/tests/captures.rs` reads both names off
-channels on the two beacons.
+to the channel kept for it while its identifier is being keyed, and the
+decoder goes with it, so the name is read whole.
 """
 
 scanners = """
@@ -751,17 +749,23 @@ range = 108 - 118 MHz
 front = auto
 """
 
-rows = 4
+rows = 6
 
 [[capture.read]]
 protocol = "vor"
-rows = 4
+rows = 6
 
 [[capture.read]]
 protocol = "vor"
 on_hz = 115_300_856
 rows = 3
 subjects = ["OCK"]
+
+[[capture.read]]
+protocol = "vor"
+on_hz = 115_101_073
+rows = 3
+subjects = ["BIG"]
 
 [[capture]]
 name = "clocks_msf_dcf77_tdf_0.11M_192k.cs16"
