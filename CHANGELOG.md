@@ -9,6 +9,8 @@ the code is in the commit log.
 
 ## [Unreleased]
 
+## [0.5.0-rc1] - 2026-10-12
+
 ### Added
 
 - VOR radials and Morse identifiers.
@@ -16,122 +18,98 @@ the code is in the commit log.
 - System Fusion calls, callsigns and speech.
 - NAVTEX bulletins on 518, 490 and 4209.5 kHz, by station, subject and number.
 - SSTV PD 50, 90, 120, 160, 180, 240 and 290, received and sent.
-- AGC decay and maximum gain, set per channel on the strip.
-- Zigbee network headers: each hop's EUI-64 and vendor, network addresses, beacons and the key in use.
-- LimeSDR on Windows, with LimeSuite installed.
-- Airspy R2, Mini, HF+ and HF+ Discovery as local radios, with no libairspy needed.
-- IQStream directory location accuracy, from 150 km to 150 m, and wave1090 `--iqstream-accuracy`.
 - DVB-S2 off a satellite LNB: QPSK to 32APSK, symbol rate measured, pictures and sound.
-- Chain view switch turning off one stage, or all of receive with transmit left on.
-- Satellite pointing window for any satellite: azimuth, elevation, pass, Doppler, LNB skew and a level to peak on.
-- Roger beep styles: Quindar, Baofeng UV-5R, Cobra AM845, Motorola TLKR, Morse K and R.
-- Transmit key red until the opening Quindar tone is out.
-- Channel passband edges dragged on the spectrum, and SSB and CW low and high edges on the strip.
-- Chain view editing: stages dragged from a searchable list onto a port or wire, CLEAR, zoom, FIT, and why a stage was left out.
-- Aero 10500 bit/s channels, the Aero-H and H+ satellite ACARS downlink.
 - DAB and DAB+ sound, the station picked from the ensemble on the channel strip.
-- Trilateration list and map LOCATED layer of surveyed transmitters placed within a chosen accuracy.
-- Walksnail Avatar 20 MHz video links: channel, frame rate, frame counter, modulation, MER, antenna balance and the goggles' bursts.
-- Noise blanker on AM, SSB, CW and NFM channels, with its threshold and share cut on the strip.
-- Noise reduction on AM, SSB, CW and NFM channels, switched and set in depth on the strip.
-- Auto notch on AM, USB and LSB channels, a strip switch that removes heterodynes and steady carriers.
-- ADALM-PLUTO receive and full duplex transmit, on USB or over the network, up to 4 MS/s.
-- SigMF recordings replayed and trimmed, with a `.sigmf-meta` written beside raw span captures and transmit files.
 - LTE cells, found on every carrier of a span over an LTE downlink or read on a decode channel: PCI, network, tracking area, band, bandwidth, RSRP, RSRQ and neighbouring carriers.
-- KiwiSDR directory from kiwisdr.com's public list, checked and opened with TUNE.
-- TUNERS map layer of public IQStream servers, SpyServers and KiwiSDRs, each opened with CONNECT.
-- Mouse wheel on faders and squelch thresholds.
-- Cell tower map marking the cells this receiver decoded in cyan.
-- SpyServer and rtl_tcp clients on the IQ server's port of waveshark and wave1090, each tuning anywhere inside the span.
-- Airspy SpyServer directory listing of the IQ server, with its owner email.
-- IQStream over WebSocket: `ws://` and `wss://` remote tuners, and served on the IQ server's port.
-- WebTransport for IQStream: `https://` remote tuners pinned by a certificate hash the directory lists.
-- WebRTC for IQStream: `webrtc://` remote tuners, offered and answered over nostr, no certificate needed.
+- LTE cells on the cell map, looked up on and sent to beaconDB and WiGLE alongside GSM.
+- Aero 10500 bit/s channels, the Aero-H and H+ satellite ACARS downlink.
+- Zigbee network headers: each hop's EUI-64 and vendor, network addresses, beacons and the key in use.
+- Walksnail Avatar 20 MHz video links: channel, frame rate, frame counter, modulation, MER, antenna balance and the goggles' bursts.
+- ADALM-PLUTO receive and full duplex transmit, on USB or over the network, up to 4 MS/s.
+- Airspy R2, Mini, HF+ and HF+ Discovery as local radios, with no libairspy needed.
+- LimeSDR on Windows, with LimeSuite installed.
 - Browser version at app.waveshark.io: RTL-SDR, HackRF and Airspy over WebUSB, IQStream servers over WebSocket and their public list, transmit,
   speaker, microphone, replayed captures, and settings and datasets kept between visits. Command line flags go in the address, `?stream=` opening a tuner.
+- IQStream over WebSocket, WebTransport and WebRTC: `ws://`, `wss://`, `https://` and `webrtc://` remote tuners.
+- SpyServer, rtl_tcp and IQStream WebSocket clients on the IQ server's port of waveshark and wave1090, each tuning anywhere inside the span.
+- Airspy SpyServer directory listing of the IQ server, with its owner email.
+- IQStream directory location accuracy, from 150 km to 150 m, and wave1090 `--iqstream-accuracy`.
+- KiwiSDR directory from kiwisdr.com's public list, checked and opened with TUNE.
+- TUNERS map layer of public IQStream servers, SpyServers and KiwiSDRs, each opened with CONNECT.
+- SigMF recordings replayed and trimmed, with a `.sigmf-meta` written beside raw span captures and transmit files.
+- Satellite pointing window for any satellite: azimuth, elevation, pass, Doppler, LNB skew and a level to peak on.
+- Trilateration list and map LOCATED layer of surveyed transmitters placed within a chosen accuracy.
+- Cell tower map marking the cells this receiver decoded in cyan.
+- Noise blanker and noise reduction on AM, SSB, CW and NFM channels, and auto notch on AM and SSB.
+- AGC decay and maximum gain, set per channel on the strip.
+- Channel passband edges drawn and dragged on the spectrum, and SSB and CW low and high edges on the strip.
+- Chain view editing: stages dragged from a searchable list onto a port or wire, switched off singly or all of receive at once, CLEAR, zoom, FIT, and why a stage was left out.
+- Roger beep styles: Quindar, Baofeng UV-5R, Cobra AM845, Motorola TLKR, Morse K and R.
+- Transmit key red until the opening Quindar tone is out.
+- Mouse wheel on faders and squelch thresholds.
 
 ### Changed
 
 - RTTY speed, shift and tuning found on their own, and RTTY read on the HF fixed service bands.
-- Channel strip cards fold their settings away, and the channel list scrolls.
+- FT8 and FT4 read more stations on a crowded band.
+- TETRA calls several sites send at once, heard and listed once with every site.
+- TETRA neighbour cells listed with their carrier frequencies.
+- DJI DroneID bursts too weak to read clean now error corrected rather than dropped.
+- GSM downlinks read in real time at 20 MS/s, with no burst classifier on cellular allocations.
+- XN297 remotes read at a quarter of the processor time on a quiet band.
+- Spectrum at half the processor time on a wide span.
 - DVB-T and DVB-S2 pictures decoded on the graphics card where FFmpeg can, and colour converted there.
 - Video pane programme table across every multiplex, with scrambling, codecs and now and next, only the watched one decoded.
 - Video pane overlay with the service, now and next, frame rate and decoder, shown on hover, tap or a change of channel.
-- Burst recorder decodes as SigMF annotations beside each burst, in place of `index.jsonl`.
-- Scanner front ends and channels run out to the span edge, with no rolloff held back.
-- XN297 remotes read at a quarter of the processor time on a quiet band.
-- FT8 and FT4 read more stations on a crowded band.
-- TETRA calls several sites send at once, heard and listed once with every site.
-- IQStream serving only from a radio attached here, never a capture file or a remote tuner.
-- IQStream server idle with nobody subscribed, spare radios left stopped until someone is.
 - Video pane shows the first picture when nothing is picked, no longer a best picture choice.
-- Spectrum at half the processor time on a wide span.
-- GSM downlinks read in real time at 20 MS/s, with no burst classifier on cellular allocations.
+- Channel strip cards fold their settings away, and the channel list scrolls.
 - SSB channel width as the sideband filter's, 2.4 kHz by default rather than 6, in memories too.
-- Survey tab holding devices, trilateration, data links, channels, control links and keys.
-- Transcript as a tab of Calls.
-- Survey sightings written only from places not yet heard from, none while parked.
-- DJI DroneID bursts too weak to read clean now error corrected rather than dropped.
-- SpyServer directory frequency filter keeping a server without control only where its span reaches.
+- Scanner front ends and channels run out to the span edge, with no rolloff held back.
 - Centre spur removal only on radios that make one, never on a KiwiSDR or an Airspy.
+- Burst recorder decodes as SigMF annotations beside each burst, in place of `index.jsonl`.
+- Survey tab holding devices, trilateration, data links, channels, control links and keys, and Transcript a tab of Calls.
+- Survey sightings written only from places not yet heard from, none while parked.
 - Cell tower map layer drawing only cells placed by 20 or more reports within 1 km.
-- beaconDB estimates on the cell map for decoded LTE cells as well as GSM.
-- TETRA neighbour cells listed with their carrier frequencies.
-- LTE cells sent to beaconDB and WiGLE alongside GSM cells and Bluetooth devices.
+- IQStream server serving only a radio attached here, idle with nobody subscribed and spare radios left stopped.
 - IQ server default port 5555, SpyServer's, in place of 1234.
+- SpyServer directory frequency filter keeping a server without control only where its span reaches.
 - Speaker and microphone lists without ALSA's default alias beside System default.
 
 ### Fixed
 
 - HackRF cutting the last quarter second off every over.
-- AIS frames heard together listed at -200 dBFS and without their samples.
-- Mode S replies early in a block listed without their samples.
+- Roger beep cut short at the end of an over, and the source heard again after it.
+- Spectrum on a half duplex radio dropping the last fifth of a second of its own over.
+- Spectrum trace missing after switching to a radio that cannot reach the dial's frequency.
+- AIS and Mode S frames listed without their level or samples.
 - Auto scanner blocks crashing the receiver on a span narrower than 100 kHz.
-- Recording names with a centre below 1 MHz, like `clock_0.11M_192k.cs16`, read as a rate.
-- DAB ensembles and stations and DRM services missing from the packet list.
-- M17 packets read out of Mode S replies and other frames another front end keyed.
-- ICAO addresses and other hex identifiers shown without their leading zero.
 - Auto channels on spans under about 50 kS/s losing part of every block after the first decode.
+- Recording names with a centre below 1 MHz, like `clock_0.11M_192k.cs16`, read as a rate.
+- Repeated packets dropped as copies when a recording replays faster than the air.
+- DAB ensembles and stations and DRM services missing from the packet list, and DRM labels sent in 16-QAM.
+- M17 and NXDN rows read out of other signals.
+- ICAO addresses and other hex identifiers shown without their leading zero.
 - APRS frames shown as unchecked though every one passed its FCS.
 - RTTY stations with a stop of one and a half bits, or recorded at a low level, breaking up.
-- Repeated packets dropped as copies when a recording replays faster than the air.
-- NXDN rows read out of other signals from one frame with nothing after it.
 - SSTV pictures losing their last line when the transmission ends.
-- Spectrum on a half duplex radio dropping the last fifth of a second of its own over.
-- Roger beep cut short at the end of an over, and the source heard again after it.
-- Survey device locations landing on the receiver from GPS wander while parked.
-- Video pane best picture flickering between two channels received at once.
-- Sound lost for good after a patch edit the graph refused.
-- Chain view timings frozen while the spectrum is switched off.
-- DVB-T pictures stopping for good after one damaged packet.
-- Radio stuck "already in use" after the chain rebuilt with a DVB-T multiplex showing.
-- DVB-T sound cutting out every second and out of step with the picture.
-- DVB-T pictures freezing for good when the sound fell behind.
-- DVB-T interlaced pictures combed on movement, now shown a field at a time.
-- Channel width stopping at 20 MHz on a wider span.
-- DVB-T pictures and sound lost after changing service.
-- LimeSDR left busy until a restart after a span change or USB fault.
-- 802.15.4 frames longer than about 2 ms missed on a channel quiet before them.
-- SSB and CW channel markers shading both sides of the dial instead of the passband.
-- Chain view text settings dropping what was typed, and Backspace in one deleting the stage.
-- 802.15.4 beacons read out of frames too short for their own address lists.
-- Inmarsat STD-C decoding nothing off the air.
-- Spectrum trace missing after switching to a radio that cannot reach the dial's frequency.
-- Aero satellite ACARS messages never read off the air.
-- DRM service labels missing from transmissions that send them in 16-QAM.
-- Bluetooth LE and 802.15.4 frames a few megahertz apart dropped as one burst.
+- Inmarsat STD-C and Aero satellite ACARS decoding nothing off the air.
 - TETRA speech coming out silent, or muted as enciphered, on clear calls.
 - Digital voice calls breaking up on the speaker.
-- IQStream directory tuners listed as reaching only the edges of the span being served.
+- 802.15.4 frames over about 2 ms missed, or dropped with a Bluetooth LE frame a few megahertz away.
+- DVB-T pictures and sound stopping, freezing or drifting apart after a damaged packet, late sound or a change of service.
+- DVB-T interlaced pictures combed on movement, now shown a field at a time.
 - DVB-T multiplexes not locking on a tuner more than a few kHz out, or reading badly through its DC spike.
-- IQStream directory listing not updated after a retune, or with the receiver stopped.
-- IQStream directory listing left up on a dead port when the router's port mapping lapsed.
+- Channel width stopping at 20 MHz on a wider span.
+- SSB and CW channel markers shading both sides of the dial instead of the passband.
+- Radios left busy after a chain rebuild, span change or USB fault.
+- Sound lost for good after a patch edit the graph refused.
+- Chain view timings frozen while the spectrum is switched off.
+- Chain view text settings dropping what was typed, and Backspace in one deleting the stage.
+- IQStream directory listings reaching only the span's edges, stale after a retune, or left up on a dead port.
 - sub-ghz-modem DETECT hanging, and taking over or reconfiguring serial ports other programs had open.
-- Display leakage locking on 2.4 GHz traffic and painting it as a screen.
-- Display leakage stalling the receiver with a mode named, and each second while searching.
-- Cell towers never drawn on the map after a restart, and too faint to find when they were.
+- Display leakage locking on 2.4 GHz traffic and stalling the receiver.
+- Cell towers and beaconDB estimates missing from the map after a restart, or too faint to find.
 - GSM cells never looked up on or sent to beaconDB and WiGLE, their names missing the location area.
-- beaconDB cell estimates on the map too faint to find.
 - Map layers left blank until the pointer moved, after their data had loaded.
 
 ## [0.4.0] - 2026-09-24
@@ -829,7 +807,8 @@ First tagged release: the auto front end over the ISM bands, Mode S, AIS,
 APRS, POCSAG, M17, DMR, TETRA, LoRa, wM-Bus and the rtl_433 sensor
 tables, with the packet log, the map, the chain view and transmit.
 
-[Unreleased]: https://github.com/v0l/waveshark/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/v0l/waveshark/compare/v0.5.0-rc1...HEAD
+[0.5.0-rc1]: https://github.com/v0l/waveshark/compare/v0.4.0...v0.5.0-rc1
 [0.4.0]: https://github.com/v0l/waveshark/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/v0l/waveshark/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/v0l/waveshark/compare/v0.1.0...v0.2.0
