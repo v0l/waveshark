@@ -4,6 +4,9 @@ Wireshark for the radio spectrum. An OSINT tool for RF: leave a cheap SDR on a
 band and it tells you what is transmitting around you, instead of what is on
 the one frequency somebody already told you about.
 
+Part of the [bench suite](https://github.com/v0l/bench-suite), a launcher that installs, updates
+and starts it alongside the other bench tools.
+
 Which sensors are in this building, which vehicles keep passing, which remotes
 and door contacts are in use on this street, who is paging whom, what is
 overhead. That comes from covering a band continuously and keeping everything,
