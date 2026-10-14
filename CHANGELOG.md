@@ -9,7 +9,7 @@ the code is in the commit log.
 
 ## [Unreleased]
 
-## [0.5.0-rc1] - 2026-10-12
+## [0.5.0] - 2026-10-14
 
 ### Added
 
@@ -111,6 +111,12 @@ the code is in the commit log.
 - Cell towers and beaconDB estimates missing from the map after a restart, or too faint to find.
 - GSM cells never looked up on or sent to beaconDB and WiGLE, their names missing the location area.
 - Map layers left blank until the pointer moved, after their data had loaded.
+
+## [0.5.0-rc1] - 2026-10-12
+
+### Added
+
+- A test build. What is in it is listed under [0.5.0].
 
 ## [0.4.0] - 2026-09-24
 
@@ -807,7 +813,8 @@ First tagged release: the auto front end over the ISM bands, Mode S, AIS,
 APRS, POCSAG, M17, DMR, TETRA, LoRa, wM-Bus and the rtl_433 sensor
 tables, with the packet log, the map, the chain view and transmit.
 
-[Unreleased]: https://github.com/v0l/waveshark/compare/v0.5.0-rc1...HEAD
+[Unreleased]: https://github.com/v0l/waveshark/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/v0l/waveshark/compare/v0.4.0...v0.5.0
 [0.5.0-rc1]: https://github.com/v0l/waveshark/compare/v0.4.0...v0.5.0-rc1
 [0.4.0]: https://github.com/v0l/waveshark/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/v0l/waveshark/compare/v0.2.0...v0.3.0
