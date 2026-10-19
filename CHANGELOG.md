@@ -9,6 +9,8 @@ the code is in the commit log.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-19
+
 ### Added
 
 - Agent view as a coding agent: markdown replies, files in a workspace folder, skills from `~/.agents/skills`, and commands run in a sandbox on Linux and macOS. It asks before using a folder outside the workspace.
@@ -817,7 +819,8 @@ First tagged release: the auto front end over the ISM bands, Mode S, AIS,
 APRS, POCSAG, M17, DMR, TETRA, LoRa, wM-Bus and the rtl_433 sensor
 tables, with the packet log, the map, the chain view and transmit.
 
-[Unreleased]: https://github.com/v0l/waveshark/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/v0l/waveshark/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/v0l/waveshark/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/v0l/waveshark/compare/v0.4.0...v0.5.0
 [0.5.0-rc1]: https://github.com/v0l/waveshark/compare/v0.4.0...v0.5.0-rc1
 [0.4.0]: https://github.com/v0l/waveshark/compare/v0.3.0...v0.4.0
