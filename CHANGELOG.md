@@ -9,6 +9,10 @@ the code is in the commit log.
 
 ## [Unreleased]
 
+### Fixed
+
+- Agent shell on macOS: names resolve and a compiler runs.
+
 ## [0.5.1] - 2026-10-19
 
 ### Added
