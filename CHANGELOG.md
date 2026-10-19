@@ -9,6 +9,8 @@ the code is in the commit log.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-19
+
 ### Fixed
 
 - Agent shell on macOS: names resolve and a compiler runs.
@@ -823,7 +825,8 @@ First tagged release: the auto front end over the ISM bands, Mode S, AIS,
 APRS, POCSAG, M17, DMR, TETRA, LoRa, wM-Bus and the rtl_433 sensor
 tables, with the packet log, the map, the chain view and transmit.
 
-[Unreleased]: https://github.com/v0l/waveshark/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/v0l/waveshark/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/v0l/waveshark/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/v0l/waveshark/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/v0l/waveshark/compare/v0.4.0...v0.5.0
 [0.5.0-rc1]: https://github.com/v0l/waveshark/compare/v0.4.0...v0.5.0-rc1
