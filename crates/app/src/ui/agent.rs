@@ -184,15 +184,14 @@ impl App {
         // Before this frame's actions, so an edit is judged against the
         // rebuild that followed it rather than one it caused.
         self.agent_settle_edits();
+        crate::agent::assistant::serve(self, ctx);
         let jobs: Vec<Ask> = self.agent.try_iter().collect();
         for job in jobs {
             let Ask { action, reply } = job;
             // A screenshot is answered by a later frame, since the image
             // arrives as an event after the one that asked for it.
             if matches!(action, Action::Screenshot) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
-                crate::window::repaint(&ctx);
-                self.agent_shots.push(reply);
+                self.agent_screenshot(ctx, reply);
                 continue;
             }
             self.agent_take(action, reply, ctx);
@@ -200,8 +199,19 @@ impl App {
         self.agent_deliver_shot(ctx);
     }
 
+    /// Ask for a picture of the window, answered by the frame it arrives on.
+    pub(crate) fn agent_screenshot(
+        &mut self,
+        ctx: &egui::Context,
+        reply: tokio::sync::oneshot::Sender<crate::agent::Reply>,
+    ) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+        crate::window::repaint(ctx);
+        self.agent_shots.push(reply);
+    }
+
     /// One request: applied now, or drawn and left for the rebuild.
-    pub(super) fn agent_take(
+    pub(crate) fn agent_take(
         &mut self,
         action: Action,
         reply: tokio::sync::oneshot::Sender<crate::agent::Reply>,
@@ -907,7 +917,7 @@ impl App {
         // Taken off the strip rather than from what the last frame found, so
         // a channel handed over in this same call is the one it speaks on.
         self.air.on = self.agent_tx_channel().map(|(id, _)| id);
-        let mut config = self.chat.config.clone();
+        let mut config = self.assistant.config.clone();
         if let Some(v) = a.voice.filter(|v| !v.trim().is_empty()) {
             match config.speech.is_remote() {
                 true => config.voice = v,
@@ -1891,7 +1901,7 @@ mod tests {
     #[test]
     fn a_line_is_said_over_the_air() {
         let mut a = app();
-        a.chat.config = crate::agent::config::Config {
+        a.assistant.config = crate::agent::config::Config {
             model: "m".into(),
             speech: crate::agent::config::Speech::Server,
             voice_url: "http://127.0.0.1:1/v1".into(),

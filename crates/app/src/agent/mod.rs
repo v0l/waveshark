@@ -17,10 +17,23 @@
 //! nothing here knows about egui: what wakes the interface is a closure it
 //! hangs on the [`Bell`], so an agent with no window open still gets served.
 
+#[cfg(feature = "agent")]
+pub mod assistant;
+#[cfg(not(feature = "agent"))]
+#[path = "assistant_offline.rs"]
+pub mod assistant;
+#[cfg(feature = "agent")]
+pub mod backend;
 pub mod catalog;
 pub mod channel;
 pub mod chat;
 pub mod config;
+#[cfg(feature = "agent")]
+#[path = "sandbox.rs"]
+pub mod sandbox;
+#[cfg(not(feature = "agent"))]
+#[path = "sandbox_offline.rs"]
+pub mod sandbox;
 pub mod served;
 #[cfg(feature = "mcp")]
 mod tools;

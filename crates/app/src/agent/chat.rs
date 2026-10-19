@@ -1,235 +1,19 @@
-//! The conversation in the Agent view: a model with the run of the receiver.
+//! The loop that puts a question to a model with the receiver's tools.
 //!
 //! The model is anything speaking the OpenAI chat completions API with tool
 //! calls, named by [`config::Config`]. What it can do is [`catalog::all`],
 //! the same list the MCP server publishes, and every call it makes goes onto
 //! the same desk, so a model that tunes moves the dial on screen.
 //!
-//! Nothing here draws. The work runs on the interface's tokio runtime and
-//! reports back over a channel the pane drains, which is what lets the same
-//! loop serve a window, a voice channel, or a front end on another machine.
+//! Nothing here draws. The voice channel waits on it; the conversation in the
+//! Agent view is `egui_bench::agent`.
 
 use super::{Desk, catalog, config::Config};
 use serde_json::{Value, json};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// How long one completion may take. Long, because a local model on a CPU
 /// answers in minutes and the request is what holds the conversation open.
 const PATIENCE: common::time::Duration = common::time::Duration::from_secs(600);
-
-/// What the pane draws, in the order it happened.
-pub enum Turn {
-    /// What the operator asked.
-    You(String),
-    /// What the model said.
-    Said(String),
-    /// A tool the model called, and what the receiver answered.
-    Did {
-        name: String,
-        args: String,
-        /// `None` while it is running.
-        answer: Option<Result<String, String>>,
-    },
-    /// Why the exchange stopped.
-    Fault(String),
-}
-
-/// What the worker tells the pane.
-enum Update {
-    /// More of what the model is saying.
-    Delta(String),
-    /// The model has stopped saying that.
-    Said,
-    Calling {
-        name: String,
-        args: String,
-    },
-    Answered(Result<String, String>),
-    Fault(String),
-    Done,
-}
-
-pub struct Chat {
-    pub config: Config,
-    pub turns: Vec<Turn>,
-    /// What is being typed.
-    pub draft: String,
-    /// The conversation as the model sees it, which is not what is drawn: it
-    /// carries the tool call ids the protocol needs and the JSON the receiver
-    /// answered with.
-    history: Vec<Value>,
-    updates: Option<crossbeam_channel::Receiver<Update>>,
-    stop: Arc<AtomicBool>,
-    /// Whether the model is saying something right now, so a delta extends
-    /// the last turn instead of starting another.
-    speaking: bool,
-}
-
-impl Default for Chat {
-    fn default() -> Self {
-        let config = Config::load();
-        // The transcriber reads where this says, and it is a stage in a graph
-        // that knows nothing about the agent: say so once, here, and again
-        // whenever the settings change.
-        super::config::publish_reading(&config);
-        Self {
-            config,
-            turns: Vec::new(),
-            draft: String::new(),
-            history: Vec::new(),
-            updates: None,
-            stop: Arc::new(AtomicBool::new(false)),
-            speaking: false,
-        }
-    }
-}
-
-impl Chat {
-    /// Whether the model is working on something.
-    pub fn busy(&self) -> bool {
-        self.updates.is_some()
-    }
-
-    /// How much has been said, which is what the tab's dot counts.
-    pub fn turns(&self) -> usize {
-        self.turns.len()
-    }
-
-    pub fn clear(&mut self) {
-        self.turns.clear();
-        self.history.clear();
-    }
-
-    /// Stop the exchange after the call in flight.
-    pub fn interrupt(&self) {
-        self.stop.store(true, Ordering::Relaxed);
-    }
-
-    /// Ask, and start the loop that answers.
-    pub fn ask(&mut self, text: &str, desk: Desk, rt: &crate::task::Spawner) {
-        let text = text.trim();
-        if text.is_empty() || self.busy() {
-            return;
-        }
-        if let Some(fault) = self.config.fault() {
-            self.turns.push(Turn::You(text.to_string()));
-            self.turns.push(Turn::Fault(format!("{fault}: set one in the Agent settings")));
-            return;
-        }
-        self.turns.push(Turn::You(text.to_string()));
-        self.history.push(json!({ "role": "user", "content": text }));
-        let (tx, rx) = crossbeam_channel::unbounded();
-        self.updates = Some(rx);
-        self.speaking = false;
-        self.stop = Arc::new(AtomicBool::new(false));
-        let job = Worker {
-            config: self.config.clone(),
-            history: self.history.clone(),
-            desk,
-            out: tx,
-            stop: self.stop.clone(),
-            bell: None,
-        };
-        rt.spawn(async move { job.run().await });
-    }
-
-    /// Take what the worker has said since the last frame.
-    ///
-    /// The history the worker builds is rebuilt here from the same updates
-    /// rather than sent back whole, so what is drawn and what the model is
-    /// told cannot disagree.
-    pub fn poll(&mut self) {
-        let Some(rx) = self.updates.as_ref() else { return };
-        let mut done = false;
-        for u in rx.try_iter().collect::<Vec<_>>() {
-            match u {
-                Update::Delta(text) => {
-                    if self.speaking
-                        && let Some(Turn::Said(s)) = self.turns.last_mut()
-                    {
-                        s.push_str(&text);
-                        continue;
-                    }
-                    // Models open with a blank line or two more often than
-                    // not. Drawn, that is an empty gap under AGENT that reads
-                    // as a reply which has not arrived yet, and the turn is
-                    // not started until there are words in it.
-                    let text = text.trim_start();
-                    if text.is_empty() {
-                        continue;
-                    }
-                    self.turns.push(Turn::Said(text.to_string()));
-                    self.speaking = true;
-                }
-                Update::Said => {
-                    self.speaking = false;
-                    // And the same at the end, where a model signs off with
-                    // a newline: a turn that ends in blank lines pushes
-                    // whatever comes next down the pane for no reason.
-                    if let Some(Turn::Said(s)) = self.turns.last_mut() {
-                        s.truncate(s.trim_end().len());
-                    }
-                }
-                Update::Calling { name, args } => {
-                    self.speaking = false;
-                    self.turns.push(Turn::Did { name, args, answer: None });
-                }
-                Update::Answered(r) => {
-                    if let Some(Turn::Did { answer, .. }) = self
-                        .turns
-                        .iter_mut()
-                        .rev()
-                        .find(|t| matches!(t, Turn::Did { answer: None, .. }))
-                    {
-                        *answer = Some(r);
-                    }
-                }
-                Update::Fault(e) => {
-                    self.speaking = false;
-                    self.turns.push(Turn::Fault(e));
-                }
-                Update::Done => done = true,
-            }
-        }
-        if done {
-            self.updates = None;
-            self.speaking = false;
-            self.remember();
-        }
-    }
-
-    /// Fold what was drawn back into what the model is told next time.
-    ///
-    /// Only the sentences and the calls, not the JSON the receiver answered
-    /// with: a packet list from ten minutes ago is stale and expensive, and
-    /// the model can ask again. What it must keep is what it did, or it
-    /// repeats itself.
-    fn remember(&mut self) {
-        for t in &self.turns {
-            match t {
-                Turn::Said(s) => {
-                    let m = json!({ "role": "assistant", "content": s });
-                    if self.history.last() != Some(&m) {
-                        self.history.push(m);
-                    }
-                }
-                Turn::Did { name, args, answer } => {
-                    let said = match answer {
-                        Some(Ok(_)) => format!("called {name}({args}) and read the answer"),
-                        Some(Err(e)) => format!("called {name}({args}): {e}"),
-                        None => continue,
-                    };
-                    let m = json!({ "role": "assistant", "content": said });
-                    if self.history.last() != Some(&m) {
-                        self.history.push(m);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-}
 
 /// Ask once, with the tools, and hand back what the model said last and the
 /// conversation it leaves behind.
@@ -244,18 +28,9 @@ pub async fn ask_once(
     question: &str,
 ) -> Result<(String, Vec<Value>), String> {
     history.push(json!({ "role": "user", "content": question }));
-    let (out, updates) = crossbeam_channel::unbounded();
-    let mut worker =
-        Worker { config, history, desk, out, stop: Arc::new(AtomicBool::new(false)), bell: None };
+    let mut worker = Worker { config, history, desk, said: String::new() };
     worker.exchange().await?;
-    let said: String = updates
-        .try_iter()
-        .filter_map(|u| match u {
-            Update::Delta(t) => Some(t),
-            _ => None,
-        })
-        .collect();
-    Ok((said, worker.history))
+    Ok((worker.said, worker.history))
 }
 
 /// One exchange, running off the interface thread.
@@ -263,36 +38,14 @@ struct Worker {
     config: Config,
     history: Vec<Value>,
     desk: Desk,
-    out: crossbeam_channel::Sender<Update>,
-    stop: Arc<AtomicBool>,
-    bell: Option<super::Bell>,
+    said: String,
 }
 
 impl Worker {
-    fn say(&self, u: Update) {
-        let _ = self.out.send(u);
-        if let Some(b) = &self.bell {
-            b.ring();
-        }
-    }
-
-    async fn run(mut self) {
-        // The pane is redrawn by whatever the desk wakes, so an answer that
-        // arrives while nothing else is happening still appears.
-        self.bell = Some(self.desk.bell());
-        if let Err(e) = self.exchange().await {
-            self.say(Update::Fault(e));
-        }
-        self.say(Update::Done);
-    }
-
     async fn exchange(&mut self) -> Result<(), String> {
         let client = httpc::client(PATIENCE).map_err(|e| e.to_string())?;
         let tools = tool_list();
         for _ in 0..self.config.steps.max(1) {
-            if self.stop.load(Ordering::Relaxed) {
-                return Err("stopped".into());
-            }
             let reply = self.complete(&client, &tools).await?;
             let calls = reply.calls;
             let mut message = json!({ "role": "assistant", "content": reply.text });
@@ -312,7 +65,6 @@ impl Worker {
             }
             self.history.push(message);
             if calls.is_empty() {
-                self.say(Update::Said);
                 return Ok(());
             }
             for call in calls {
@@ -326,7 +78,6 @@ impl Worker {
                     "tool_call_id": call.id,
                     "content": content,
                 }));
-                self.say(Update::Answered(answer));
             }
         }
         Err(format!("stopped after {} tool calls", self.config.steps.max(1)))
@@ -334,7 +85,6 @@ impl Worker {
 
     /// Put one call on the desk, and say what came back.
     async fn run_tool(&self, call: &Call) -> Result<String, String> {
-        self.say(Update::Calling { name: call.name.clone(), args: call.args.clone() });
         let Some(tool) = catalog::find(&call.name) else {
             return Err(format!("no tool called {}", call.name));
         };
@@ -356,7 +106,7 @@ impl Worker {
     }
 
     /// One completion, streamed.
-    async fn complete(&self, client: &reqwest::Client, tools: &Value) -> Result<Reply, String> {
+    async fn complete(&mut self, client: &reqwest::Client, tools: &Value) -> Result<Reply, String> {
         let mut messages = vec![json!({ "role": "system", "content": self.brief() })];
         messages.extend(self.history.iter().cloned());
         let body = json!({
@@ -379,14 +129,11 @@ impl Worker {
     }
 
     /// Server-sent events into a reply.
-    async fn read_stream(&self, resp: reqwest::Response) -> Result<Reply, String> {
+    async fn read_stream(&mut self, resp: reqwest::Response) -> Result<Reply, String> {
         let mut reply = Reply::default();
         let mut buf = String::new();
         let mut chunks = httpc::Chunks::of(resp);
         while let Some(chunk) = chunks.next().await.map_err(|e| e.to_string())? {
-            if self.stop.load(Ordering::Relaxed) {
-                return Err("stopped".into());
-            }
             buf.push_str(&String::from_utf8_lossy(&chunk));
             // An event ends at a blank line, and a chunk can hold part of
             // one, so what is left after the last break stays in the buffer.
@@ -414,13 +161,13 @@ impl Worker {
     }
 
     /// One streamed chunk folded into the reply being built.
-    fn take_delta(&self, v: &Value, reply: &mut Reply) {
+    fn take_delta(&mut self, v: &Value, reply: &mut Reply) {
         let Some(delta) = v.pointer("/choices/0/delta") else { return };
         if let Some(text) = delta.get("content").and_then(|c| c.as_str())
             && !text.is_empty()
         {
             reply.text.push_str(text);
-            self.say(Update::Delta(text.to_string()));
+            self.said.push_str(text);
         }
         let Some(calls) = delta.get("tool_calls").and_then(|c| c.as_array()) else { return };
         for c in calls {
@@ -506,52 +253,13 @@ mod tests {
         }
     }
 
-    /// A reply arrives with blank lines round it and is drawn without them.
-    ///
-    /// Models open with a newline or two more often than not, and a chat pane
-    /// that prints them shows an empty gap under AGENT: an operator reads
-    /// that as a reply that has not come, and waits for one that already has.
-    #[test]
-    fn the_blank_lines_a_model_wraps_its_reply_in_are_not_drawn() {
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let mut chat = Chat { updates: Some(rx), ..Default::default() };
-        for d in ["\n\n", "\n", "Hey! I am driving the radio", " here.", "\n\n"] {
-            let _ = tx.send(Update::Delta(d.to_string()));
-        }
-        let _ = tx.send(Update::Said);
-        chat.poll();
-        assert_eq!(
-            chat.turns.iter().filter(|t| matches!(t, Turn::Said(_))).count(),
-            1,
-            "the blank deltas started turns of their own"
-        );
-        let Some(Turn::Said(said)) = chat.turns.last() else { panic!("no reply came out") };
-        assert_eq!(said, "Hey! I am driving the radio here.");
-
-        // A newline inside the reply is the model's own paragraph and stays.
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let mut chat = Chat { updates: Some(rx), ..Default::default() };
-        let _ = tx.send(Update::Delta("\n first\n\nsecond \n".into()));
-        let _ = tx.send(Update::Said);
-        chat.poll();
-        let Some(Turn::Said(said)) = chat.turns.last() else { panic!("no reply") };
-        assert_eq!(said, "first\n\nsecond");
-    }
-
     /// A tool call arrives a character at a time, and the name and the
     /// arguments belong to whichever index they carried.
     #[test]
     fn a_streamed_tool_call_is_reassembled() {
-        let (out, _rx) = crossbeam_channel::unbounded();
         let (desk, _asks) = Desk::new();
-        let w = Worker {
-            config: Config::default(),
-            history: Vec::new(),
-            desk,
-            out,
-            stop: Arc::new(AtomicBool::new(false)),
-            bell: None,
-        };
+        let mut w =
+            Worker { config: Config::default(), history: Vec::new(), desk, said: String::new() };
         let mut reply = Reply::default();
         let chunks = [
             json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"tu"}}]}}]}),
@@ -575,16 +283,9 @@ mod tests {
     /// Two calls in one reply keep their own arguments.
     #[test]
     fn two_calls_do_not_run_together() {
-        let (out, _rx) = crossbeam_channel::unbounded();
         let (desk, _asks) = Desk::new();
-        let w = Worker {
-            config: Config::default(),
-            history: Vec::new(),
-            desk,
-            out,
-            stop: Arc::new(AtomicBool::new(false)),
-            bell: None,
-        };
+        let mut w =
+            Worker { config: Config::default(), history: Vec::new(), desk, said: String::new() };
         let mut reply = Reply::default();
         w.take_delta(
             &json!({"choices":[{"delta":{"tool_calls":[
@@ -681,38 +382,16 @@ mod tests {
             assert!(matches!(ask.action, super::super::Action::Status));
             let _ = ask.reply.send(Ok(json!({ "center_hz": 446_050_000.0 })));
         });
-        let (out, updates) = crossbeam_channel::unbounded();
-        let worker = Worker {
-            config: Config { url, model: "stub".into(), ..Config::default() },
-            history: vec![json!({ "role": "user", "content": "where is the radio" })],
-            desk,
-            out,
-            stop: Arc::new(AtomicBool::new(false)),
-            bell: None,
-        };
         let rt =
             tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime");
-        rt.block_on(worker.run());
+        let config = Config { url, model: "stub".into(), ..Config::default() };
+        let (said, history) = rt
+            .block_on(ask_once(config, Vec::new(), desk, "where is the radio"))
+            .expect("an answer");
         radio.join().expect("the interface answered");
 
-        let mut said = String::new();
-        let mut called = Vec::new();
-        let mut answers = Vec::new();
-        let mut faults = Vec::new();
-        for u in updates.try_iter() {
-            match u {
-                Update::Delta(t) => said.push_str(&t),
-                Update::Calling { name, .. } => called.push(name),
-                Update::Answered(r) => answers.push(r),
-                Update::Fault(e) => faults.push(e),
-                Update::Said | Update::Done => {}
-            }
-        }
-        assert!(faults.is_empty(), "the exchange faulted: {faults:?}");
-        assert_eq!(called, vec!["status"]);
-        assert_eq!(answers.len(), 1);
-        assert_eq!(answers[0].as_deref(), Ok("{\"center_hz\":446050000.0}"));
         assert_eq!(said, "the radio is on 446 MHz");
+        assert_eq!(history.last().map(|m| m["role"].clone()), Some(json!("assistant")));
 
         // Two requests: the question, then the question with the call and
         // the receiver's answer behind it.
@@ -753,41 +432,13 @@ mod tests {
             }
         });
         let (desk, _asks) = Desk::new();
-        let (out, updates) = crossbeam_channel::unbounded();
-        let worker = Worker {
-            config: Config { url, model: "absent".into(), ..Config::default() },
-            history: vec![json!({ "role": "user", "content": "hello" })],
-            desk,
-            out,
-            stop: Arc::new(AtomicBool::new(false)),
-            bell: None,
-        };
         let rt =
             tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime");
-        rt.block_on(worker.run());
-        let faults: Vec<String> = updates
-            .try_iter()
-            .filter_map(|u| match u {
-                Update::Fault(e) => Some(e),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(faults.len(), 1);
-        assert!(faults[0].contains("404"), "{}", faults[0]);
-        assert!(faults[0].contains("no such model"), "{}", faults[0]);
-    }
-
-    /// A question with nowhere to send it is answered in the pane rather
-    /// than silently dropped.
-    #[test]
-    fn a_chat_with_no_model_says_so() {
-        let mut chat = Chat { config: Config::default(), ..Chat::default() };
-        chat.config.model.clear();
-        let rt = tokio::runtime::Builder::new_current_thread().build().expect("a runtime");
-        let (desk, _asks) = Desk::new();
-        chat.ask("what is on the air", desk, &crate::task::Spawner::of(&rt));
-        assert_eq!(chat.turns.len(), 2);
-        assert!(matches!(chat.turns[1], Turn::Fault(_)));
-        assert!(!chat.busy(), "nothing was started");
+        let config = Config { url, model: "absent".into(), ..Config::default() };
+        let fault = rt
+            .block_on(ask_once(config, Vec::new(), desk, "hello"))
+            .expect_err("the server refused");
+        assert!(fault.contains("404"), "{fault}");
+        assert!(fault.contains("no such model"), "{fault}");
     }
 }

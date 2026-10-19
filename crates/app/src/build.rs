@@ -19,6 +19,8 @@ pub enum Feature {
     Tea,
     Ambe,
     Mcp,
+    Agent,
+    Sandbox,
     Update,
     Survey,
     Artemis,
@@ -26,7 +28,7 @@ pub enum Feature {
 }
 
 impl Feature {
-    pub const ALL: [Feature; 23] = [
+    pub const ALL: [Feature; 25] = [
         Feature::Ffmpeg,
         Feature::RtlSdr,
         Feature::HackRf,
@@ -46,6 +48,8 @@ impl Feature {
         Feature::Tea,
         Feature::Ambe,
         Feature::Mcp,
+        Feature::Agent,
+        Feature::Sandbox,
         Feature::Update,
         Feature::Survey,
         Feature::Artemis,
@@ -73,6 +77,8 @@ impl Feature {
             Feature::Tea => "tea",
             Feature::Ambe => "ambe",
             Feature::Mcp => "mcp",
+            Feature::Agent => "agent",
+            Feature::Sandbox => "sandbox",
             Feature::Update => "update",
             Feature::Survey => "survey",
             Feature::Artemis => "artemis",
@@ -103,6 +109,8 @@ impl Feature {
             Feature::Tea => cfg!(feature = "tea"),
             Feature::Ambe => cfg!(feature = "ambe"),
             Feature::Mcp => cfg!(feature = "mcp"),
+            Feature::Agent => cfg!(feature = "agent"),
+            Feature::Sandbox => cfg!(feature = "sandbox"),
             Feature::Update => cfg!(feature = "update"),
             Feature::Survey => cfg!(feature = "survey"),
             Feature::Artemis => cfg!(feature = "artemis"),

@@ -189,6 +189,8 @@ pub struct Config {
     /// Anything to add to what the model is told the receiver is.
     pub brief: String,
 
+    pub workspace: String,
+
     /// Where speech comes from at all.
     pub speech: Speech,
 
@@ -239,6 +241,7 @@ impl Default for Config {
             key: String::new(),
             steps: DEFAULT_STEPS,
             brief: String::new(),
+            workspace: String::new(),
             speech: Speech::Local,
             voice_local: String::new(),
             voice_dir: String::new(),
@@ -293,6 +296,7 @@ impl Config {
                 // Written on one line with the breaks escaped, since the file
                 // is one setting per line and a brief is a paragraph.
                 "brief" => c.brief = value.replace("\\n", "\n"),
+                "workspace" => c.workspace = value.to_string(),
                 "speech" => c.speech = Speech::parse(value),
                 "voice_local" => c.voice_local = value.to_string(),
                 "voice_device" => c.voice_device = value.to_string(),
@@ -323,6 +327,7 @@ impl Config {
              key = {}\n\
              steps = {}\n\
              brief = {}\n\
+             workspace = {}\n\
              \n\
              # Talking to the agent over the air. A channel is made the \
              agent's on\n\
@@ -357,6 +362,7 @@ impl Config {
             self.key,
             self.steps,
             self.brief.replace('\n', "\\n"),
+            self.workspace,
             self.speech.id(),
             self.voice_local,
             self.voice_dir,
@@ -497,6 +503,7 @@ mod tests {
             key: "sk-secret".into(),
             steps: 7,
             brief: "two\nlines".into(),
+            workspace: "/work/radio".into(),
             speech: Speech::Server,
             voice_local: "bm_george".into(),
             voice_dir: "/srv/models/kokoro".into(),
@@ -514,6 +521,18 @@ mod tests {
             read_key: "third".into(),
         };
         assert_eq!(Config::parse(&c.render()), c);
+    }
+
+    #[test]
+    fn the_workspace_is_kept_beside_the_model_and_an_old_file_still_loads() {
+        let c =
+            Config::parse("url = http://h/v1\nmodel = m\nworkspace = /work/radio\nwake = shark\n");
+        assert_eq!(c.workspace, "/work/radio");
+        assert_eq!(c.wake, "shark");
+        assert_eq!(Config::parse(&c.render()).workspace, "/work/radio");
+        let old = Config::parse("url = http://h/v1\nmodel = m\nwake = shark\n");
+        assert_eq!(old.workspace, "");
+        assert_eq!(old.wake, "shark");
     }
 
     #[test]

@@ -25,7 +25,7 @@ windows-sys = { version = "0.60", features = ["Win32_System_Console"] }
 eframe = "0.35"
 rayon.workspace = true
 egui = "0.35"
-egui_bench = "0.1"
+egui_bench = "0.5.3"
 egui-phosphor = { version = "0.13", default-features = false, features = ["regular"] }
 
 common.workspace = true
@@ -120,7 +120,7 @@ remote = { workspace = true, features = ["iqstream", "rtl_tcp", "spyserver", "ki
 # LimeSuite is not packaged everywhere, and there is no vcpkg port of it, so
 # the Windows build is made without this. Everything else here works with the
 # driver absent: the device simply never appears in the list.
-default = ["native", "limesdr", "stt", "tts", "cuda", "tea", "ambe", "mcp", "ffmpeg"]
+default = ["native", "limesdr", "stt", "tts", "cuda", "tea", "ambe", "mcp", "agent", "sandbox", "ffmpeg"]
 # Pictures off a broadcast multiplex, through the system ffmpeg libraries.
 # On by default; a build without it decodes the transport stream and its
 # tables and shows no picture.
@@ -129,6 +129,8 @@ ffmpeg = ["nodes/ffmpeg"]
 # the operator is looking at. On by default and shipped in the release
 # binaries: nothing listens until an address is given on the command line.
 mcp = ["dep:rmcp", "dep:axum"]
+agent = ["egui_bench/agent"]
+sandbox = ["agent", "egui_bench/sandbox"]
 limesdr = ["dep:limesdr"]
 native = ["usb", "iqstream", "rtl_tcp", "spyserver", "kiwisdr", "homeassistant", "gps", "update", "survey", "artemis", "feeds"]
 usb = ["rtlsdr", "hackrf", "airspy", "pluto"]

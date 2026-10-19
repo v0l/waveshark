@@ -247,16 +247,17 @@ pub struct App {
     station_edit: Option<String>,
     /// Where the recorder writes, while it is being typed.
     calls_dir_edit: Option<String>,
-    /// What an agent has asked for, whether it came over MCP or from the
-    /// chat in the Agent view. One queue: both front ends hold the same desk.
+    /// What an agent has asked for over MCP. The chat in the Agent view has
+    /// its own queue, which the shared agent drains.
     agent: crossbeam_channel::Receiver<crate::agent::Ask>,
-    /// The counter they put work on, handed to whatever wants to drive this
+    /// The counter MCP puts work on, handed to whatever wants to drive this
     /// receiver.
     desk: crate::agent::Desk,
     /// Whether the desk's bell has been given this window's repaint.
     desk_rung: bool,
-    /// The conversation in the Agent view, and the model behind it.
-    chat: crate::agent::chat::Chat,
+    /// The conversation in the Agent view, the model behind it, and the
+    /// settings the voice channel reads.
+    pub(crate) assistant: crate::agent::assistant::Assistant,
     /// The agent on the air: the channel it answers on, and what it has to
     /// say. Off until a channel is set to transmit from it.
     air: crate::agent::channel::AgentChannel,
@@ -809,7 +810,7 @@ impl Default for App {
             agent: asks,
             desk,
             desk_rung: false,
-            chat: crate::agent::chat::Chat::default(),
+            assistant: crate::agent::assistant::Assistant::default(),
             air: crate::agent::channel::AgentChannel::default(),
             agent_shots: Vec::new(),
             agent_edits: Vec::new(),
@@ -867,6 +868,7 @@ impl App {
             memory: crate::memory::Memory::load(),
             view: if s.dashboard { View::Dashboard } else { View::Spectrum },
             settings,
+            assistant: crate::agent::assistant::Assistant::new(&cc.egui_ctx),
             ..Default::default()
         };
         app.map.map.layers.restore(&s.map_layers);
@@ -1863,7 +1865,7 @@ impl App {
             chain: self.chain.topo.as_ref(),
             files: &mut self.pick_file,
             air: &self.air,
-            air_fault: self.chat.config.voice_fault(),
+            air_fault: self.assistant.config.voice_fault(),
             settings: &self.settings,
         }
         .show(ui);
@@ -2226,7 +2228,7 @@ impl App {
             // a station by number and know when the other side changed.
             .map(|u| (u.at, u.key.from.clone(), u.text.clone()))
             .collect();
-        let config = self.chat.config.clone();
+        let config = self.assistant.config.clone();
         for (at, from, text) in heard {
             let desk = self.desk.clone();
             self.air.heard(&config, &desk, &self.rt, at, from.as_deref(), &text);
@@ -2268,34 +2270,61 @@ impl App {
     }
 
     /// Draw the conversation, then do what it asked for.
+    #[cfg(feature = "agent")]
     fn agent_view(&mut self, ui: &mut egui::Ui) {
         let running = self.radio.is_some();
-        let air_fault = self.chat.config.voice_fault();
-        let wake = self.chat.config.wake.clone();
-        let act = agent_pane::AgentView {
-            chat: &mut self.chat,
-            running,
-            air: &self.air,
-            voice: crate::agent::voice::health(),
-            air_fault,
-            wake,
+        let air_fault = self.assistant.config.voice_fault();
+        let wake = self.assistant.config.wake.clone();
+        let voice = crate::agent::voice::health();
+        let config = self.assistant.config.clone();
+        let Self { assistant, air, .. } = self;
+        let mut said_again = None;
+        let mut settings = false;
+        {
+            let air: &crate::agent::channel::AgentChannel = air;
+            let status = |ui: &mut egui::Ui| {
+                agent_pane::status(ui, running, air, &voice, air_fault, &wake);
+                agent_pane::heard(ui, air, &config);
+            };
+            let mut below = |ui: &mut egui::Ui| {
+                if let Some(nth) = agent_pane::on_the_air(ui, air) {
+                    said_again = Some(nth);
+                }
+            };
+            let mut open_settings = || settings = true;
+            let mut extras = egui_bench::agent::pane::Extras {
+                status: Some(Box::new(status)),
+                below: Some(Box::new(&mut below)),
+                on_model: Some(Box::new(&mut open_settings)),
+            };
+            assistant.page.show_with(ui, &mut extras);
         }
-        .show(ui);
-        match act {
-            Some(agent_pane::Action::Ask(text)) => {
-                let desk = self.desk.clone();
-                self.chat.ask(&text, desk, &self.rt);
-            }
-            Some(agent_pane::Action::Clear) => self.chat.clear(),
-            Some(agent_pane::Action::Interrupt) => self.chat.interrupt(),
-            // The key follows the queue, so this is the whole of it: the
-            // samples go back into the speaker and the channel is taken when
-            // it next goes quiet, exactly as the first over was.
-            Some(agent_pane::Action::SayAgain(nth)) => {
-                self.air.repeat(nth);
-            }
-            Some(agent_pane::Action::Settings) => self.open = Some(Settings::Agent),
-            None => {}
+        if let Some(nth) = said_again {
+            self.air.repeat(nth);
+        }
+        if settings {
+            self.open = Some(Settings::Agent);
+        }
+    }
+
+    #[cfg(not(feature = "agent"))]
+    fn agent_view(&mut self, ui: &mut egui::Ui) {
+        let running = self.radio.is_some();
+        let air_fault = self.assistant.config.voice_fault();
+        let wake = self.assistant.config.wake.clone();
+        let voice = crate::agent::voice::health();
+        let config = self.assistant.config.clone();
+        let mut again = None;
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+                agent_pane::unavailable(ui);
+                agent_pane::status(ui, running, &self.air, &voice, air_fault, &wake);
+                agent_pane::heard(ui, &self.air, &config);
+                again = agent_pane::on_the_air(ui, &self.air);
+            });
+        });
+        if let Some(nth) = again {
+            self.air.repeat(nth);
         }
     }
 
@@ -3284,7 +3313,8 @@ impl eframe::App for App {
         // Whatever the model has said since the last frame, whichever view is
         // open: a conversation that only advances while its pane is showing
         // is one that stops when an operator looks at the spectrum.
-        self.chat.poll();
+        self.assistant.poll();
+        self.assistant.follow();
         self.agent_air();
         self.screenshot(ui.ctx());
         // Who is talking and what they said, every frame and whichever view
@@ -3544,7 +3574,7 @@ impl App {
             View::Control => self.control.list.len() as u64,
             View::Satellites => u64::from(self.sats.tracking.is_some()),
             View::Keys => self.keys.store.channels().len() as u64,
-            View::Agent => self.chat.turns() as u64,
+            View::Agent => self.assistant.turns() as u64 + u64::from(self.assistant.needs_you()),
         }
     }
 

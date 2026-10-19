@@ -9,6 +9,10 @@ the code is in the commit log.
 
 ## [Unreleased]
 
+### Added
+
+- Agent view as a coding agent: markdown replies, files in a workspace folder, skills from `~/.agents/skills`, and commands run in a sandbox on Linux and macOS. It asks before using a folder outside the workspace.
+
 ## [0.5.0] - 2026-10-14
 
 ### Added

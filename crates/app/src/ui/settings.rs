@@ -880,8 +880,8 @@ impl App {
     /// other way to find out is to close the dialog and try.
     fn agent_settings(&mut self, ui: &mut egui::Ui) {
         use crate::agent::served;
-        let before = self.chat.config.clone();
-        let c = &mut self.chat.config;
+        let before = self.assistant.config.clone();
+        let c = &mut self.assistant.config;
         // What the servers offer, asked once per address and again on the
         // button: a model id and a voice name are strings only the server
         // can check.
@@ -940,6 +940,16 @@ impl App {
                      callsign, what not to key up, who it is talking to.",
                 |ui| {
                     prose(ui, &mut c.brief, "Standing instructions", 3);
+                },
+            );
+            row_help(
+                ui,
+                "workspace",
+                "The folder the model reads and writes files in and runs commands in. It \
+                     cannot leave it unless you share another folder from the Agent view. \
+                     Empty is Documents/waveshark.",
+                |ui| {
+                    field(ui, &mut c.workspace, "Documents/waveshark");
                 },
             );
             ui.add_space(4.0);

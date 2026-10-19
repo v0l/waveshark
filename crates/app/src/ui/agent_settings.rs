@@ -334,8 +334,8 @@ impl super::App {
     /// and cannot then be told to put itself back.
     fn agent_set_voice(&mut self, a: args::Voice) -> Result<Value, String> {
         use crate::agent::config::Speech;
-        let before = self.chat.config.clone();
-        let c = &mut self.chat.config;
+        let before = self.assistant.config.clone();
+        let c = &mut self.assistant.config;
         if let Some(s) = a.source {
             c.speech = match s {
                 args::VoiceFrom::Local => Speech::Local,
@@ -376,7 +376,7 @@ impl super::App {
         if *c != before {
             let _ = c.save();
         }
-        let c = &self.chat.config;
+        let c = &self.assistant.config;
         Ok(json!({
             "source": c.speech.id(),
             "model": c.voice_model,
@@ -399,25 +399,25 @@ impl super::App {
     fn agent_set_transcriber(&mut self, a: args::Transcriber) -> Result<Value, String> {
         use crate::agent::config::Reading;
         use pipeline::param::ParamValue;
-        let before = self.chat.config.clone();
+        let before = self.assistant.config.clone();
         if let Some(s) = a.source {
-            self.chat.config.reading = match s {
+            self.assistant.config.reading = match s {
                 args::VoiceFrom::Local => Reading::Local,
                 args::VoiceFrom::Chat => Reading::Chat,
                 args::VoiceFrom::Server => Reading::Server,
             };
         }
         if let Some(u) = a.url {
-            self.chat.config.read_url = u;
+            self.assistant.config.read_url = u;
         }
         if let Some(m) = a.server_model {
-            self.chat.config.read_model = m;
+            self.assistant.config.read_model = m;
         }
-        if self.chat.config != before {
-            let _ = self.chat.config.save();
+        if self.assistant.config != before {
+            let _ = self.assistant.config.save();
             // The transcriber is a stage in a graph that knows nothing about
             // the agent, and it reads where this says.
-            crate::agent::config::publish_reading(&self.chat.config);
+            crate::agent::config::publish_reading(&self.assistant.config);
         }
         // The switch, the weights and the device are in the record, so they
         // can be set with no radio running and are still set at the next
@@ -448,7 +448,7 @@ impl super::App {
     /// the running graph rather than from what was just asked for, so a model
     /// that will not load says so here.
     fn agent_transcriber_state(&self) -> Value {
-        let c = &self.chat.config;
+        let c = &self.assistant.config;
         let mut out = json!({
             "source": c.reading.id(),
             "url": c.read_url,
@@ -1148,9 +1148,9 @@ mod tests {
     #[test]
     fn setting_the_voice_cannot_reach_the_model() {
         let mut a = app();
-        a.chat.config.url = "http://somewhere:11434/v1".into();
-        a.chat.config.model = "qwen3:8b".into();
-        a.chat.config.key = "secret".into();
+        a.assistant.config.url = "http://somewhere:11434/v1".into();
+        a.assistant.config.model = "qwen3:8b".into();
+        a.assistant.config.key = "secret".into();
         let v = call(
             &mut a,
             Action::SetVoice(args::Voice {
@@ -1169,9 +1169,9 @@ mod tests {
         assert_eq!(v["source"], "server");
         assert_eq!(v["model"], "tts-1-hd");
         assert_eq!(v["wake"], "shark");
-        assert_eq!(a.chat.config.url, "http://somewhere:11434/v1");
-        assert_eq!(a.chat.config.model, "qwen3:8b");
-        assert_eq!(a.chat.config.key, "secret");
+        assert_eq!(a.assistant.config.url, "http://somewhere:11434/v1");
+        assert_eq!(a.assistant.config.model, "qwen3:8b");
+        assert_eq!(a.assistant.config.key, "secret");
         // Nothing in the catalogue takes the chat server, its model, its key
         // or the standing brief: an agent that can rewrite what it thinks
         // with can take itself off the air with one call and cannot then be

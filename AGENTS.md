@@ -49,7 +49,7 @@ without touching it? If not, it is in the wrong file.
 `tea` is TETRA decryption, `ambe` is DMR speech through `crates/mbe`. Both
 default on, so `cargo test` at the root builds them; `crates/mbe` is not a
 default workspace member and `cargo test -p mbe` must be asked for by name.
-Releases build `--no-default-features --features native,limesdr,stt,cuda,mcp`, with
+Releases build `--no-default-features --features native,limesdr,stt,cuda,mcp,agent,sandbox`, with
 `ffmpeg` added on macOS alone: Homebrew has a new enough one, where the
 release's Linux image has ffmpeg 4.4 and Windows has none at all, so those
 binaries show no pictures off a multiplex. macOS drops `cuda` for Metal.

@@ -1472,6 +1472,9 @@ fn attach_console() {}
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
+    if let Some(code) = agent::sandbox::run_helper() {
+        std::process::exit(code);
+    }
     run(Args::parse())
 }
 
