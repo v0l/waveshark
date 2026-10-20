@@ -605,7 +605,15 @@ fn param_control(
                         "",
                         if file { 30.0 } else { 0.0 },
                         |ui| {
-                            if file && ui.button("…").on_hover_text("Choose a file").clicked() {
+                            if file
+                                && ui
+                                    .add(
+                                        egui_bench::key::Key::new("…")
+                                            .outline(egui_bench::theme::VALUE),
+                                    )
+                                    .on_hover_text("Choose a file")
+                                    .clicked()
+                            {
                                 browse = true;
                             }
                         },
@@ -1794,7 +1802,7 @@ fn edge(
     label: bool,
     lit: bool,
 ) {
-    let col = if lit { theme::READOUT } else { Color32::from_rgb(0x4A, 0x55, 0x60) };
+    let col = if lit { theme::READOUT } else { theme::ETCH };
     let stroke = Stroke::new(if lit { 2.0 } else { 1.0 }, col);
     // Enough slack that the curve leaves and arrives horizontally, and more
     // of it when the ends are far apart or the wire runs back up the graph.

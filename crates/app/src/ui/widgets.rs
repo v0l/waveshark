@@ -85,7 +85,13 @@ pub fn station_card(ui: &mut egui::Ui, f: &sdr_directory::probe::Found, idle: bo
         rail,
         |ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                tune = ui.add_enabled(idle, egui::Button::new("CONNECT")).clicked();
+                tune = ui
+                    .add(
+                        egui_bench::key::Key::new("CONNECT")
+                            .outline(egui_bench::theme::VALUE)
+                            .enabled(idle),
+                    )
+                    .clicked();
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     egui_bench::text::Line::new()
                         .value(&s.name)

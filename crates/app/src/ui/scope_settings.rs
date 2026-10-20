@@ -224,7 +224,10 @@ impl ScopeSettings<'_> {
                          colours and scale set here, zooms and pans, and gives the time, \
                          the frequency and the decibels under the pointer.";
             row_help(ui, "write", write, |ui| {
-                if ui.button("WRITE").clicked() {
+                if ui
+                    .add(egui_bench::key::Key::new("WRITE").outline(egui_bench::theme::VALUE))
+                    .clicked()
+                {
                     self.acts.push(Action::ExportHeatmap);
                 }
             });

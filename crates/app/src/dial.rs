@@ -6,7 +6,7 @@
 //! wheel over a digit steps that decade.
 
 use crate::wheel::Wheel;
-use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
+use egui::{Align2, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use egui_bench::theme;
 
 /// Digits shown, from 1 GHz down to 1 Hz. Ten of them, because the tuner
@@ -120,7 +120,7 @@ impl Dial {
             let is_hot = hover.is_some_and(|h| cell.x_range().contains(h.x) && rect.contains(h));
             if is_hot {
                 hot = Some(dec);
-                p.rect_filled(cell, 1.0, Color32::from_rgba_unmultiplied(245, 166, 59, 22));
+                p.rect_filled(cell, 1.0, theme::READOUT.gamma_multiply(0.09));
                 // Underline the live decade, the way a receiver marks the
                 // selected tuning step.
                 p.line_segment(
@@ -249,7 +249,7 @@ impl Dial {
             let is_hot = hover.is_some_and(|h| cell.x_range().contains(h.x) && rect.contains(h));
             if is_hot {
                 hot = Some(dec);
-                p.rect_filled(cell, 1.0, Color32::from_rgba_unmultiplied(245, 166, 59, 26));
+                p.rect_filled(cell, 1.0, theme::READOUT.gamma_multiply(0.1));
                 p.line_segment(
                     [
                         Pos2::new(cell.left() + 1.0, cell.bottom() - 1.0),

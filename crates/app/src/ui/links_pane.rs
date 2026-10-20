@@ -56,18 +56,37 @@ impl LinksView<'_> {
             if !links.is_empty() {
                 let filter = &mut self.st.filter;
                 ui.add_space(12.0);
-                egui_bench::form::clipboard_menu(ui.add(
-                    egui::TextEdit::singleline(filter).hint_text("filter").desired_width(180.0),
-                ));
-                if !filter.is_empty() && ui.button("Clear filter").clicked() {
+                ui.allocate_ui(egui::vec2(200.0, 24.0), |ui| {
+                    egui_bench::form::field(ui, filter, "filter");
+                });
+                if !filter.is_empty()
+                    && ui
+                        .add(
+                            egui_bench::key::Key::new("Clear filter")
+                                .outline(egui_bench::theme::VALUE),
+                        )
+                        .clicked()
+                {
                     filter.clear();
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(12.0);
-                    if ui.button("Clear links").clicked() {
+                    if ui
+                        .add(
+                            egui_bench::key::Key::new("Clear links")
+                                .outline(egui_bench::theme::FAULT),
+                        )
+                        .clicked()
+                    {
                         act = Some(Action::Clear);
                     }
-                    if ui.button("Load from log").clicked() {
+                    if ui
+                        .add(
+                            egui_bench::key::Key::new("Load from log")
+                                .outline(egui_bench::theme::VALUE),
+                        )
+                        .clicked()
+                    {
                         act = Some(Action::LoadLog);
                     }
                 });
@@ -91,7 +110,13 @@ impl LinksView<'_> {
                      a talkgroup. Pick a link to follow what passed between its ends.",
                 );
                 ui.add_space(8.0);
-                if ui.button("Load from log").clicked() {
+                if ui
+                    .add(
+                        egui_bench::key::Key::new("Load from log")
+                            .outline(egui_bench::theme::VALUE),
+                    )
+                    .clicked()
+                {
                     act = Some(Action::LoadLog);
                 }
             });

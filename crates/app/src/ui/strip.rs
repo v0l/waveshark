@@ -81,7 +81,12 @@ impl Strip<'_> {
                     ui.painter().rect_filled(r, 1.0, theme::TRACE);
                     Line::new().legend("playback").show(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("STOP").on_hover_text("Stop playing this over").clicked()
+                        if ui
+                            .add(
+                                egui_bench::key::Key::new("STOP").outline(egui_bench::theme::VALUE),
+                            )
+                            .on_hover_text("Stop playing this over")
+                            .clicked()
                         {
                             cmds.push(Cmd::StopPlaying);
                         }
@@ -333,7 +338,11 @@ impl Strip<'_> {
                 return;
             };
             Line::new().measured(heard.label()).size(11.0).show(ui);
-            if ch.tone != Some(heard) && ui.small_button("USE").clicked() {
+            if ch.tone != Some(heard)
+                && ui
+                    .add(egui_bench::key::Key::new("USE").outline(egui_bench::theme::VALUE))
+                    .clicked()
+            {
                 ch.tone = Some(heard);
                 changed = true;
             }
@@ -370,7 +379,10 @@ impl Strip<'_> {
                 });
             list.response.on_hover_text("send this CTCSS tone or DCS code under the audio");
             if let Some(sql) = opens_on.filter(|c| picked != Some(*c))
-                && ui.small_button("SAME").on_hover_text("send the code it opens on").clicked()
+                && ui
+                    .add(egui_bench::key::Key::new("SAME").outline(egui_bench::theme::VALUE))
+                    .on_hover_text("send the code it opens on")
+                    .clicked()
             {
                 picked = Some(sql);
             }
@@ -462,7 +474,7 @@ impl Strip<'_> {
             }
             if ch.bandwidth_hz.is_some() {
                 if ui
-                    .small_button("RESET")
+                    .add(egui_bench::key::Key::new("RESET").outline(egui_bench::theme::FAULT))
                     .on_hover_text(format!(
                         "back to the {:.1} kHz {} asks for",
                         ch.mode.bandwidth() / 1e3,
@@ -531,7 +543,7 @@ impl Strip<'_> {
             if ch.bandwidth_hz.is_some() || ch.audio_low_hz.is_some() {
                 let (low, high) = d.audio_edges(None, None);
                 if ui
-                    .small_button("RESET")
+                    .add(egui_bench::key::Key::new("RESET").outline(egui_bench::theme::FAULT))
                     .on_hover_text(format!(
                         "back to the {low:.0} to {high:.0} Hz {} asks for",
                         d.label()
@@ -969,14 +981,23 @@ impl Strip<'_> {
                     ui.horizontal(|ui| {
                         legend_col(ui, "file");
                         if ui
-                            .button("OPEN")
+                            .add(
+                                egui_bench::key::Key::new("OPEN").outline(egui_bench::theme::VALUE),
+                            )
                             .on_hover_text("Choose a Flipper .sub file to replay")
                             .clicked()
                         {
                             sub_pick.ask(ui.ctx());
                         }
                         if let Some(f) = sub_file {
-                            if ui.button("CLEAR").on_hover_text("Transmit nothing").clicked() {
+                            if ui
+                                .add(
+                                    egui_bench::key::Key::new("CLEAR")
+                                        .outline(egui_bench::theme::FAULT),
+                                )
+                                .on_hover_text("Transmit nothing")
+                                .clicked()
+                            {
                                 cmds.push(Cmd::SubFile(None));
                                 sub_pick.file = None;
                                 changed = true;
@@ -996,7 +1017,9 @@ impl Strip<'_> {
                     if let Some(f) = sub_file
                         && f.file.frequency != (ch.freq + tx.shift_hz) as u64
                         && ui
-                            .button("TUNE")
+                            .add(
+                                egui_bench::key::Key::new("TUNE").outline(egui_bench::theme::VALUE),
+                            )
                             .on_hover_text("Move the dial to the file's own frequency")
                             .clicked()
                     {
@@ -1008,14 +1031,22 @@ impl Strip<'_> {
                     ui.horizontal(|ui| {
                         legend_col(ui, "iq");
                         if ui
-                            .button("OPEN")
+                            .add(
+                                egui_bench::key::Key::new("OPEN").outline(egui_bench::theme::VALUE),
+                            )
                             .on_hover_text("Choose a recorded span to send back out")
                             .clicked()
                         {
                             capture_pick.ask(ui.ctx());
                         }
                         if capture.is_some()
-                            && ui.button("CLEAR").on_hover_text("Transmit nothing").clicked()
+                            && ui
+                                .add(
+                                    egui_bench::key::Key::new("CLEAR")
+                                        .outline(egui_bench::theme::FAULT),
+                                )
+                                .on_hover_text("Transmit nothing")
+                                .clicked()
                         {
                             cmds.push(Cmd::TxCapture(None));
                             capture_pick.file = None;
@@ -1055,7 +1086,10 @@ impl Strip<'_> {
                         });
                         if c.center.is_some_and(|hz| hz.as_f64() != ch.freq + tx.shift_hz)
                             && ui
-                                .button("TUNE")
+                                .add(
+                                    egui_bench::key::Key::new("TUNE")
+                                        .outline(egui_bench::theme::VALUE),
+                                )
                                 .on_hover_text("Move the dial to where the capture was made")
                                 .clicked()
                         {
@@ -1091,7 +1125,11 @@ impl Strip<'_> {
                                 .map(|n| n.to_string_lossy().into_owned())
                                 .unwrap_or(path.clone()),
                         };
-                        let open = ui.button("OPEN").on_hover_text(format!("Choose the {what}"));
+                        let open = ui
+                            .add(
+                                egui_bench::key::Key::new("OPEN").outline(egui_bench::theme::VALUE),
+                            )
+                            .on_hover_text(format!("Choose the {what}"));
                         if open.clicked() {
                             files.ask(ui.ctx(), node, carries, "Choose what to transmit");
                         }
@@ -1099,7 +1137,10 @@ impl Strip<'_> {
                         // test card, which is what an empty setting means.
                         if !path.is_empty()
                             && ui
-                                .button("CLEAR")
+                                .add(
+                                    egui_bench::key::Key::new("CLEAR")
+                                        .outline(egui_bench::theme::FAULT),
+                                )
                                 .on_hover_text("Transmit the test card instead")
                                 .clicked()
                         {
@@ -1318,7 +1359,7 @@ impl Strip<'_> {
                             self.settings.edit(|s| s.strip = false);
                         }
                         ui.add_space(6.0);
-                        if ui.small_button("BANK").on_hover_text("saved channels").clicked() {
+                        if ui.add(egui_bench::key::Key::new("BANK").outline(egui_bench::theme::VALUE)).on_hover_text("saved channels").clicked() {
                             self.acts.push(Action::Open(Settings::Memory));
                         }
                     });
@@ -1486,10 +1527,10 @@ impl Strip<'_> {
                                         egui::Popup::menu(&more).show(|ui| {
                                             ui.set_min_width(180.0);
                                             Line::new().legend("save to group").show(ui);
-                                            let r = ui.text_edit_singleline(self.memory_group);
+                                            let r = egui_bench::form::field(ui, self.memory_group, "group");
                                             let enter = r.lost_focus()
                                                 && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                            if enter || ui.button("SAVE").clicked() {
+                                            if enter || ui.add(egui_bench::key::Key::new("SAVE").outline(egui_bench::theme::VALUE)).clicked() {
                                                 self.memory.add(crate::memory::Saved {
                                                     group: self.memory_group.clone(),
                                                     label: ch.label.clone(),
@@ -1504,7 +1545,7 @@ impl Strip<'_> {
                                                 ui.close();
                                             }
                                             ui.add_space(6.0);
-                                            if ui.button("REMOVE").clicked() {
+                                            if ui.add(egui_bench::key::Key::new("REMOVE").outline(egui_bench::theme::FAULT)).clicked() {
                                                 remove = Some(i);
                                                 ui.close();
                                             }

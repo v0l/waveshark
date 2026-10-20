@@ -136,12 +136,19 @@ impl CallList<'_> {
             let mut opened = false;
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(12.0);
-                if ui.add_enabled(!calls.is_empty(), egui::Button::new("Clear calls")).clicked() {
+                if ui
+                    .add(
+                        egui_bench::key::Key::new("Clear calls")
+                            .outline(egui_bench::theme::FAULT)
+                            .enabled(!calls.is_empty()),
+                    )
+                    .clicked()
+                {
                     act = Some(Action::Clear);
                 }
                 ui.add_space(12.0);
                 if ui
-                    .button("SETTINGS")
+                    .add(egui_bench::key::Key::new("SETTINGS").outline(egui_bench::theme::VALUE))
                     .on_hover_text("What is recorded, and where it is written")
                     .clicked()
                 {
@@ -290,7 +297,7 @@ impl CallList<'_> {
                     }
                     let p = ui.painter_at(rect);
                     if n % 2 == 1 {
-                        p.rect_filled(rect, 0.0, Color32::from_rgb(0x24, 0x27, 0x2D));
+                        p.rect_filled(rect, 0.0, egui_bench::theme::PANEL);
                     }
                     let live = c.live(now);
                     if live {
@@ -350,7 +357,9 @@ impl CallList<'_> {
                         // negotiable.
                         sub.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                         if sub
-                            .small_button("read")
+                            .add(
+                                egui_bench::key::Key::new("read").outline(egui_bench::theme::VALUE),
+                            )
                             .on_hover_text("Everything the model read on this conversation")
                             .clicked()
                         {
@@ -455,7 +464,10 @@ impl CallList<'_> {
                         // The folder is on the button rather than on a row:
                         // a path is longer than the pane.
                         if ui
-                            .small_button("REFRESH")
+                            .add(
+                                egui_bench::key::Key::new("REFRESH")
+                                    .outline(egui_bench::theme::VALUE),
+                            )
                             .on_hover_text(dir.display().to_string())
                             .clicked()
                         {
@@ -466,7 +478,11 @@ impl CallList<'_> {
                         // listed is many overs; one of them is the row's own
                         // button.
                         if ui
-                            .add_enabled(!empty && !saving, egui::Button::new("EXPORT").small())
+                            .add(
+                                egui_bench::key::Key::new("EXPORT")
+                                    .outline(egui_bench::theme::VALUE)
+                                    .enabled(!empty && !saving),
+                            )
                             .on_hover_text("Write every over listed into a folder, as Opus")
                             .clicked()
                         {
@@ -488,7 +504,11 @@ impl CallList<'_> {
                         // was: filter to a group and this is what was said
                         // on it, with the waiting taken out.
                         if ui
-                            .add_enabled(!empty, egui::Button::new("PLAY ALL").small())
+                            .add(
+                                egui_bench::key::Key::new("PLAY ALL")
+                                    .outline(egui_bench::theme::VALUE)
+                                    .enabled(!empty),
+                            )
                             .on_hover_text(
                                 "Play what is listed as one conversation, oldest first, up to \
                                  the newest ten minutes of it",
@@ -512,7 +532,14 @@ impl CallList<'_> {
                                 &mut self.st.filter,
                                 "talkgroup, caller, system or frequency",
                                 70.0,
-                                |ui| clear = ui.small_button("CLEAR").clicked(),
+                                |ui| {
+                                    clear = ui
+                                        .add(
+                                            egui_bench::key::Key::new("CLEAR")
+                                                .outline(egui_bench::theme::FAULT),
+                                        )
+                                        .clicked()
+                                },
                             );
                             if clear {
                                 self.st.filter.clear();
@@ -603,7 +630,7 @@ impl CallList<'_> {
                         }
                         let p = ui.painter_at(rect);
                         if n % 2 == 1 {
-                            p.rect_filled(rect, 0.0, Color32::from_rgb(0x24, 0x27, 0x2D));
+                            p.rect_filled(rect, 0.0, egui_bench::theme::PANEL);
                         }
                         // The row is the way into its own conversation: the
                         // filter narrows to that channel and talkgroup and
@@ -632,7 +659,9 @@ impl CallList<'_> {
                         let mut sub = ui.new_child(egui::UiBuilder::new().max_rect(button_at(0)));
                         sub.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                         if sub
-                            .small_button("play")
+                            .add(
+                                egui_bench::key::Key::new("play").outline(egui_bench::theme::VALUE),
+                            )
                             .on_hover_text("Play this over through the speaker")
                             .clicked()
                         {
@@ -641,7 +670,9 @@ impl CallList<'_> {
                         let mut sub = ui.new_child(egui::UiBuilder::new().max_rect(button_at(1)));
                         sub.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                         if sub
-                            .small_button("save")
+                            .add(
+                                egui_bench::key::Key::new("save").outline(egui_bench::theme::VALUE),
+                            )
                             .on_hover_text("Write this over out as a WAV")
                             .clicked()
                         {

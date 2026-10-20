@@ -205,7 +205,10 @@ impl Dashboard<'_> {
                 // once and never again, so it may not sit where the eye goes
                 // for the readings.
                 let hit = ui
-                    .add(egui::Button::new(legend("hide dashboard")).frame(false))
+                    .add(
+                        egui_bench::key::Key::new("hide dashboard")
+                            .outline(egui_bench::theme::VALUE),
+                    )
                     .on_hover_text("Stop showing this view. Settings, App turns it back on.");
                 if hit.clicked() {
                     acts.push(Action::Hide);
@@ -504,8 +507,9 @@ impl Dashboard<'_> {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| match device {
                     Some(d) => {
-                        let start = egui::Button::new(value(format!("Start {d}")).size(13.0));
-                        if ui.add(start.truncate()).on_hover_text(d).clicked() {
+                        let start = egui_bench::key::Key::new(format!("Start {d}"))
+                            .solid(egui_bench::theme::READOUT);
+                        if ui.add(start).on_hover_text(d).clicked() {
                             acts.push(Action::Start);
                         }
                     }

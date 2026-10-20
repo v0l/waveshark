@@ -66,7 +66,14 @@ impl Devices<'_> {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(12.0);
-                if devices > 0 && ui.button("Export CSV").clicked() {
+                if devices > 0
+                    && ui
+                        .add(
+                            egui_bench::key::Key::new("Export CSV")
+                                .outline(egui_bench::theme::VALUE),
+                        )
+                        .clicked()
+                {
                     act = Some(Action::Export);
                 }
                 // What the feed is doing, said on the button rather than in a
@@ -79,7 +86,10 @@ impl Devices<'_> {
                     (true, Some(s)) => format!("WiGLE: {} sent", s.sent_rows),
                     (true, None) => "WiGLE: on".into(),
                 };
-                if ui.button(label).clicked() {
+                if ui
+                    .add(egui_bench::key::Key::new(label).outline(egui_bench::theme::VALUE))
+                    .clicked()
+                {
                     act = Some(Action::Wigle);
                 }
                 let b = self.st.beacondb.status.as_ref();
@@ -89,7 +99,10 @@ impl Devices<'_> {
                     (true, Some(s)) => format!("beaconDB: {} sent", s.sent_items),
                     (true, None) => "beaconDB: on".into(),
                 };
-                if ui.button(label).clicked() {
+                if ui
+                    .add(egui_bench::key::Key::new(label).outline(egui_bench::theme::VALUE))
+                    .clicked()
+                {
                     act = Some(Action::BeaconDb);
                 }
                 if crate::build::Feature::HomeAssistant.built() {
@@ -101,17 +114,16 @@ impl Devices<'_> {
                         (true, Some(s)) => format!("Home Assistant: {} devices", s.devices),
                         (true, None) => "Home Assistant: on".into(),
                     };
-                    if ui.button(label).clicked() {
+                    if ui
+                        .add(egui_bench::key::Key::new(label).outline(egui_bench::theme::VALUE))
+                        .clicked()
+                    {
                         act = Some(Action::HomeAssistant);
                     }
                 }
-                egui_bench::form::clipboard_menu(
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.st.filter)
-                            .hint_text("filter")
-                            .desired_width(160.0),
-                    ),
-                );
+                ui.allocate_ui(egui::vec2(180.0, 24.0), |ui| {
+                    egui_bench::form::field(ui, &mut self.st.filter, "filter");
+                });
                 // The switch that fills this pane, on the pane: the same
                 // value Setup shows beside the GPS, since the position is
                 // what a survey is for, but this is where its absence is

@@ -102,7 +102,13 @@ impl Keys<'_> {
                             .size(11.0)
                             .show(ui);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("forget").clicked() {
+                            if ui
+                                .add(
+                                    egui_bench::key::Key::new("forget")
+                                        .outline(egui_bench::theme::FAULT),
+                                )
+                                .clicked()
+                            {
                                 forget = Some((c.system, c.name.clone()));
                             }
                         });
@@ -120,27 +126,26 @@ impl Keys<'_> {
                                 ui.selectable_value(&mut self.st.new_system, s, s.as_str());
                             }
                         });
-                    egui_bench::form::clipboard_menu(
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.st.new_name)
-                                .hint_text(match self.st.new_system {
-                                    System::Dmr => "talkgroup, or * for all",
-                                    _ => "channel name",
-                                })
-                                .desired_width(120.0),
-                        ),
-                    );
-                    egui_bench::form::clipboard_menu(
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.st.new_key)
-                                .hint_text(match self.st.new_system {
-                                    System::Dmr => "basic privacy key number, 1 to 255",
-                                    _ => "key: hex or base64",
-                                })
-                                .desired_width(240.0)
-                                .font(egui::FontId::monospace(12.0)),
-                        ),
-                    );
+                    ui.allocate_ui(egui::vec2(140.0, 24.0), |ui| {
+                        egui_bench::form::field(
+                            ui,
+                            &mut self.st.new_name,
+                            match self.st.new_system {
+                                System::Dmr => "talkgroup, or * for all",
+                                _ => "channel name",
+                            },
+                        );
+                    });
+                    ui.allocate_ui(egui::vec2(260.0, 24.0), |ui| {
+                        egui_bench::form::field(
+                            ui,
+                            &mut self.st.new_key,
+                            match self.st.new_system {
+                                System::Dmr => "basic privacy key number, 1 to 255",
+                                _ => "key: hex or base64",
+                            },
+                        );
+                    });
                     // A DMR basic privacy key is a number the codeplug
                     // shows in decimal, so that is how it is typed.
                     let typed = self.st.new_key.trim();
@@ -149,7 +154,13 @@ impl Keys<'_> {
                         _ => decode::channel_keys::parse_key(typed),
                     };
                     let ok = key.is_some() && !self.st.new_name.trim().is_empty();
-                    if ui.add_enabled(ok, egui::Button::new("Add")).clicked()
+                    if ui
+                        .add(
+                            egui_bench::key::Key::new("Add")
+                                .outline(egui_bench::theme::VALUE)
+                                .enabled(ok),
+                        )
+                        .clicked()
                         && let Some(key) = key
                     {
                         self.st.store.insert_channel(ChannelKey {
@@ -166,16 +177,23 @@ impl Keys<'_> {
                 // Or straight out of a node on the network, which is the
                 // copy of the key that cannot be mistyped.
                 ui.horizontal(|ui| {
-                    egui_bench::form::clipboard_menu(
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.st.node_host)
-                                .hint_text("meshtastic node address, e.g. 10.0.0.5")
-                                .desired_width(240.0),
-                        ),
-                    );
+                    ui.allocate_ui(egui::vec2(260.0, 24.0), |ui| {
+                        egui_bench::form::field(
+                            ui,
+                            &mut self.st.node_host,
+                            "meshtastic node address, e.g. 10.0.0.5",
+                        );
+                    });
                     let busy = self.st.node_fetch.is_some();
                     let ok = !busy && !self.st.node_host.trim().is_empty();
-                    if ui.add_enabled(ok, egui::Button::new("Import channels")).clicked() {
+                    if ui
+                        .add(
+                            egui_bench::key::Key::new("Import channels")
+                                .outline(egui_bench::theme::VALUE)
+                                .enabled(ok),
+                        )
+                        .clicked()
+                    {
                         let host = self.st.node_host.trim().to_string();
                         self.st.node_result = None;
                         self.st.node_fetch = Some(self.rt.promise(crate::meshnode::channels(host)));
@@ -319,16 +337,17 @@ impl Keys<'_> {
             ui.horizontal(|ui| {
                 Line::new().legend("key").show(ui);
                 let buf = self.st.typing.entry(cell.tag_key()).or_default();
-                egui_bench::form::clipboard_menu(
-                    ui.add(
-                        egui::TextEdit::singleline(buf)
-                            .hint_text("hex: 8 digits for TEA1, 20 for TEA2")
-                            .desired_width(240.0)
-                            .font(egui::FontId::monospace(12.0)),
-                    ),
-                );
+                ui.allocate_ui(egui::vec2(260.0, 24.0), |ui| {
+                    egui_bench::form::field(ui, buf, "hex: 8 digits for TEA1, 20 for TEA2");
+                });
                 let parsed = crate::keystore::parse_typed_key(buf);
-                if ui.add_enabled(parsed.is_some(), egui::Button::new("Set key")).clicked()
+                if ui
+                    .add(
+                        egui_bench::key::Key::new("Set key")
+                            .outline(egui_bench::theme::VALUE)
+                            .enabled(parsed.is_some()),
+                    )
+                    .clicked()
                     && let Some(key) = parsed
                 {
                     self.cmds.push(Cmd::TetraKey { colour: cell.colour, key });
@@ -347,16 +366,17 @@ impl Keys<'_> {
                 Line::new().legend("identity").show(ui);
                 let key = format!("{}#id", cell.tag_key());
                 let buf = self.st.typing.entry(key.clone()).or_default();
-                egui_bench::form::clipboard_menu(
-                    ui.add(
-                        egui::TextEdit::singleline(buf)
-                            .hint_text("secret: 16 hex digits")
-                            .desired_width(240.0)
-                            .font(egui::FontId::monospace(12.0)),
-                    ),
-                );
+                ui.allocate_ui(egui::vec2(260.0, 24.0), |ui| {
+                    egui_bench::form::field(ui, buf, "secret: 16 hex digits");
+                });
                 let secret = parse_id_secret(buf);
-                if ui.add_enabled(secret.is_some(), egui::Button::new("Set secret")).clicked()
+                if ui
+                    .add(
+                        egui_bench::key::Key::new("Set secret")
+                            .outline(egui_bench::theme::VALUE)
+                            .enabled(secret.is_some()),
+                    )
+                    .clicked()
                     && let Some(c) = secret
                 {
                     self.cmds.push(Cmd::TetraIdSecret { colour: cell.colour, c });
@@ -367,7 +387,13 @@ impl Keys<'_> {
 
         if stored.is_some() {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Forget this key").clicked() {
+                if ui
+                    .add(
+                        egui_bench::key::Key::new("Forget this key")
+                            .outline(egui_bench::theme::FAULT),
+                    )
+                    .clicked()
+                {
                     self.st.store.remove(cell);
                     let _ = self.st.store.save();
                 }

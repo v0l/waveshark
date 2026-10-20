@@ -96,29 +96,32 @@ impl Sats<'_> {
         ui.horizontal(|ui| {
             ui.add_space(12.0);
             Line::new().legend("group").show(ui);
-            egui::ComboBox::from_id_salt("sat-group")
-                .selected_text(self.st.group.name)
-                .width(140.0)
-                .show_ui(ui, |ui| {
-                    for g in datasets::tle::GROUPS.iter().copied() {
-                        ui.selectable_value(&mut self.st.group, g, g.name);
-                    }
-                });
+            ui.allocate_ui(egui::vec2(160.0, egui_bench::key::KEY_H), |ui| {
+                egui_bench::form::choice(
+                    ui,
+                    "sat-group",
+                    &mut self.st.group,
+                    datasets::tle::GROUPS.iter().copied().map(|g| (g, g.name.to_string())),
+                );
+            });
             ui.add_space(12.0);
             Line::new().legend("above").show(ui);
             // The threshold is what makes the table readable: everything in
             // the group grazes the horizon at some point in a day, and those
             // passes are not workable.
-            egui::ComboBox::from_id_salt("sat-min-el")
-                .selected_text(format!("{:.0}\u{b0}", self.st.min_el_deg))
-                .width(70.0)
-                .show_ui(ui, |ui| {
-                    for e in [0.0, 5.0, 10.0, 20.0, 30.0, 45.0] {
-                        ui.selectable_value(&mut self.st.min_el_deg, e, format!("{e:.0}\u{b0}"));
-                    }
-                });
+            ui.allocate_ui(egui::vec2(80.0, egui_bench::key::KEY_H), |ui| {
+                egui_bench::form::choice(
+                    ui,
+                    "sat-min-el",
+                    &mut self.st.min_el_deg,
+                    [0.0, 5.0, 10.0, 20.0, 30.0, 45.0].map(|e| (e, format!("{e:.0}\u{b0}"))),
+                );
+            });
             ui.add_space(12.0);
-            if ui.button(legend("SHOW ON MAP")).clicked() {
+            if ui
+                .add(egui_bench::key::Key::new("SHOW ON MAP").outline(egui_bench::theme::VALUE))
+                .clicked()
+            {
                 acts.push(Action::ShowOnMap);
             }
         });
@@ -702,7 +705,7 @@ fn pass_card(
 
 fn point_button(ui: &mut egui::Ui) -> (bool, Rect) {
     let b = ui
-        .small_button(legend("POINT"))
+        .add(egui_bench::key::Key::new("POINT").outline(egui_bench::theme::VALUE))
         .on_hover_text("where to point an antenna at it, with what the receiver hears");
     (b.clicked(), b.rect)
 }
@@ -814,9 +817,9 @@ fn transmitter_table(
                 if is {
                     p.rect_filled(rect, 0.0, theme::ETCH);
                 } else if resp.hovered() {
-                    p.rect_filled(rect, 0.0, Color32::from_rgb(0x2A, 0x2E, 0x35));
+                    p.rect_filled(rect, 0.0, egui_bench::theme::BAND);
                 } else if n % 2 == 1 {
-                    p.rect_filled(rect, 0.0, Color32::from_rgb(0x24, 0x27, 0x2D));
+                    p.rect_filled(rect, 0.0, egui_bench::theme::PANEL);
                 }
                 if resp.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);

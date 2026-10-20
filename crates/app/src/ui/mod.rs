@@ -71,7 +71,7 @@ use egui::{
 use egui_bench::form::{modal_title, row, row_help};
 use egui_bench::meter::{Fader, Threshold};
 use egui_bench::readout::reading;
-use egui_bench::text::{Line, help, hint, legend, value};
+use egui_bench::text::{Line, help, hint};
 use egui_bench::{form, meter, panel, table, text, theme};
 use settings::RemoteEdit;
 use settings_rows::{ScannerRow, mhz_field};
@@ -684,7 +684,7 @@ fn mean_position(active: &[&crate::tracks::Track]) -> Option<(f64, f64)> {
 }
 
 /// Colour of a packet whose integrity check passed.
-const CRC_OK: Color32 = Color32::from_rgb(0x6F, 0xD1, 0x8A);
+const CRC_OK: Color32 = theme::SAFE;
 
 /// How wide a fader is drawn. The channel panel is a fixed width and every
 /// one of these rows ends in a mute button, which needs the rest of it.

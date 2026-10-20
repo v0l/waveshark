@@ -120,20 +120,29 @@ impl PointingModal<'_> {
                         elements_card(ui, sat, now);
                     });
                 footer(ui, |ui| {
-                    if ui.button(crate::i18n::t("ui.close")).clicked() {
-                        close = true;
-                    }
                     let link =
                         down.as_ref().and_then(|d| sats_pane::downlink(sat.norad, &sat.name, d));
                     match following {
                         true => {
-                            if ui.button("STOP").clicked() {
+                            if ui
+                                .add(
+                                    egui_bench::key::Key::new("STOP")
+                                        .solid(egui_bench::theme::FAULT)
+                                        .min_width(100.0),
+                                )
+                                .clicked()
+                            {
                                 out.push(Out::Stop);
                             }
                         }
                         false => {
                             let can = link.is_some() && up;
-                            let b = ui.add_enabled(can, egui::Button::new("LISTEN"));
+                            let b = ui.add(
+                                egui_bench::key::Key::new("LISTEN")
+                                    .solid(egui_bench::theme::READOUT)
+                                    .min_width(100.0)
+                                    .enabled(can),
+                            );
                             let b = match (link.is_some(), up) {
                                 (false, _) => b.on_disabled_hover_text("no downlink to listen to"),
                                 (true, false) => b.on_disabled_hover_text("not above the horizon"),
@@ -146,11 +155,34 @@ impl PointingModal<'_> {
                             }
                         }
                     }
-                    if ui.button("SHOW ON MAP").clicked() {
+                    if ui
+                        .add(
+                            egui_bench::key::Key::new("SHOW ON MAP")
+                                .outline(egui_bench::theme::VALUE),
+                        )
+                        .clicked()
+                    {
                         out.push(Out::ShowOnMap);
                     }
-                    if st.best.is_some() && ui.button("RESET BEST").clicked() {
+                    if st.best.is_some()
+                        && ui
+                            .add(
+                                egui_bench::key::Key::new("RESET BEST")
+                                    .outline(egui_bench::theme::VALUE),
+                            )
+                            .clicked()
+                    {
                         st.best = None;
+                    }
+                    if ui
+                        .add(
+                            egui_bench::key::Key::new(crate::i18n::t("ui.close"))
+                                .outline(egui_bench::theme::VALUE)
+                                .min_width(100.0),
+                        )
+                        .clicked()
+                    {
+                        close = true;
                     }
                 });
             });

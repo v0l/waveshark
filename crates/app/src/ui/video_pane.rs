@@ -469,7 +469,10 @@ impl Osd {
         if let Some((what, dir)) = &self.saved {
             ui.horizontal(|ui| {
                 Line::new().legend(what).show(ui).on_hover_text(dir.clone());
-                if ui.small_button("OPEN").clicked() {
+                if ui
+                    .add(egui_bench::key::Key::new("OPEN").outline(egui_bench::theme::VALUE))
+                    .clicked()
+                {
                     ui.ctx().open_url(egui::OpenUrl::new_tab(format!("file://{dir}")));
                 }
             });
@@ -642,7 +645,7 @@ fn table(ui: &mut egui::Ui, rows: &[Row], chosen: &Pick) -> Option<Pick> {
                     }
                     let p = ui.painter_at(rect);
                     if n % 2 == 1 {
-                        p.rect_filled(rect, 0.0, Color32::from_rgb(0x24, 0x27, 0x2D));
+                        p.rect_filled(rect, 0.0, egui_bench::theme::PANEL);
                     }
                     if resp.hovered() {
                         p.rect_filled(rect, 0.0, theme::WELL);

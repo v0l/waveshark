@@ -237,11 +237,17 @@ impl Log<'_> {
                 });
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("CLEAR").clicked() {
+                if ui
+                    .add(egui_bench::key::Key::new("CLEAR").outline(egui_bench::theme::FAULT))
+                    .clicked()
+                {
                     self.st.decodes.clear();
                     self.st.selected = None;
                 }
-                if ui.button("SETTINGS").clicked() {
+                if ui
+                    .add(egui_bench::key::Key::new("SETTINGS").outline(egui_bench::theme::VALUE))
+                    .clicked()
+                {
                     self.acts.push(Action::Open(Settings::PacketLog));
                 }
 
@@ -249,7 +255,10 @@ impl Log<'_> {
                 // drawn: it sits in a row of named buttons with room for a
                 // word, and no glyph says "the table deciding what decodes
                 // where" without being learned first.
-                if ui.button("SCANNERS").clicked() {
+                if ui
+                    .add(egui_bench::key::Key::new("SCANNERS").outline(egui_bench::theme::VALUE))
+                    .clicked()
+                {
                     self.acts.push(Action::Open(Settings::Scanners));
                 }
             });
@@ -340,9 +349,9 @@ impl Log<'_> {
             if on {
                 p.rect_filled(rect, 0.0, theme::ETCH);
             } else if resp.hovered() {
-                p.rect_filled(rect, 0.0, Color32::from_rgb(0x2A, 0x2E, 0x35));
+                p.rect_filled(rect, 0.0, egui_bench::theme::BAND);
             } else if n % 2 == 1 {
-                p.rect_filled(rect, 0.0, Color32::from_rgb(0x24, 0x27, 0x2D));
+                p.rect_filled(rect, 0.0, egui_bench::theme::PANEL);
             }
             if resp.clicked() {
                 clicked = Some(log.id);

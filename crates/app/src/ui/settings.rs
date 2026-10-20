@@ -7,6 +7,7 @@ use super::*;
 use crate::agent::config::{Reading, Speech};
 use crate::build::Feature;
 use egui_bench::form::{choice, field, field_then, footer, prose, row, row_help, secret, switch};
+use egui_bench::meter::progress;
 use egui_bench::panel::{card, section, tabs};
 use egui_bench::readout::reading;
 use egui_bench::text::hint;
@@ -136,7 +137,14 @@ impl App {
                     Settings::App => self.app_settings(ui),
                 }
                 footer(ui, |ui| {
-                    if ui.button(crate::i18n::t("ui.close")).clicked() {
+                    if ui
+                        .add(
+                            egui_bench::key::Key::new(crate::i18n::t("ui.close"))
+                                .outline(egui_bench::theme::VALUE)
+                                .min_width(100.0),
+                        )
+                        .clicked()
+                    {
                         self.open = None;
                     }
                 });
@@ -195,7 +203,10 @@ impl App {
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     if ui
-                                        .small_button("×")
+                                        .add(
+                                            egui_bench::key::Key::new("×")
+                                                .outline(egui_bench::theme::VALUE),
+                                        )
                                         .on_hover_text("forget this channel")
                                         .clicked()
                                     {
@@ -206,7 +217,14 @@ impl App {
                                     } else {
                                         "tune to this channel and put it on the strip"
                                     };
-                                    if ui.small_button("RECALL").on_hover_text(tip).clicked() {
+                                    if ui
+                                        .add(
+                                            egui_bench::key::Key::new("RECALL")
+                                                .outline(egui_bench::theme::VALUE),
+                                        )
+                                        .on_hover_text(tip)
+                                        .clicked()
+                                    {
                                         recall = Some(s.clone());
                                     }
                                 },
@@ -229,7 +247,11 @@ impl App {
             ui.horizontal(|ui| {
                 let busy = self.memory_io.is_some();
                 if ui
-                    .add_enabled(!busy, egui::Button::new("IMPORT"))
+                    .add(
+                        egui_bench::key::Key::new("IMPORT")
+                            .outline(egui_bench::theme::VALUE)
+                            .enabled(!busy),
+                    )
                     .on_hover_text(
                         "a Chirp or plain CSV, a PortaPack Freqman .TXT, an SDR# \
                              frequencies.xml, or a waveshark channels file",
@@ -239,7 +261,11 @@ impl App {
                     self.import_channels(ui.ctx());
                 }
                 if ui
-                    .add_enabled(!busy && !self.memory.list.is_empty(), egui::Button::new("EXPORT"))
+                    .add(
+                        egui_bench::key::Key::new("EXPORT")
+                            .outline(egui_bench::theme::VALUE)
+                            .enabled(!busy && !self.memory.list.is_empty()),
+                    )
                     .on_hover_text("the whole bank as a Chirp CSV")
                     .clicked()
                 {
@@ -486,7 +512,13 @@ impl App {
                     match st.holding {
                         true => {
                             panel::status(ui, true, &format!("held at {at}"));
-                            if ui.button("RESUME").clicked() {
+                            if ui
+                                .add(
+                                    egui_bench::key::Key::new("RESUME")
+                                        .outline(egui_bench::theme::VALUE),
+                                )
+                                .clicked()
+                            {
                                 acts.push(Cmd::StageParam(
                                     crate::chain::derived::SCAN,
                                     "holding".into(),
@@ -528,7 +560,13 @@ impl App {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if ui.button("IGNORE").clicked() {
+                                    if ui
+                                        .add(
+                                            egui_bench::key::Key::new("IGNORE")
+                                                .outline(egui_bench::theme::VALUE),
+                                        )
+                                        .clicked()
+                                    {
                                         let mut list: Vec<String> =
                                             st.ignore.iter().map(nodes::Key::label).collect();
                                         list.push(f.key.label());
@@ -538,7 +576,13 @@ impl App {
                                             pipeline::ParamValue::Text(list.join(",")),
                                         ));
                                     }
-                                    if ui.button("TUNE").clicked() {
+                                    if ui
+                                        .add(
+                                            egui_bench::key::Key::new("TUNE")
+                                                .outline(egui_bench::theme::VALUE),
+                                        )
+                                        .clicked()
+                                    {
                                         tune_to = Some(mhz);
                                     }
                                 },
@@ -647,7 +691,9 @@ impl App {
                     None => panel::status(ui, false, "the dial stays where you put it"),
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    open_walk = ui.button("WALK").clicked();
+                    open_walk = ui
+                        .add(egui_bench::key::Key::new("WALK").outline(egui_bench::theme::VALUE))
+                        .clicked();
                 });
             });
         });
@@ -728,10 +774,10 @@ impl App {
                             });
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("REMOVE").clicked() {
+                            if ui.add(egui_bench::key::Key::new("REMOVE").outline(egui_bench::theme::FAULT)).clicked() {
                                 remove = Some(i);
                             }
-                            if ui.add_enabled(!on, egui::Button::new("TUNE")).clicked() {
+                            if ui.add(egui_bench::key::Key::new("TUNE").outline(egui_bench::theme::VALUE).enabled(!on)).clicked() {
                                 tune_to = Some(middle);
                             }
                         });
@@ -818,12 +864,16 @@ impl App {
         }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if ui.button("ADD").clicked() {
+            if ui.add(egui_bench::key::Key::new("ADD").outline(egui_bench::theme::VALUE)).clicked()
+            {
                 // Starts on the frequency being looked at, since wanting a
                 // scanner here is why the pane is open.
                 rows.push(ScannerRow::new_at(center, rate));
             }
-            if ui.button("DEFAULTS").clicked() {
+            if ui
+                .add(egui_bench::key::Key::new("DEFAULTS").outline(egui_bench::theme::VALUE))
+                .clicked()
+            {
                 rows = crate::scanners::Scanners::default()
                     .list
                     .iter()
@@ -837,7 +887,14 @@ impl App {
                 // frequency has to take effect without a retune. Saved
                 // either way, since the table is configuration. It only
                 // reaches the graph when the graph is the table's to build.
-                if ui.add_enabled(dirty, egui::Button::new("SAVE")).clicked() {
+                if ui
+                    .add(
+                        egui_bench::key::Key::new("SAVE")
+                            .outline(egui_bench::theme::VALUE)
+                            .enabled(dirty),
+                    )
+                    .clicked()
+                {
                     let _ = table.save();
                     self.scanners = table.clone();
                     self.send(Cmd::Scanners(table.clone()));
@@ -845,7 +902,14 @@ impl App {
                 if self.chain.edit.manual {
                     Line::new().note(crate::i18n::t("ui.manual_locked")).size(11.0).show(ui);
                 }
-                if ui.add_enabled(dirty, egui::Button::new("REVERT")).clicked() {
+                if ui
+                    .add(
+                        egui_bench::key::Key::new("REVERT")
+                            .outline(egui_bench::theme::VALUE)
+                            .enabled(dirty),
+                    )
+                    .clicked()
+                {
                     rows = self.scanners.list.iter().map(ScannerRow::from_scanner).collect();
                 }
                 if dirty {
@@ -906,7 +970,10 @@ impl App {
                 |ui| {
                     let mut ask = false;
                     field_then(ui, &mut c.url, crate::agent::config::DEFAULT_URL, 60.0, |ui| {
-                        ask = ui.small_button("ASK").on_hover_text("List what it serves").clicked();
+                        ask = ui
+                            .add(egui_bench::key::Key::new("ASK").outline(egui_bench::theme::VALUE))
+                            .on_hover_text("List what it serves")
+                            .clicked();
                     });
                     if ask {
                         served::fetch(&c.url, &c.key, true);
@@ -1079,7 +1146,10 @@ impl App {
                                 60.0,
                                 |ui| {
                                     ask = ui
-                                        .small_button("ASK")
+                                        .add(
+                                            egui_bench::key::Key::new("ASK")
+                                                .outline(egui_bench::theme::VALUE),
+                                        )
                                         .on_hover_text("List what it serves")
                                         .clicked();
                                 },
@@ -1192,7 +1262,10 @@ impl App {
                                     60.0,
                                     |ui| {
                                         ask = ui
-                                            .small_button("ASK")
+                                            .add(
+                                                egui_bench::key::Key::new("ASK")
+                                                    .outline(egui_bench::theme::VALUE),
+                                            )
                                             .on_hover_text("List what it serves")
                                             .clicked();
                                     },
@@ -1350,7 +1423,9 @@ impl App {
             row_help(ui, "folder", "Where the files go. Enter or SET applies it.", |ui| {
                 let mut set = false;
                 let r = field_then(ui, &mut self.log_dir_edit, "where the files go", 44.0, |ui| {
-                    set = ui.small_button("SET").clicked();
+                    set = ui
+                        .add(egui_bench::key::Key::new("SET").outline(egui_bench::theme::VALUE))
+                        .clicked();
                 });
                 let typed = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if (typed || set) && !self.log_dir_edit.trim().is_empty() {
@@ -1397,7 +1472,13 @@ impl App {
                 ui.horizontal(|ui| {
                     Line::new().value(f.address()).size(12.0).legend(f.kind.name).show(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("REMOVE").clicked() {
+                        if ui
+                            .add(
+                                egui_bench::key::Key::new("REMOVE")
+                                    .outline(egui_bench::theme::FAULT),
+                            )
+                            .clicked()
+                        {
                             remove = Some(i);
                         }
                     });
@@ -1412,17 +1493,23 @@ impl App {
                 let mut add = false;
                 let mut kind = self.feed_kind;
                 field_then(ui, &mut self.feed_host, "host, or host:port", 150.0, |ui| {
-                    egui::ComboBox::from_id_salt("feed_kind")
-                        .selected_text(kind.name)
-                        .width(90.0)
-                        .show_ui(ui, |ui| {
-                            for k in nodes::FEED_KINDS {
-                                if ui.selectable_label(kind.name == k.name, k.name).clicked() {
-                                    kind = k;
-                                }
-                            }
-                        });
-                    add = ui.button("ADD").clicked();
+                    ui.allocate_ui(egui::vec2(90.0, egui_bench::key::KEY_H), |ui| {
+                        let mut at =
+                            nodes::FEED_KINDS.iter().position(|k| k.name == kind.name).unwrap_or(0);
+                        egui_bench::form::choice(
+                            ui,
+                            "feed_kind",
+                            &mut at,
+                            nodes::FEED_KINDS
+                                .iter()
+                                .enumerate()
+                                .map(|(i, k)| (i, k.name.to_string())),
+                        );
+                        kind = nodes::FEED_KINDS[at];
+                    });
+                    add = ui
+                        .add(egui_bench::key::Key::new("ADD").outline(egui_bench::theme::VALUE))
+                        .clicked();
                 });
                 self.feed_kind = kind;
                 if add {
@@ -1471,7 +1558,9 @@ impl App {
                     .calls_dir_edit
                     .get_or_insert_with(|| crate::calllog::calls_dir().display().to_string());
                 let r = field_then(ui, text, "where the overs go", 44.0, |ui| {
-                    set = ui.small_button("SET").clicked();
+                    set = ui
+                        .add(egui_bench::key::Key::new("SET").outline(egui_bench::theme::VALUE))
+                        .clicked();
                 });
                 let typed = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if (typed || set) && !text.trim().is_empty() {
@@ -1925,7 +2014,9 @@ impl App {
                 });
                 let mut pressed = false;
                 let r = field_then(ui, text, "lat, lon", 44.0, |ui| {
-                    pressed = ui.small_button("SET").clicked();
+                    pressed = ui
+                        .add(egui_bench::key::Key::new("SET").outline(egui_bench::theme::VALUE))
+                        .clicked();
                 });
                 let typed = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let mut set = None;
@@ -2000,7 +2091,14 @@ impl App {
                     .show(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let label = if busy { "CHECKING" } else { t("ui.check") };
-                    if ui.add_enabled(!busy, egui::Button::new(legend(label))).clicked() {
+                    if ui
+                        .add(
+                            egui_bench::key::Key::new(label)
+                                .outline(egui_bench::theme::VALUE)
+                                .enabled(!busy),
+                        )
+                        .clicked()
+                    {
                         crate::update::check_now();
                     }
                 });
@@ -2041,7 +2139,14 @@ impl App {
                         ),
                         None => {}
                     }
-                    if !r.page.is_empty() && ui.button(legend("OPEN THE RELEASE")).clicked() {
+                    if !r.page.is_empty()
+                        && ui
+                            .add(
+                                egui_bench::key::Key::new("OPEN THE RELEASE")
+                                    .outline(egui_bench::theme::VALUE),
+                            )
+                            .clicked()
+                    {
                         ui.ctx().open_url(egui::OpenUrl::new_tab(r.page.clone()));
                     }
                 }
@@ -2063,13 +2168,15 @@ impl App {
         match crate::update::install_state() {
             Install::Idle => {
                 let label = if installer { "DOWNLOAD AND INSTALL" } else { "DOWNLOAD" };
-                if ui.button(legend(label)).clicked() {
+                if ui
+                    .add(egui_bench::key::Key::new(label).outline(egui_bench::theme::VALUE))
+                    .clicked()
+                {
                     crate::update::install(asset.clone());
                 }
             }
             Install::Fetching { got, total } => {
-                let share = if total > 0 { got as f32 / total as f32 } else { 0.0 };
-                ui.add(egui::ProgressBar::new(share).desired_height(6.0));
+                progress(ui, "", got as f32, Some(total.max(1) as f32), "");
                 reading(
                     ui,
                     "fetched",
@@ -2124,12 +2231,20 @@ impl App {
                 .is_some_and(|s: &crate::ui::state::ModemScan| s.found.is_none());
             let reserve = if named { 178.0 } else { 130.0 };
             let r = field_then(ui, text, gps::Transport::LOCAL_GPSD, reserve, |ui| {
-                pressed = ui.small_button("SET").clicked();
+                pressed = ui
+                    .add(egui_bench::key::Key::new("SET").outline(egui_bench::theme::VALUE))
+                    .clicked();
                 if named {
-                    auto = ui.small_button("AUTO").clicked();
+                    auto = ui
+                        .add(egui_bench::key::Key::new("AUTO").outline(egui_bench::theme::VALUE))
+                        .clicked();
                 }
                 if ui
-                    .add_enabled(!scanning, egui::Button::new("DETECT").small())
+                    .add(
+                        egui_bench::key::Key::new("DETECT")
+                            .outline(egui_bench::theme::VALUE)
+                            .enabled(!scanning),
+                    )
                     .on_hover_text(
                         "Opens each USB serial port in turn and asks for a modem's INFO. \
                          A port another program has open is left alone, so close it \
@@ -2231,7 +2346,11 @@ impl App {
             let usable = f.info.gps.has_receiver();
             row(ui, "modem", |ui| {
                 if ui
-                    .add_enabled(usable, egui::Button::new("USE").small())
+                    .add(
+                        egui_bench::key::Key::new("USE")
+                            .outline(egui_bench::theme::VALUE)
+                            .enabled(usable),
+                    )
                     .on_disabled_hover_text("this board has no GNSS receiver on it")
                     .clicked()
                 {
@@ -2306,7 +2425,11 @@ impl App {
                             let label = if r.busy { "CHECKING" } else { t("ui.refresh") };
                             let can = !r.busy && r.blocked.is_none();
                             if ui
-                                .add_enabled(can, egui::Button::new(legend(label)))
+                                .add(
+                                    egui_bench::key::Key::new(label)
+                                        .outline(egui_bench::theme::VALUE)
+                                        .enabled(can),
+                                )
                                 .on_hover_text(r.which.about())
                                 .clicked()
                             {
@@ -2401,7 +2524,14 @@ impl App {
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            if ui.add_enabled(!busy, egui::Button::new(legend(t("ui.refresh_all")))).clicked() {
+            if ui
+                .add(
+                    egui_bench::key::Key::new(t("ui.refresh_all"))
+                        .outline(egui_bench::theme::VALUE)
+                        .enabled(!busy),
+                )
+                .clicked()
+            {
                 // A dataset that cannot be fetched is skipped rather than
                 // failed: refresh all is a convenience, not a demand for a
                 // token.
@@ -2545,11 +2675,25 @@ impl App {
                     }
                 });
                 footer(ui, |ui| {
-                    if ui.button(crate::i18n::t("ui.close")).clicked() {
-                        close = true;
-                    }
-                    if ui.button("APPLY").clicked() {
+                    if ui
+                        .add(
+                            egui_bench::key::Key::new("APPLY")
+                                .solid(egui_bench::theme::READOUT)
+                                .min_width(100.0),
+                        )
+                        .clicked()
+                    {
                         apply = true;
+                    }
+                    if ui
+                        .add(
+                            egui_bench::key::Key::new(crate::i18n::t("ui.close"))
+                                .outline(egui_bench::theme::VALUE)
+                                .min_width(100.0),
+                        )
+                        .clicked()
+                    {
+                        close = true;
                     }
                 });
             });
@@ -2629,7 +2773,14 @@ impl App {
                     }
                 });
                 footer(ui, |ui| {
-                    if ui.button(crate::i18n::t("ui.close")).clicked() {
+                    if ui
+                        .add(
+                            egui_bench::key::Key::new(crate::i18n::t("ui.close"))
+                                .outline(egui_bench::theme::VALUE)
+                                .min_width(100.0),
+                        )
+                        .clicked()
+                    {
                         close = true;
                     }
                 });
@@ -2802,11 +2953,25 @@ impl App {
                     },
                 );
                 footer(ui, |ui| {
-                    if ui.button(crate::i18n::t("ui.close")).clicked() {
-                        close = true;
-                    }
-                    if ui.button("APPLY").clicked() {
+                    if ui
+                        .add(
+                            egui_bench::key::Key::new("APPLY")
+                                .solid(egui_bench::theme::READOUT)
+                                .min_width(100.0),
+                        )
+                        .clicked()
+                    {
                         apply = true;
+                    }
+                    if ui
+                        .add(
+                            egui_bench::key::Key::new(crate::i18n::t("ui.close"))
+                                .outline(egui_bench::theme::VALUE)
+                                .min_width(100.0),
+                        )
+                        .clicked()
+                    {
+                        close = true;
                     }
                 });
             });
@@ -2962,10 +3127,25 @@ impl App {
                         Some(_) => "CONNECTING",
                         None => "ADD",
                     };
-                    if ui.add_enabled(connecting.is_none(), egui::Button::new(label)).clicked() {
+                    if ui
+                        .add(
+                            egui_bench::key::Key::new(label)
+                                .solid(egui_bench::theme::READOUT)
+                                .min_width(100.0)
+                                .enabled(connecting.is_none()),
+                        )
+                        .clicked()
+                    {
                         add = true;
                     }
-                    if ui.button(crate::i18n::t("ui.close")).clicked() {
+                    if ui
+                        .add(
+                            egui_bench::key::Key::new(crate::i18n::t("ui.close"))
+                                .outline(egui_bench::theme::VALUE)
+                                .min_width(100.0),
+                        )
+                        .clicked()
+                    {
                         close = true;
                     }
                 });
@@ -3071,13 +3251,28 @@ impl App {
                         }
                     });
                 footer(ui, |ui| {
-                    if ui.button(crate::i18n::t("ui.close")).clicked() {
-                        close = true;
-                    }
                     let busy = d.busy() || d.sweeping();
                     let label = if busy { "CHECKING" } else { crate::i18n::t("ui.refresh") };
-                    if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
+                    if ui
+                        .add(
+                            egui_bench::key::Key::new(label)
+                                .solid(egui_bench::theme::READOUT)
+                                .min_width(100.0)
+                                .enabled(!busy),
+                        )
+                        .clicked()
+                    {
                         d.refresh();
+                    }
+                    if ui
+                        .add(
+                            egui_bench::key::Key::new(crate::i18n::t("ui.close"))
+                                .outline(egui_bench::theme::VALUE)
+                                .min_width(100.0),
+                        )
+                        .clicked()
+                    {
+                        close = true;
                     }
                 });
             });
@@ -3167,10 +3362,24 @@ impl App {
                     }
                 });
                 footer(ui, |ui| {
-                    if ui.button(if edit.to_air { "SEND" } else { "OPEN" }).clicked() {
+                    if ui
+                        .add(
+                            egui_bench::key::Key::new(if edit.to_air { "SEND" } else { "OPEN" })
+                                .solid(egui_bench::theme::READOUT)
+                                .min_width(100.0),
+                        )
+                        .clicked()
+                    {
                         open = true;
                     }
-                    if ui.button(crate::i18n::t("ui.close")).clicked() {
+                    if ui
+                        .add(
+                            egui_bench::key::Key::new(crate::i18n::t("ui.close"))
+                                .outline(egui_bench::theme::VALUE)
+                                .min_width(100.0),
+                        )
+                        .clicked()
+                    {
                         close = true;
                     }
                 });
@@ -3604,7 +3813,13 @@ impl App {
             |ui| {
                 Line::new().legend("trim").show(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    cut = ui.add_enabled(!running, egui::Button::new("TRIM")).clicked();
+                    cut = ui
+                        .add(
+                            egui_bench::key::Key::new("TRIM")
+                                .outline(egui_bench::theme::VALUE)
+                                .enabled(!running),
+                        )
+                        .clicked();
                     Line::new().note("a shorter capture beside this one").size(10.5).elided(ui);
                 });
             },
@@ -3917,7 +4132,11 @@ impl App {
             // screen and typed again is a path nobody uses.
             let dir = crate::chain::default_capture_dir();
             row(ui, "folder", |ui| {
-                if ui.small_button("OPEN").on_hover_text(dir.display().to_string()).clicked() {
+                if ui
+                    .add(egui_bench::key::Key::new("OPEN").outline(egui_bench::theme::VALUE))
+                    .on_hover_text(dir.display().to_string())
+                    .clicked()
+                {
                     // Created first: the folder does not exist until the
                     // first capture is written, and a file manager handed a
                     // missing path either opens nothing or opens somewhere
@@ -4052,7 +4271,9 @@ fn server_row(ui: &mut egui::Ui, server: &str) -> bool {
     ui.horizontal(|ui| {
         Line::new().value(server).size(13.0).show(ui);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            open = ui.small_button("PAGE").clicked();
+            open = ui
+                .add(egui_bench::key::Key::new("PAGE").outline(egui_bench::theme::VALUE))
+                .clicked();
         });
     });
     open
@@ -4079,7 +4300,9 @@ fn listed_row(ui: &mut egui::Ui, d: crate::directories::Directory) -> bool {
         };
         Line::new().value(said).size(13.0).show(ui);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            open = ui.small_button("FIND").clicked();
+            open = ui
+                .add(egui_bench::key::Key::new("FIND").outline(egui_bench::theme::VALUE))
+                .clicked();
         });
     });
     open

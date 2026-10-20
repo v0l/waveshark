@@ -53,18 +53,18 @@ impl Transcript<'_> {
                 .show(ui);
             if !self.st.log.is_empty() {
                 ui.add_space(12.0);
-                egui_bench::form::clipboard_menu(
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.st.filter)
-                            .hint_text("filter")
-                            .desired_width(160.0),
-                    ),
-                );
+                ui.allocate_ui(egui::vec2(180.0, 24.0), |ui| {
+                    egui_bench::form::field(ui, &mut self.st.filter, "filter");
+                });
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(12.0);
                 if ui
-                    .add_enabled(!self.st.log.is_empty(), egui::Button::new("Clear transcript"))
+                    .add(
+                        egui_bench::key::Key::new("Clear transcript")
+                            .outline(egui_bench::theme::FAULT)
+                            .enabled(!self.st.log.is_empty()),
+                    )
                     .clicked()
                 {
                     act = Some(Action::Clear);
@@ -85,7 +85,13 @@ impl Transcript<'_> {
                 ui.horizontal(|ui| {
                     Line::new().legend("conversation").set(who(&key)).show(ui);
                     ui.add_space(8.0);
-                    if ui.button("Everything heard").clicked() {
+                    if ui
+                        .add(
+                            egui_bench::key::Key::new("Everything heard")
+                                .outline(egui_bench::theme::VALUE),
+                        )
+                        .clicked()
+                    {
                         self.st.only = None;
                     }
                 });
@@ -395,7 +401,14 @@ impl Transcript<'_> {
                             } else {
                                 "Download and load the model"
                             };
-                            if ui.add_enabled(!asked, egui::Button::new(label)).clicked() {
+                            if ui
+                                .add(
+                                    egui_bench::key::Key::new(label)
+                                        .outline(egui_bench::theme::VALUE)
+                                        .enabled(!asked),
+                                )
+                                .clicked()
+                            {
                                 want.borrow_mut().1 = true;
                             }
                             if !e.health.present {
@@ -501,7 +514,7 @@ fn row(
     }
     let p = ui.painter_at(rect);
     if n % 2 == 1 {
-        p.rect_filled(rect, 0.0, Color32::from_rgb(0x24, 0x27, 0x2D));
+        p.rect_filled(rect, 0.0, egui_bench::theme::PANEL);
     }
     if live {
         p.rect_filled(

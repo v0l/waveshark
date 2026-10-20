@@ -231,12 +231,12 @@ impl Chain<'_> {
             for side in [ChainSide::Rx, ChainSide::Tx] {
                 let on = self.st.side == side;
                 let enabled = side == ChainSide::Rx || has_tx;
-                let w = egui::Button::new(side.label()).fill(if on {
-                    theme::READOUT
+                let key = if on {
+                    egui_bench::key::Key::new(side.label()).solid(egui_bench::theme::READOUT)
                 } else {
-                    theme::WELL
-                });
-                let r = ui.add_enabled(enabled, w);
+                    egui_bench::key::Key::new(side.label()).outline(egui_bench::theme::VALUE)
+                };
+                let r = ui.add(key.enabled(enabled));
                 let r = match side {
                     ChainSide::Rx => r.on_hover_text("The chain the receiver is running"),
                     ChainSide::Tx => r.on_hover_text("The chain that is transmitting"),
@@ -250,14 +250,18 @@ impl Chain<'_> {
         });
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(self.st.edit.moved(), egui::Button::new("ARRANGE"))
+                .add(
+                    egui_bench::key::Key::new("ARRANGE")
+                        .outline(egui_bench::theme::VALUE)
+                        .enabled(self.st.edit.moved()),
+                )
                 .on_hover_text("Lay the stages out again from the graph")
                 .clicked()
             {
                 self.st.edit.arrange();
             }
             if ui
-                .button("FIT")
+                .add(egui_bench::key::Key::new("FIT").outline(egui_bench::theme::VALUE))
                 .on_hover_text(
                     "Show the whole graph. Ctrl and the wheel zoom, the wheel or a drag pans",
                 )
@@ -267,9 +271,10 @@ impl Chain<'_> {
             }
             let picked = self.st.pick.filter(|id| self.st.patch.stage(*id).is_some());
             if ui
-                .add_enabled(
-                    self.st.edit.manual && (picked.is_some() || self.st.wire.is_some()),
-                    egui::Button::new("REMOVE"),
+                .add(
+                    egui_bench::key::Key::new("REMOVE").outline(egui_bench::theme::FAULT).enabled(
+                        self.st.edit.manual && (picked.is_some() || self.st.wire.is_some()),
+                    ),
                 )
                 .on_hover_text("Delete")
                 .clicked()
@@ -285,21 +290,33 @@ impl Chain<'_> {
         });
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(!self.st.undo.is_empty(), egui::Button::new("UNDO"))
+                .add(
+                    egui_bench::key::Key::new("UNDO")
+                        .outline(egui_bench::theme::VALUE)
+                        .enabled(!self.st.undo.is_empty()),
+                )
                 .on_hover_text("Ctrl+Z")
                 .clicked()
             {
                 self.st.undo(self.cmds);
             }
             if ui
-                .add_enabled(!self.st.redo.is_empty(), egui::Button::new("REDO"))
+                .add(
+                    egui_bench::key::Key::new("REDO")
+                        .outline(egui_bench::theme::VALUE)
+                        .enabled(!self.st.redo.is_empty()),
+                )
                 .on_hover_text("Ctrl+Shift+Z")
                 .clicked()
             {
                 self.st.redo(self.cmds);
             }
             if ui
-                .add_enabled(!self.st.edits.is_empty(), egui::Button::new("CLEAR"))
+                .add(
+                    egui_bench::key::Key::new("CLEAR")
+                        .outline(egui_bench::theme::FAULT)
+                        .enabled(!self.st.edits.is_empty()),
+                )
                 .on_hover_text(
                     "Throw away every edit, settings included, and go back to the graph \
                      the receiver draws. UNDO brings them back.",
@@ -350,11 +367,11 @@ impl Chain<'_> {
             for (category, stages) in &by_category {
                 Line::new().legend(category.label()).show(ui);
                 for (name, summary) in stages {
-                    let w = egui::Button::new(egui::RichText::new(*name).size(12.0))
-                        .fill(theme::WELL)
-                        .sense(egui::Sense::click_and_drag())
-                        .min_size(egui::Vec2::new(ui.available_width(), 20.0));
-                    let r = ui.add(w).on_hover_text(*summary);
+                    let key = egui_bench::key::Key::new(*name)
+                        .outline(egui_bench::theme::VALUE)
+                        .min_width(ui.available_width());
+                    let r =
+                        ui.add(key).interact(egui::Sense::click_and_drag()).on_hover_text(*summary);
                     r.dnd_set_drag_payload(crate::chainview::Carried(name.to_string()));
                     if r.clicked() {
                         add = Some(name.to_string());

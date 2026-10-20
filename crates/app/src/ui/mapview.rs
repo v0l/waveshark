@@ -539,7 +539,7 @@ impl MapView {
                     // Held back so what is drawn over it stays the brightest
                     // thing on screen, and so it sits in the panel's palette
                     // rather than glowing white in a dark interface.
-                    Color32::from_gray(150),
+                    theme::LEGEND,
                 );
             }
         }

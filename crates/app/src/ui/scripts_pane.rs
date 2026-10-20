@@ -178,7 +178,7 @@ impl<'a> Scripts<'a> {
                     self.acts.push(Action::Hide);
                 }
                 if ui
-                    .button("REFRESH")
+                    .add(egui_bench::key::Key::new("REFRESH").outline(egui_bench::theme::VALUE))
                     .on_hover_text("Read the cache and the saved files again")
                     .clicked()
                 {
@@ -200,7 +200,7 @@ impl<'a> Scripts<'a> {
             .note("no .sub files held. Download a script repository in the data settings, or save a burst from the packet list.")
             .wrapped(ui);
         ui.add_space(6.0);
-        if ui.button("DATA").clicked() {
+        if ui.add(egui_bench::key::Key::new("DATA").outline(egui_bench::theme::VALUE)).clicked() {
             self.acts.push(Action::Open(Settings::Data));
         }
     }
@@ -367,7 +367,11 @@ impl<'a> Scripts<'a> {
                         // receiver's bookkeeping for it.
                         ui.horizontal(|ui| {
                             let go = ui
-                                .add_enabled(stop.is_none(), egui::Button::new("TX"))
+                                .add(
+                                    egui_bench::key::Key::new("TX")
+                                        .outline(egui_bench::theme::VALUE)
+                                        .enabled(stop.is_none()),
+                                )
                                 .on_hover_text(format!(
                                     "Key this file at {mhz:.4} MHz for {:.2} s",
                                     file.file.duration().as_secs_f64()
@@ -419,7 +423,7 @@ fn row_with(
     if selected {
         p.rect_filled(rect, 0.0, theme::WELL);
     } else if resp.hovered() {
-        p.rect_filled(rect, 0.0, egui::Color32::from_rgb(0x24, 0x27, 0x2D));
+        p.rect_filled(rect, 0.0, egui_bench::theme::PANEL);
     }
     let x = rect.left() + 4.0 + depth as f32 * 12.0;
     // Wide enough for the figure it is: these run to five digits, and a

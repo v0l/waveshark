@@ -74,16 +74,16 @@ impl Channels<'_> {
                 .show(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(12.0);
-                if !st.stations.is_empty() && ui.button("FORGET").clicked() {
+                if !st.stations.is_empty()
+                    && ui
+                        .add(egui_bench::key::Key::new("FORGET").outline(egui_bench::theme::FAULT))
+                        .clicked()
+                {
                     act = Some(Action::Clear);
                 }
-                egui_bench::form::clipboard_menu(
-                    ui.add(
-                        egui::TextEdit::singleline(self.filter)
-                            .hint_text("filter")
-                            .desired_width(160.0),
-                    ),
-                );
+                ui.allocate_ui(egui::vec2(180.0, 24.0), |ui| {
+                    egui_bench::form::field(ui, self.filter, "filter");
+                });
             });
         });
         ui.add_space(6.0);
@@ -236,7 +236,9 @@ fn channel_row(
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if let Some(hz) = center_hz(l.plan, l.number)
-                && ui.button("TUNE").clicked()
+                && ui
+                    .add(egui_bench::key::Key::new("TUNE").outline(egui_bench::theme::VALUE))
+                    .clicked()
             {
                 act = Some(Action::Tune(hz));
             }

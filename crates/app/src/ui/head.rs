@@ -188,7 +188,13 @@ impl App {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            if ui.small_button("×").clicked() {
+                                            if ui
+                                                .add(
+                                                    egui_bench::key::Key::new("×")
+                                                        .outline(egui_bench::theme::VALUE),
+                                                )
+                                                .clicked()
+                                            {
                                                 forget = Some(what.clone());
                                             }
                                             ui.with_layout(
@@ -572,8 +578,11 @@ impl App {
                     crate::update::platform()
                 ),
             };
-            let text = value(format!("v{}", r.version)).color(theme::OK).size(13.0);
-            open = ui.button(text).on_hover_text(hover).clicked();
+            let text = format!("v{}", r.version);
+            open = ui
+                .add(egui_bench::key::Key::new(text).outline(egui_bench::theme::OK))
+                .on_hover_text(hover)
+                .clicked();
         });
         if open {
             self.open = Some(Settings::App);

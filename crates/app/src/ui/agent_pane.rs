@@ -140,9 +140,9 @@ pub(super) fn on_the_air(ui: &mut egui::Ui, air: &AgentChannel) -> Option<usize>
                 Line::new().legend("heard").value(when).size(11.0).show(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let can = quiet && x.can_repeat();
-                    let b = egui::Button::new("SAY AGAIN").small();
+                    let b = egui_bench::key::Key::new("SAY AGAIN").outline(egui_bench::theme::VALUE).enabled(can);
                     if ui
-                        .add_enabled(can, b)
+                        .add(b)
                         .on_hover_text(
                             "Send this answer over the air again, the same words and the same voice",
                         )

@@ -232,32 +232,55 @@ pub(super) fn show(
             }
             line.elided(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("CLOSE").clicked() {
+                if ui
+                    .add(egui_bench::key::Key::new("CLOSE").outline(egui_bench::theme::VALUE))
+                    .clicked()
+                {
                     press = Some(Press::Close);
                 }
                 ui.add_space(6.0);
-                if ui.small_button("FIT").on_hover_text("Show all of it").clicked() {
+                if ui
+                    .add(egui_bench::key::Key::new("FIT").outline(egui_bench::theme::VALUE))
+                    .on_hover_text("Show all of it")
+                    .clicked()
+                {
                     press = Some(Press::Fit);
                 }
                 // Zoom as buttons as well as on the wheel: a wheel over a
                 // pane that also scrolls is a guess about which one was
                 // meant, and these are not a guess.
-                if ui.small_button("\u{2212}").on_hover_text("Further out").clicked() {
+                if ui
+                    .add(egui_bench::key::Key::new("\u{2212}").outline(egui_bench::theme::VALUE))
+                    .on_hover_text("Further out")
+                    .clicked()
+                {
                     press = Some(Press::Out);
                 }
-                if ui.small_button("+").on_hover_text("Closer in").clicked() {
+                if ui
+                    .add(egui_bench::key::Key::new("+").outline(egui_bench::theme::VALUE))
+                    .on_hover_text("Closer in")
+                    .clicked()
+                {
                     press = Some(Press::In);
                 }
                 ui.add_space(6.0);
                 if ui
-                    .add_enabled(sel.is_some(), egui::Button::new("EXPORT").small())
+                    .add(
+                        egui_bench::key::Key::new("EXPORT")
+                            .outline(egui_bench::theme::VALUE)
+                            .enabled(sel.is_some()),
+                    )
                     .on_hover_text("Write the selected stretch out as one Opus file")
                     .clicked()
                 {
                     press = Some(Press::Export);
                 }
                 if ui
-                    .add_enabled(sel.is_some(), egui::Button::new("PLAY").small())
+                    .add(
+                        egui_bench::key::Key::new("PLAY")
+                            .outline(egui_bench::theme::VALUE)
+                            .enabled(sel.is_some()),
+                    )
                     .on_hover_text("Play the selected stretch")
                     .clicked()
                 {

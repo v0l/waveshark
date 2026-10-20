@@ -127,7 +127,9 @@ pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &Reception) -> Asked {
     if let Some(a) = None::<&std::sync::Arc<common::Speech>> {
         let (peak, rms) = crate::mix::levels_db(a);
         ui.horizontal(|ui| {
-            asked.play = ui.button("PLAY").clicked();
+            asked.play = ui
+                .add(egui_bench::key::Key::new("PLAY").outline(egui_bench::theme::VALUE))
+                .clicked();
             Line::new()
                 .legend("speech")
                 .value(format!("{:.1} s", a.seconds()))
@@ -161,7 +163,7 @@ pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &Reception) -> Asked {
         ui.horizontal(|ui| {
             if rec.integrity() != common::packet::Integrity::Passed {
                 asked.sigid = ui
-                    .button("CHECK SIGID")
+                    .add(egui_bench::key::Key::new("CHECK SIGID").outline(egui_bench::theme::VALUE))
                     .on_hover_text("what the signal identification wiki lists near this burst")
                     .clicked();
             }
@@ -174,7 +176,10 @@ pub(super) fn packet_detail(ui: &mut egui::Ui, rec: &Reception) -> Asked {
                         format!("the {} timings of this burst, as heard", p.len() * 2)
                     }
                 };
-                asked.save_sub = ui.button("SAVE .SUB").on_hover_text(what).clicked();
+                asked.save_sub = ui
+                    .add(egui_bench::key::Key::new("SAVE .SUB").outline(egui_bench::theme::VALUE))
+                    .on_hover_text(what)
+                    .clicked();
             }
         });
         ui.add_space(4.0);
@@ -284,28 +289,25 @@ pub(super) fn sigid_modal(ctx: &egui::Context, rec: &Reception) -> bool {
                     });
                 }
             }
-            ui.add_space(12.0);
-            ui.separator();
-            ui.add_space(6.0);
             let o = sigid_observation(rec);
-            ui.horizontal(|ui| {
-                if ui
-                    .button("REPORT TO ARTEMIS")
-                    .on_hover_text("open a GitHub issue against the Artemis database with these measurements filled in")
-                    .clicked()
-                {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(o.artemis_issue_url()));
+            form::footer(ui, |ui| {
+                if ui.add(egui_bench::key::Key::new(crate::i18n::t("ui.close")).solid(egui_bench::theme::READOUT).min_width(100.0)).clicked() {
+                    close = true;
                 }
                 if ui
-                    .button("ADD TO SIGIDWIKI")
+                    .add(egui_bench::key::Key::new("ADD TO SIGIDWIKI").outline(egui_bench::theme::VALUE))
                     .on_hover_text("open the wiki's unidentified signal form (needs a wiki account)")
                     .clicked()
                 {
                     ui.ctx().open_url(egui::OpenUrl::new_tab(o.sigidwiki_form_url()));
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    close = ui.button(crate::i18n::t("ui.close")).clicked();
-                });
+                if ui
+                    .add(egui_bench::key::Key::new("REPORT TO ARTEMIS").outline(egui_bench::theme::VALUE))
+                    .on_hover_text("open a GitHub issue against the Artemis database with these measurements filled in")
+                    .clicked()
+                {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(o.artemis_issue_url()));
+                }
             });
         });
     close || r.should_close()

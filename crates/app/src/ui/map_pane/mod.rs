@@ -314,7 +314,7 @@ impl Map<'_> {
                     );
                     let p = ui.painter_at(rect);
                     if n % 2 == 1 {
-                        p.rect_filled(rect, 0.0, Color32::from_rgb(0x24, 0x27, 0x2D));
+                        p.rect_filled(rect, 0.0, egui_bench::theme::PANEL);
                     }
                     let dash = "-".to_string();
                     // The one column that differs by kind: an aircraft is placed

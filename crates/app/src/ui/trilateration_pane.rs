@@ -108,7 +108,10 @@ impl Trilateration<'_> {
                         egui::pos2(x, row.top() + 1.0),
                         egui::vec2(44.0, row_h - 2.0),
                     );
-                    if ui.put(at, egui::Button::new("MAP").small()).clicked() {
+                    if ui
+                        .put(at, egui_bench::key::Key::new("MAP").outline(egui_bench::theme::VALUE))
+                        .clicked()
+                    {
                         act = Some(Action::ShowOnMap(d.id));
                     }
                 }

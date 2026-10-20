@@ -50,15 +50,28 @@ impl Msgs<'_> {
             if !self.st.list.is_empty() {
                 let filter = &mut self.st.filter;
                 ui.add_space(12.0);
-                egui_bench::form::clipboard_menu(ui.add(
-                    egui::TextEdit::singleline(filter).hint_text("filter").desired_width(160.0),
-                ));
-                if !filter.is_empty() && ui.button("Clear filter").clicked() {
+                ui.allocate_ui(egui::vec2(180.0, 24.0), |ui| {
+                    egui_bench::form::field(ui, filter, "filter");
+                });
+                if !filter.is_empty()
+                    && ui
+                        .add(
+                            egui_bench::key::Key::new("Clear filter")
+                                .outline(egui_bench::theme::VALUE),
+                        )
+                        .clicked()
+                {
                     filter.clear();
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(12.0);
-                    if ui.button("Clear messages").clicked() {
+                    if ui
+                        .add(
+                            egui_bench::key::Key::new("Clear messages")
+                                .outline(egui_bench::theme::FAULT),
+                        )
+                        .clicked()
+                    {
                         act = Some(Action::Clear);
                     }
                 });
