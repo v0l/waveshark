@@ -344,7 +344,7 @@ mod tests {
         let ctx = egui::Context::default();
         crate::ui::install(&ctx);
         // No fonts exist until a frame has been run.
-        let _ = ctx.run_ui(Default::default(), |_| {});
+        ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
         let size = SIZE * GLYPH;
         for icon in ALL {
             let font = FontId::new(size, FontFamily::Name(FONT.into()));

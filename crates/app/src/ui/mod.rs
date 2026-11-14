@@ -264,6 +264,7 @@ pub struct App {
     /// Agents waiting for a picture of the window. Held rather than answered
     /// on the spot because egui hands the image back on a later frame.
     agent_shots: Vec<tokio::sync::oneshot::Sender<crate::agent::Reply>>,
+    shot_slot: std::sync::Arc<parking_lot::Mutex<Option<std::sync::Arc<egui::ColorImage>>>>,
     /// Graph edits an agent made, waiting for the rebuild that takes them:
     /// an edit that will not build is refused, and answering before the
     /// receiver has tried would be answering the wrong question.
@@ -813,6 +814,7 @@ impl Default for App {
             assistant: crate::agent::assistant::Assistant::default(),
             air: crate::agent::channel::AgentChannel::default(),
             agent_shots: Vec::new(),
+            shot_slot: Default::default(),
             agent_edits: Vec::new(),
         }
     }
@@ -2292,7 +2294,7 @@ impl App {
                 }
             };
             let mut open_settings = || settings = true;
-            let mut extras = egui_bench::agent::pane::Extras {
+            let mut extras = agent_ui::pane::Extras {
                 status: Some(Box::new(status)),
                 below: Some(Box::new(&mut below)),
                 on_model: Some(Box::new(&mut open_settings)),
@@ -3477,14 +3479,10 @@ impl App {
                 self.add_channel(95.35e6);
             }
             self.shot_sent = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+            let slot = self.shot_slot.clone();
+            ctx.request_screenshot(move |img| *slot.lock() = Some(img));
         }
-        let img = ctx.input(|i| {
-            i.events.iter().find_map(|e| match e {
-                egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                _ => None,
-            })
-        });
+        let img = self.shot_slot.lock().take();
         if let Some(img) = img {
             let (w, h) = (img.width() as u32, img.height() as u32);
             let buf: Vec<u8> =

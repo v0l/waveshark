@@ -1,7 +1,7 @@
 use super::catalog;
-use egui_bench::agent::skillset::Skill;
-use egui_bench::agent::toolkit::{Tool, Toolkit};
-use egui_bench::agent::{Backend, Welcome};
+use agent_core::skillset::Skill;
+use agent_core::toolkit::{Tool, Toolkit};
+use agent_core::{Backend, Welcome};
 use serde_json::Value;
 use std::path::Path;
 
@@ -56,8 +56,8 @@ impl Backend for Receiver {
              now, for load_skill:\n{}\n",
             catalog::BRIEF,
             workspace.display(),
-            egui_bench::agent::tools::GUIDE,
-            egui_bench::agent::skillset::listing(skills)
+            agent_core::tools::GUIDE,
+            agent_core::skillset::listing(skills)
         )
     }
 
@@ -82,7 +82,7 @@ impl Backend for Receiver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui_bench::agent::local::NAMES;
+    use agent_core::local::NAMES;
 
     #[test]
     fn the_catalogue_reaches_the_shared_agent_whole_and_clashes_with_nothing() {
@@ -94,10 +94,8 @@ mod tests {
 
     #[test]
     fn the_model_is_offered_the_receiver_and_the_workspace_tools() {
-        let offered: Vec<String> = egui_bench::agent::tools::offered(&Receiver::default())
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
+        let offered: Vec<String> =
+            agent_core::tools::offered(&Receiver::default()).into_iter().map(|s| s.name).collect();
         for want in ["status", "tune", "add_channel", "load_skill", "read_file", "request_access"] {
             assert!(offered.iter().any(|n| n == want), "{want} is not offered: {offered:?}");
         }

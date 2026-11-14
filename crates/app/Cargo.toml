@@ -22,11 +22,13 @@ winresource = "0.1"
 windows-sys = { version = "0.60", features = ["Win32_System_Console"] }
 
 [dependencies]
-eframe = "0.35"
+eframe = "0.37"
 rayon.workspace = true
-egui = "0.35"
-egui_bench = "0.5.4"
-egui-phosphor = { version = "0.13", default-features = false, features = ["regular"] }
+egui = "0.37"
+egui_bench = "0.10.0"
+agent-core = { git = "https://github.com/v0l/agentbench", optional = true }
+agent-ui = { git = "https://github.com/v0l/agentbench", optional = true }
+egui-phosphor = { package = "egui-pop-phosphor", version = "0.15", default-features = false, features = ["regular"] }
 
 common.workspace = true
 dsp.workspace = true
@@ -129,8 +131,8 @@ ffmpeg = ["nodes/ffmpeg"]
 # the operator is looking at. On by default and shipped in the release
 # binaries: nothing listens until an address is given on the command line.
 mcp = ["dep:rmcp", "dep:axum"]
-agent = ["egui_bench/agent"]
-sandbox = ["agent", "egui_bench/sandbox"]
+agent = ["dep:agent-core", "dep:agent-ui"]
+sandbox = ["agent", "agent-core/sandbox", "agent-ui/sandbox"]
 limesdr = ["dep:limesdr"]
 native = ["usb", "iqstream", "rtl_tcp", "spyserver", "kiwisdr", "homeassistant", "gps", "update", "survey", "artemis", "feeds"]
 usb = ["rtlsdr", "hackrf", "airspy", "pluto"]

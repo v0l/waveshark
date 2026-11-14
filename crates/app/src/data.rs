@@ -1309,10 +1309,12 @@ mod tests {
     #[test]
     fn a_dataset_landing_asks_the_window_for_a_frame() {
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
         set_repaint(ctx.clone());
         let ctx = REPAINT.get().expect("a window to wake").clone();
-        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        for _ in 0..5 {
+            ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
+        }
         assert!(!ctx.has_requested_repaint(), "an idle window asks for nothing");
         repaint();
         assert!(ctx.has_requested_repaint());

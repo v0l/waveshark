@@ -2103,16 +2103,19 @@ mod tests {
                     delta: egui::vec2(0.0, 1.0),
                     phase: egui::TouchPhase::Move,
                     modifiers: egui::Modifiers::NONE,
+                    source: egui::MouseWheelSource::Wheel,
                 });
             }
             let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
-            let _ = ctx.run_ui(input, |ui| {
+            ctx.run_ui(input, |ui| {
                 let out = egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.add(Fader::new(&mut volume, 0.0).width(200.0));
                     ui.add_space(2000.0);
                 });
-                scrolled = out.state.offset.y;
-            });
+                scrolled = out.state.clamped_offset().y;
+            })
+            .textures_delta
+            .clear();
         }
         assert!(volume > 0.5 && volume < 0.6, "one notch up moved the fader to {volume}");
         assert_eq!(scrolled, 0.0, "the list scrolled under the fader");

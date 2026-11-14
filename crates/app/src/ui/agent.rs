@@ -196,7 +196,7 @@ impl App {
             }
             self.agent_take(action, reply, ctx);
         }
-        self.agent_deliver_shot(ctx);
+        self.agent_deliver_shot();
     }
 
     /// Ask for a picture of the window, answered by the frame it arrives on.
@@ -205,7 +205,12 @@ impl App {
         ctx: &egui::Context,
         reply: tokio::sync::oneshot::Sender<crate::agent::Reply>,
     ) {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+        let slot = self.shot_slot.clone();
+        let wake = ctx.clone();
+        ctx.request_screenshot(move |img| {
+            *slot.lock() = Some(img);
+            wake.request_repaint();
+        });
         crate::window::repaint(ctx);
         self.agent_shots.push(reply);
     }
@@ -401,17 +406,11 @@ impl App {
     }
 
     /// Hand the image to whoever asked for one, once egui has taken it.
-    fn agent_deliver_shot(&mut self, ctx: &egui::Context) {
+    fn agent_deliver_shot(&mut self) {
         if self.agent_shots.is_empty() {
             return;
         }
-        let img = ctx.input(|i| {
-            i.events.iter().find_map(|e| match e {
-                egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                _ => None,
-            })
-        });
-        let Some(img) = img else { return };
+        let Some(img) = self.shot_slot.lock().take() else { return };
         let (w, h) = (img.width() as u32, img.height() as u32);
         let buf: Vec<u8> = img.pixels.iter().flat_map(|p| [p.r(), p.g(), p.b(), p.a()]).collect();
         // Scaled down before it is encoded. A window on a 4K display is a

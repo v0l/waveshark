@@ -1,6 +1,6 @@
 use super::config::Config;
 use crate::ui::App;
-use egui_bench::agent::{Agent, Handled, Host};
+use agent_ui::{Agent, Handled, Host};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -51,7 +51,7 @@ impl Assistant {
 }
 
 pub fn serve(app: &mut App, ctx: &egui::Context) {
-    egui_bench::agent::serve(app, ctx);
+    agent_ui::serve(app, ctx);
 }
 
 pub fn call(app: &mut App, ctx: &egui::Context, name: &str, args: &Value) -> Handled<App> {

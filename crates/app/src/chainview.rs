@@ -1988,10 +1988,24 @@ mod tests {
             let waiting = self.waiting.clone();
             let edit = &mut self.edit;
             let out = &mut act;
-            let _ = self.ctx.run_ui(input, |ui| {
-                *out =
-                    draw(ui, &topo, 0.0, None, edit, Some(&patch), None, None, &[], &[], &waiting);
-            });
+            self.ctx
+                .run_ui(input, |ui| {
+                    *out = draw(
+                        ui,
+                        &topo,
+                        0.0,
+                        None,
+                        edit,
+                        Some(&patch),
+                        None,
+                        None,
+                        &[],
+                        &[],
+                        &waiting,
+                    );
+                })
+                .textures_delta
+                .clear();
             act
         }
 
@@ -2263,9 +2277,11 @@ mod tests {
         let ctx = egui::Context::default();
         crate::ui::install(&ctx);
         let frame = |edit: &mut Edit| {
-            let _ = ctx.run_ui(Default::default(), |ui| {
+            ctx.run_ui(Default::default(), |ui| {
                 draw(ui, &topo, 0.0, None, edit, None, None, None, &[], &[], &[]);
-            });
+            })
+            .textures_delta
+            .clear();
         };
         frame(&mut edit);
         assert_eq!(edit.pos.len(), topo.nodes.len() + 1, "every stage and the span itself");

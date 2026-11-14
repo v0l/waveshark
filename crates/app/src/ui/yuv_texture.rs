@@ -349,7 +349,7 @@ fn params(yuv: Yuv) -> [u8; 32] {
 mod tests {
     use super::*;
     use common::{Matrix, Range};
-    use eframe::egui_wgpu::{Renderer, RendererOptions, SurfaceConfig};
+    use eframe::egui_wgpu::{Renderer, RendererOptions};
 
     fn gpu() -> Option<RenderState> {
         let instance =
@@ -362,16 +362,13 @@ mod tests {
         let renderer =
             Renderer::new(&device, wgpu::TextureFormat::Rgba8Unorm, RendererOptions::default());
         Some(RenderState {
+            instance,
             adapter,
             available_adapters: Vec::new(),
             device,
             queue,
             target_format: wgpu::TextureFormat::Rgba8Unorm,
             renderer: std::sync::Arc::new(egui::mutex::RwLock::new(renderer)),
-            surface_config: SurfaceConfig {
-                present_mode: wgpu::PresentMode::AutoVsync,
-                desired_maximum_frame_latency: None,
-            },
         })
     }
 
@@ -399,7 +396,7 @@ mod tests {
         gpu.queue.submit([encoder.finish()]);
         buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
         gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("the copy finishes");
-        let mapped = buffer.slice(..).get_mapped_range();
+        let mapped = buffer.slice(..).get_mapped_range().expect("the buffer is mapped");
         (0..h).flat_map(|y| mapped[y * row..y * row + w * 4].to_vec()).collect()
     }
 

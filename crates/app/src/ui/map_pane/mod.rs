@@ -544,8 +544,9 @@ mod tests {
                 events,
                 ..Default::default()
             };
-            ctx.run_ui(input, |ui| Map::track_rows(ui, &[track], now))
-                .platform_output
+            let mut out = ctx.run_ui(input, |ui| Map::track_rows(ui, &[track], now));
+            out.textures_delta.clear();
+            out.platform_output
                 .commands
                 .into_iter()
                 .filter_map(|c| match c {
