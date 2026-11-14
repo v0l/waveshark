@@ -26,8 +26,8 @@ eframe = "0.37"
 rayon.workspace = true
 egui = "0.37"
 egui_bench = "0.10.0"
-agent-core = { git = "https://github.com/v0l/agentbench", rev = "ed1c84e136b39f3086f0747ea8d737035ae21a15", optional = true }
-agent-ui = { git = "https://github.com/v0l/agentbench", rev = "ed1c84e136b39f3086f0747ea8d737035ae21a15", optional = true }
+agent-core = { git = "https://github.com/v0l/agentbench", default-features = false, rev = "887da2d11ede7b9b3c2755e390c2934fdb3f8924", optional = true }
+agent-ui = { git = "https://github.com/v0l/agentbench", default-features = false, rev = "887da2d11ede7b9b3c2755e390c2934fdb3f8924", optional = true }
 egui-phosphor = { package = "egui-pop-phosphor", version = "0.15", default-features = false, features = ["regular"] }
 
 common.workspace = true
@@ -131,7 +131,7 @@ ffmpeg = ["nodes/ffmpeg"]
 # the operator is looking at. On by default and shipped in the release
 # binaries: nothing listens until an address is given on the command line.
 mcp = ["dep:rmcp", "dep:axum"]
-agent = ["dep:agent-core", "dep:agent-ui"]
+agent = ["dep:agent-core", "dep:agent-ui", "agent-core/mcp", "agent-ui/mcp"]
 sandbox = ["agent", "agent-core/sandbox", "agent-ui/sandbox"]
 limesdr = ["dep:limesdr"]
 native = ["usb", "iqstream", "rtl_tcp", "spyserver", "kiwisdr", "homeassistant", "gps", "update", "survey", "artemis", "feeds"]
