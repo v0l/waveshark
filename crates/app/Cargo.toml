@@ -26,8 +26,8 @@ eframe = "0.37"
 rayon.workspace = true
 egui = "0.37"
 egui_bench = "0.10.0"
-agent-core = { git = "https://github.com/v0l/agentbench", optional = true }
-agent-ui = { git = "https://github.com/v0l/agentbench", optional = true }
+agent-core = { git = "https://github.com/v0l/agentbench", rev = "ed1c84e136b39f3086f0747ea8d737035ae21a15", optional = true }
+agent-ui = { git = "https://github.com/v0l/agentbench", rev = "ed1c84e136b39f3086f0747ea8d737035ae21a15", optional = true }
 egui-phosphor = { package = "egui-pop-phosphor", version = "0.15", default-features = false, features = ["regular"] }
 
 common.workspace = true
