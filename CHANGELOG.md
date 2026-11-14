@@ -9,6 +9,10 @@ the code is in the commit log.
 
 ## [Unreleased]
 
+### Fixed
+
+- rtl_tcp sources dropped by the server a moment after connecting.
+
 ## [0.5.4] - 2026-11-14
 
 ### Fixed

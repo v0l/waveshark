@@ -141,6 +141,45 @@ pub struct Device {
     /// The switches this tuner takes, which is every one but offset tuning
     /// unless the greeting named an E4000.
     offered: Vec<rtl::Switch>,
+    drain: Option<Drain>,
+}
+
+struct Drain {
+    stop: Arc<AtomicBool>,
+    join: common::thread::JoinHandle<bool>,
+}
+
+const DRAIN_POLL: common::time::Duration = common::time::Duration::from_millis(50);
+
+fn drain(mut sock: TcpStream, stop: Arc<AtomicBool>) -> bool {
+    let _ = sock.set_read_timeout(Some(DRAIN_POLL));
+    let mut scratch = vec![0u8; 1 << 16];
+    let mut odd = false;
+    while !stop.load(Ordering::Relaxed) {
+        match sock.read(&mut scratch) {
+            Ok(0) => break,
+            Ok(n) => odd ^= n % 2 == 1,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) => {}
+            Err(_) => break,
+        }
+    }
+    odd
+}
+
+impl Drop for Device {
+    fn drop(&mut self) {
+        if let Some(d) = self.drain.take() {
+            d.stop.store(true, Ordering::Relaxed);
+            let _ = self.sock.shutdown(std::net::Shutdown::Both);
+            let _ = d.join.join();
+        }
+    }
 }
 
 impl Device {
@@ -185,7 +224,9 @@ impl Device {
             streaming: Arc::new(AtomicBool::new(false)),
             switches: rtl::Switches::default(),
             offered: rtl::SWITCHES.into_iter().filter(|s| s.applies_to(tuner)).collect(),
+            drain: None,
         };
+        me.drain = Some(me.start_drain()?);
         // The same defaults the USB driver opens with: manual tuner gain,
         // because an AGC hunting moves the noise floor under wideband
         // detection, and the RTL's digital AGC off.
@@ -198,6 +239,30 @@ impl Device {
 
     pub fn address(&self) -> &str {
         &self.addr
+    }
+
+    fn start_drain(&self) -> Result<Drain> {
+        let sock = self
+            .sock
+            .try_clone()
+            .map_err(|e| Error::other(format!("rtl_tcp {}: {e}", self.addr)))?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let halt = stop.clone();
+        let join = common::thread::Builder::new()
+            .name("rtl-tcp-drain".into())
+            .spawn(move || drain(sock, halt))
+            .map_err(|e| Error::other(format!("spawn drain thread: {e}")))?;
+        Ok(Drain { stop, join })
+    }
+
+    fn stop_drain(&mut self) -> bool {
+        match self.drain.take() {
+            Some(d) => {
+                d.stop.store(true, Ordering::Relaxed);
+                d.join.join().unwrap_or(false)
+            }
+            None => false,
+        }
     }
 }
 
@@ -290,6 +355,7 @@ impl DeviceTrait for Device {
             .sock
             .try_clone()
             .map_err(|e| Error::other(format!("rtl_tcp {}: {e}", self.addr)))?;
+        let misaligned = self.stop_drain();
         sock.set_read_timeout(Some(READ_TIMEOUT))
             .map_err(|e| Error::other(format!("rtl_tcp {}: {e}", self.addr)))?;
 
@@ -305,7 +371,7 @@ impl DeviceTrait for Device {
         let join = common::thread::Builder::new()
             .name("rtl-tcp-rx".into())
             .spawn(move || {
-                if let Err(e) = pump(sock, center, rate, tx, counted, halt) {
+                if let Err(e) = pump(sock, misaligned, center, rate, tx, counted, halt) {
                     tracing::warn!("rtl_tcp {addr}: {e}");
                 }
                 streaming.store(false, Ordering::SeqCst);
@@ -325,6 +391,7 @@ impl DeviceTrait for Device {
 /// Read blocks off the socket and hand them over until told to stop.
 fn pump(
     mut sock: TcpStream,
+    misaligned: bool,
     center: Hz,
     rate: Sps,
     tx: Sender<IqBuf>,
@@ -339,6 +406,10 @@ fn pump(
     // rtl_tcp numbers nothing and reports nothing, so what went missing is
     // read off when the blocks arrived.
     let mut gaps = Gaps::new(rate);
+    if misaligned {
+        let mut half = [0u8; 1];
+        sock.read_exact(&mut half).map_err(|e| Error::other(format!("{e}")))?;
+    }
     while !stop.load(Ordering::Relaxed) {
         match sock.read_exact(&mut raw) {
             Ok(()) => {}
@@ -697,6 +768,45 @@ mod tests {
             jumps[0]
         );
         assert_eq!(s.dropped(), jumps[0], "and the same figure is what the stream reports");
+        s.stop();
+    }
+
+    fn impatient(patience: common::time::Duration) -> String {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        common::thread::spawn(move || {
+            let (mut sock, _) = l.accept().unwrap();
+            let mut hello = [0u8; GREETING];
+            hello[..4].copy_from_slice(&MAGIC);
+            hello[4..8].copy_from_slice(&6u32.to_be_bytes());
+            hello[8..12].copy_from_slice(&29u32.to_be_bytes());
+            sock.write_all(&hello).unwrap();
+            sock.set_write_timeout(Some(patience)).unwrap();
+            let mut reader = sock.try_clone().unwrap();
+            common::thread::spawn(move || {
+                let mut cmd = [0u8; 5];
+                while reader.read_exact(&mut cmd).is_ok() {}
+            });
+            let block: Vec<u8> = (0..=255u8).cycle().take(65536).collect();
+            while sock.write_all(&block).is_ok() {}
+            let _ = sock.shutdown(std::net::Shutdown::Both);
+        });
+        addr
+    }
+
+    /// rtl_tcp starts sending the moment it accepts and drops a client that
+    /// stops reading ("worker socket bye"), so a receiver that takes a
+    /// second to get from opening the radio to reading it loses the stream.
+    #[test]
+    fn a_server_that_drops_a_client_who_stops_reading_is_kept_fed_until_the_stream_starts() {
+        let addr = impatient(common::time::Duration::from_millis(300));
+        let mut d = Device::open(&addr).unwrap();
+        std::thread::sleep(common::time::Duration::from_millis(1500));
+        let mut s = d.start_rx().unwrap();
+        let mut got = 0;
+        while got < 32 << 20 {
+            got += s.read().unwrap().len() * 2;
+        }
         s.stop();
     }
 
