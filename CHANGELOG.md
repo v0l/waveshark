@@ -9,6 +9,12 @@ the code is in the commit log.
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-11-14
+
+### Fixed
+
+- The macOS build runs on a runner GitHub still offers. 0.5.3 was tagged but never published.
+
 ## [0.5.3] - 2026-11-14
 
 ### Changed
@@ -831,7 +837,8 @@ First tagged release: the auto front end over the ISM bands, Mode S, AIS,
 APRS, POCSAG, M17, DMR, TETRA, LoRa, wM-Bus and the rtl_433 sensor
 tables, with the packet log, the map, the chain view and transmit.
 
-[Unreleased]: https://github.com/v0l/waveshark/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/v0l/waveshark/compare/v0.5.4...HEAD
+[0.5.4]: https://github.com/v0l/waveshark/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/v0l/waveshark/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/v0l/waveshark/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/v0l/waveshark/compare/v0.5.0...v0.5.1
