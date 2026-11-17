@@ -26,8 +26,8 @@ eframe = "0.37"
 rayon.workspace = true
 egui = "0.37"
 egui_bench = "0.10.0"
-agent-core = { git = "https://github.com/v0l/agentbench", default-features = false, rev = "887da2d11ede7b9b3c2755e390c2934fdb3f8924", optional = true }
-agent-ui = { git = "https://github.com/v0l/agentbench", default-features = false, rev = "887da2d11ede7b9b3c2755e390c2934fdb3f8924", optional = true }
+agent-core = { git = "https://github.com/v0l/agentbench", default-features = false, rev = "8865c7f", optional = true }
+agent-ui = { git = "https://github.com/v0l/agentbench", default-features = false, rev = "8865c7f", optional = true }
 egui-phosphor = { package = "egui-pop-phosphor", version = "0.15", default-features = false, features = ["regular"] }
 
 common.workspace = true
@@ -116,6 +116,8 @@ pollster = "0.4"
 toml = "1"
 nostr-directory = { workspace = true, features = ["mock-relay"] }
 iqstream = { workspace = true, features = ["net"] }
+egui_kittest = { version = "0.37", features = ["wgpu"] }
+egui-wgpu = "0.37"
 remote = { workspace = true, features = ["iqstream", "rtl_tcp", "spyserver", "kiwisdr", "pluto"] }
 
 [features]

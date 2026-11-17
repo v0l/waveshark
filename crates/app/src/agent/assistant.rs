@@ -115,6 +115,70 @@ mod tests {
         assert_eq!(shared.rest, kept, "the voice settings are not the shared agent's to change");
     }
 
+    use agent_ui::chat::Turn;
+    use egui_kittest::Harness;
+
+    fn pane(a: Assistant) -> Harness<'static, Assistant> {
+        let mut setup = egui_kittest::wgpu::default_wgpu_setup();
+        if let egui_wgpu::WgpuSetup::CreateNew(new) = &mut setup {
+            new.instance_descriptor.flags = egui_wgpu::wgpu::InstanceFlags::empty();
+        }
+        let mut h = Harness::builder().with_size([900.0, 800.0]).wgpu_setup(setup).build_ui_state(
+            |ui, a: &mut Assistant| {
+                egui_bench::theme::install(ui.ctx());
+                a.page.show(ui);
+            },
+            a,
+        );
+        h.run_steps(4);
+        h
+    }
+
+    fn painted(h: &Harness<'_, Assistant>) -> String {
+        fn walk(s: &egui::Shape, out: &mut String) {
+            match s {
+                egui::Shape::Text(t) => {
+                    out.push_str(t.galley.text());
+                    out.push('\n');
+                }
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = String::new();
+        for c in &h.output().shapes {
+            walk(&c.shape, &mut out);
+        }
+        out.to_lowercase()
+    }
+
+    fn conversation(a: &mut Assistant) {
+        a.page.chat.config.model = "qwen3:8b".into();
+        let t = &mut a.page.chat.turns;
+        t.push(Turn::Thinking("The tower is usually on AM near 118 MHz.".into()));
+        t.push(Turn::Did {
+            name: "tune".into(),
+            args: serde_json::json!({"mhz": 118.3}).to_string(),
+            answer: Some(Ok("tuned".into())),
+        });
+        t.push(Turn::Said("Tuned to **118.3 MHz**, the tower is on AM.".into()));
+    }
+
+    #[test]
+    fn the_assistant_pane_shows_reasoning_and_a_tool_row_through_the_shared_widgets() {
+        let mut a = Assistant::default();
+        conversation(&mut a);
+        let h = pane(a);
+        let text = painted(&h);
+        assert!(text.contains("the tower is usually on am"), "the reasoning is drawn: {text}");
+        assert!(text.contains("tune"), "the tool row is drawn: {text}");
+        assert!(text.contains("118.3 mhz"), "the reply is drawn: {text}");
+        if let Ok(path) = std::env::var("ASSISTANT_SHOT") {
+            let mut h = h;
+            h.render().expect("rendered").save(path).unwrap();
+        }
+    }
+
     #[test]
     fn following_twice_does_not_rewrite_what_the_shared_agent_holds() {
         let mut a = Assistant::default();
