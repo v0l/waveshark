@@ -9,6 +9,10 @@ the code is in the commit log.
 
 ## [Unreleased]
 
+### Added
+
+- Remote ID spoofing alerts on Bluetooth aircraft that teleport or match a known spoofer.
+
 ### Fixed
 
 - rtl_tcp sources dropped by the server a moment after connecting.

@@ -78,6 +78,7 @@ pub struct BleNode {
     /// two rows on the map: one that knows where it is and one that knows
     /// what it is.
     drones: std::collections::HashMap<String, common::packet::Entity>,
+    trust: remoteid::Tracker,
 }
 
 impl Default for BleNode {
@@ -101,6 +102,7 @@ impl BleNode {
             frames: Vec::new(),
             accepted: 0,
             drones: std::collections::HashMap::new(),
+            trust: remoteid::Tracker::default(),
         }
     }
 
@@ -122,10 +124,18 @@ impl BleNode {
     /// is the join: an aircraft names itself in one advert and says where it
     /// is in the next, and only something following this channel over time
     /// knows the two came from the same transmitter.
-    fn drone_read(&mut self, pdu: &[u8], hz: common::Hz) -> Option<common::packet::Proto> {
+    fn drone_read(
+        &mut self,
+        pdu: &[u8],
+        hz: common::Hz,
+        now_ms: u64,
+    ) -> Option<common::packet::Proto> {
         let mut read = read(pdu, hz)?;
         if read.id != "opendroneid" {
             return None;
+        }
+        if let Some(alert) = self.judge(pdu, now_ms) {
+            read = read.saying(common::packet::Fact::Alert(alert));
         }
         let address = read.link.from.as_ref()?.id.clone();
         match read.subject.as_ref().filter(|e| e.space == "odid") {
@@ -141,6 +151,27 @@ impl BleNode {
             None => read.subject = self.drones.get(&address).cloned(),
         }
         Some(read)
+    }
+
+    fn judge(&mut self, pdu: &[u8], now_ms: u64) -> Option<common::packet::Alert> {
+        let adv = pdu::parse(pdu)?;
+        let mut verdict = None;
+        for s in adv.data.iter().filter(|s| s.kind == 0x16 && s.value.starts_with(&[0xfa, 0xff])) {
+            let Ok(rid) = remoteid::ble::parse_service_data(&s.value[2..]) else { continue };
+            verdict = Some(self.trust.ingest_ble(adv.address.bytes, &rid, now_ms).assessment);
+        }
+        let a = verdict?;
+        let severity = match a.verdict {
+            remoteid::Verdict::Spoofed => common::packet::Severity::Warning,
+            remoteid::Verdict::Suspicious => common::packet::Severity::Advisory,
+            remoteid::Verdict::Plausible | remoteid::Verdict::Authenticated => return None,
+        };
+        let why: Vec<&str> = a.reasons.iter().map(remoteid::Reason::name).collect();
+        Some(common::packet::Alert {
+            kind: common::packet::AlertKind::Spoofed,
+            severity,
+            text: Some(format!("Remote ID {}: {}", a.verdict.name(), why.join(", "))),
+        })
     }
 }
 
@@ -225,7 +256,8 @@ impl Simple for BleNode {
                 .keyed(common::packet::Keying::configured(common::Modulation::Gfsk))
                 .framed(common::packet::Frame::of(f.pdu.clone()))
                 .checked(common::packet::Integrity::Passed);
-            if let Some(read) = self.drone_read(&f.pdu, common::Hz(hz)) {
+            let now_ms = common::packet::now_us() / 1000;
+            if let Some(read) = self.drone_read(&f.pdu, common::Hz(hz), now_ms) {
                 p = p.decoded(read);
             }
             out.push(p);
@@ -236,6 +268,7 @@ impl Simple for BleNode {
 
     fn reset(&mut self) {
         self.drones.clear();
+        self.trust = remoteid::Tracker::default();
         self.meter.reset();
         self.det.reset();
     }
@@ -711,11 +744,11 @@ mod tests {
         // Before it has named itself, a position is a position and nothing
         // the map can file: the address is all there is.
         let hz = Hz(2_402_000_000);
-        let first = n.drone_read(&odid_advert(body.clone(), address), hz).expect("a decode");
+        let first = n.drone_read(&odid_advert(body.clone(), address), hz, 0).expect("a decode");
         assert_eq!(first.subject, None);
 
-        n.drone_read(&odid_advert(basic_id("1596F3AAAAAAAAAAAAAA"), address), hz);
-        let then = n.drone_read(&odid_advert(body.clone(), address), hz).expect("a decode");
+        n.drone_read(&odid_advert(basic_id("1596F3AAAAAAAAAAAAAA"), address), hz, 0);
+        let then = n.drone_read(&odid_advert(body.clone(), address), hz, 0).expect("a decode");
         assert_eq!(
             then.subject.as_ref().map(|e| (e.space, e.id.to_string())),
             Some(("odid", "1596F3AAAAAAAAAAAAAA".to_string())),
@@ -724,7 +757,53 @@ mod tests {
         assert!(then.placed().is_some(), "the position was lost");
 
         // Another address is another aircraft, not this one.
-        let other = n.drone_read(&odid_advert(body, [0xaa; 6]), hz).expect("a decode");
+        let other = n.drone_read(&odid_advert(body, [0xaa; 6]), hz, 0).expect("a decode");
         assert_eq!(other.subject, None);
+    }
+
+    fn location(lat: i32, lon: i32) -> Vec<u8> {
+        let mut body = vec![(1 << 4) | 2, (2 << 4) | 0x01, 90, 20, 4u8];
+        body.extend_from_slice(&lat.to_le_bytes());
+        body.extend_from_slice(&lon.to_le_bytes());
+        body.extend_from_slice(&2100u16.to_le_bytes());
+        body.extend_from_slice(&2200u16.to_le_bytes());
+        body.extend_from_slice(&2100u16.to_le_bytes());
+        body
+    }
+
+    fn alert(p: &common::packet::Proto) -> Option<&common::packet::Alert> {
+        p.facts.iter().find_map(|f| match f {
+            common::packet::Fact::Alert(a) => Some(a),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn an_aircraft_hopping_fifty_kilometres_a_second_is_flagged_spoofed() {
+        let address = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+        let hz = Hz(2_402_000_000);
+        let advert = |message: Vec<u8>, counter: u8| {
+            let mut pdu = odid_advert(message, address);
+            pdu[13] = counter;
+            pdu
+        };
+        let mut n = BleNode::default();
+        n.drone_read(&advert(basic_id("1596F3AAAAAAAAAAAAAA"), 1), hz, 0);
+        let here = n
+            .drone_read(&advert(location(533_500_000, -62_600_000), 2), hz, 1_000)
+            .expect("a decode");
+        assert_eq!(alert(&here), None, "one honest fix is not evidence of anything");
+
+        let mut there = here;
+        for (i, lat) in [538_000_000, 542_500_000, 547_000_000].into_iter().enumerate() {
+            let at = 2_000 + 1_000 * i as u64;
+            there = n
+                .drone_read(&advert(location(lat, -62_600_000), 3 + i as u8), hz, at)
+                .expect("a decode");
+        }
+        let a = alert(&there).expect("three 50 km jumps a second apart were not flagged");
+        assert_eq!(a.kind, common::packet::AlertKind::Spoofed);
+        assert_eq!(a.severity, common::packet::Severity::Warning);
+        assert_eq!(a.text.as_deref(), Some("Remote ID spoofed: teleport"));
     }
 }

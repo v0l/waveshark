@@ -165,6 +165,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 wgpu = "29"
 bytemuck = { version = "1", features = ["derive"] }
 poll-promise = { version = "0.3", features = ["tokio"] }
+remoteid = "0.3.2"
 
 [profile.release]
 opt-level = 3
