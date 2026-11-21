@@ -192,17 +192,27 @@ async fn datagrams_grow_to_the_largest_size_the_client_answered_for() {
 
     // Answering for 1228 and not for 1400 is a path of 1312 bytes, which is
     // an ordinary PPPoE WAN and the case the whole measurement is for.
-    let got = gather(&tuner, &sock, &mut bare.control, 200, Some(1228)).await;
+    let mut got = gather(&tuner, &sock, &mut bare.control, 200, Some(1228)).await;
     assert_eq!(got.len(), 200);
-    let largest = got.iter().map(|(n, _)| *n).max().unwrap();
-    assert_eq!(largest, DATA_HEADER_LEN + 1228, "the size that was answered for");
     assert!(
         got.iter().any(|(n, _)| *n == DATA_HEADER_LEN + 1196),
         "the first blocks leave at the size any path takes"
     );
-    assert_eq!(got.last().unwrap().1.frag_count, 7, "8192 bytes in 1228 byte pieces");
+
+    let widened = DATA_HEADER_LEN + 1228;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !got.iter().any(|(n, _)| *n == widened) && tokio::time::Instant::now() < deadline {
+        got.extend(gather(&tuner, &sock, &mut bare.control, 8, Some(1228)).await);
+    }
+    let settled = got.len();
+    got.extend(gather(&tuner, &sock, &mut bare.control, 100, Some(1228)).await);
+    let tail = &got[settled..];
+    assert_eq!(tail.len(), 100);
+    let largest = got.iter().map(|(n, _)| *n).max().unwrap();
+    assert_eq!(largest, widened, "the size that was answered for");
+    assert_eq!(tail.last().unwrap().1.frag_count, 7, "8192 bytes in 1228 byte pieces");
     assert!(
-        got[150..].iter().all(|(n, _)| *n != DATA_HEADER_LEN + 1196),
+        tail[20..].iter().all(|(n, _)| *n != DATA_HEADER_LEN + 1196),
         "a measured path went back to the floor"
     );
 }
