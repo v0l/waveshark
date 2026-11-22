@@ -319,10 +319,18 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
+      - name: Source archive
+        run: |
+          mkdir -p artifacts
+          name=waveshark-${GITHUB_REF_NAME}-source.tar.gz
+          git ls-files --recurse-submodules -z | tar --null -T - --transform "s,^,waveshark-${GITHUB_REF_NAME}/," -czf "artifacts/$name"
+          (cd artifacts && sha256sum "$name" > "$name.sha256")
       # The release notes are the changelog's section for this version, and
       # a tag with no section is a mistake to stop on rather than release
       # with a generated list of commit subjects.
