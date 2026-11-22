@@ -5353,6 +5353,7 @@ dependencies = [
  "pipeline",
  "poll-promise",
  "rayon",
+ "remoteid",
  "rumqttc",
  "rustfft",
  "sdr-server",
@@ -6879,6 +6880,12 @@ dependencies = [
  "tracing",
  "tungstenite",
 ]
+
+[[package]]
+name = "remoteid"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "265f4316fa34247037d01a935a715e49397cbd3a2312dedc2e03e4ba31026d8b"
 
 [[package]]
 name = "renderdoc-sys"

@@ -15,6 +15,7 @@ identify.workspace = true
 rustfft.workspace = true
 pipeline.workspace = true
 decode.workspace = true
+remoteid.workspace = true
 gps.workspace = true
 survey.workspace = true
 # AMBE/IMBE vocoder for the DMR node. Off by default: the algorithm is

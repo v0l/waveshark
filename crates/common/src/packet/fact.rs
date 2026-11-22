@@ -268,6 +268,8 @@ pub enum AlertKind {
     Civil,
     /// A deliberate test of the alerting system
     Test,
+    /// A broadcast whose own content says it is forged
+    Spoofed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
