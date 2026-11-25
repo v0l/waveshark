@@ -9,9 +9,15 @@ the code is in the commit log.
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-11-25
+
 ### Fixed
 
 - rtl_tcp sources dropped by the server a moment after connecting.
+
+### Changed
+
+- Every release now includes a source archive with its checksum.
 
 ## [0.5.4] - 2026-11-14
 
